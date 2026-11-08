@@ -31,6 +31,13 @@ const ALLOWED_ROOTS: &[&str] = &[
     "pvec_numeric",
 ];
 
+/// The one file allowed to name `pvec_container` and its writer (issue #1578). `pdf_page_to_pvec`
+/// is the mapping the server has always written through `ContainerWriter`, with a style and a cell
+/// on every polyline, and the facade's `PvecWriter::push` carries neither, so the bytes could not
+/// stay identical through it. It goes when the facade can carry both (the paint design, L4 of
+/// #1578, moves the style into the line style stream).
+const CONTAINER_EXCEPTION: &str = "src/pvec/pdf_to_pvec.rs";
+
 /// Path segments that belong to PVec's physical layout. None may appear in a PVec path.
 const PHYSICAL_SEGMENTS: &[&str] = &[
     "container",
@@ -319,11 +326,12 @@ fn no_pvec_path_under_src_is_outside_the_allowed_surface() {
     for f in src_files() {
         let src = fs::read_to_string(&f).unwrap();
         seen += pvec_paths(&src).len();
+        let rel = f.strip_prefix(root()).unwrap();
         for v in scan(&src) {
-            bad.push(format!(
-                "{}: {v}",
-                f.strip_prefix(root()).unwrap().display()
-            ));
+            if rel == Path::new(CONTAINER_EXCEPTION) && v.starts_with("pvec_container") {
+                continue;
+            }
+            bad.push(format!("{}: {v}", rel.display()));
         }
     }
     assert!(
@@ -343,6 +351,15 @@ fn only_the_semantic_crates_are_named_today() {
     let mut roots = std::collections::BTreeSet::new();
     for f in src_files() {
         for p in pvec_paths(&fs::read_to_string(&f).unwrap()) {
+            // `pvec_container` has its one file, checked by the test below.
+            if p[0] == "pvec_container" {
+                assert_eq!(
+                    f.strip_prefix(root()).unwrap(),
+                    Path::new(CONTAINER_EXCEPTION),
+                    "`pvec_container` is named outside {CONTAINER_EXCEPTION}"
+                );
+                continue;
+            }
             roots.insert(p[0].clone());
         }
     }
@@ -463,7 +480,10 @@ fn no_writer_call_is_made_outside_the_funnel() {
         let calls = writer_calls(&fs::read_to_string(&f).unwrap());
         if rel == GEOMETRY_FUNNEL {
             in_funnel = calls.len();
-        } else if !calls.is_empty() && !RASTER_WRITERS.contains(&rel.as_str()) {
+        } else if !calls.is_empty()
+            && !RASTER_WRITERS.contains(&rel.as_str())
+            && rel != CONTAINER_EXCEPTION
+        {
             bad.push(format!("{rel}: {}", calls.join(", ")));
         }
     }
@@ -574,7 +594,8 @@ fn src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation() {
 #[cfg_attr(miri, ignore)]
 fn the_pvec_dependencies_stay_semantic_and_optional() {
     let manifest = fs::read_to_string(root().join("Cargo.toml")).unwrap();
-    for physical in ["pvec-container", "pvec-stream", "pvec-codec"] {
+    // `pvec-container` is there for `CONTAINER_EXCEPTION` alone, and optional behind `pvec-write`.
+    for physical in ["pvec-stream", "pvec-codec"] {
         assert!(
             !manifest
                 .lines()
@@ -583,6 +604,24 @@ fn the_pvec_dependencies_stay_semantic_and_optional() {
             "Cargo.toml depends on `{physical}`, a physical-layout crate"
         );
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn pvec_container_is_optional_and_named_by_its_one_file() {
+    let manifest = fs::read_to_string(root().join("Cargo.toml")).unwrap();
+    assert!(
+        manifest
+            .lines()
+            .any(|l| l.starts_with("pvec-container = { workspace = true, optional = true }")),
+        "pvec-container must be an optional dependency"
+    );
+    assert!(
+        fs::read_to_string(root().join(CONTAINER_EXCEPTION))
+            .unwrap()
+            .contains("pvec_container"),
+        "the exception names nothing, so it is not needed"
+    );
 }
 
 /// P5.1 to P5.3 build the directory, in PVec. libviprs hands over boxes and builds none of it

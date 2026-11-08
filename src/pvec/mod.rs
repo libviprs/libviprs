@@ -70,6 +70,9 @@ pub mod pdf_clip;
 mod pdf_filters;
 pub mod pdf_image;
 mod pdf_image_decode;
+#[cfg(feature = "pvec-write")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
+pub mod pdf_to_pvec;
 pub mod pdf_vector;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
@@ -120,6 +123,8 @@ pub use ordering::{
     EntityId, OrderedEntity, OrderedSource, OrderingBasis, OrderingPolicy, OrderingReport,
     canonical_cmp, order_entities,
 };
+#[cfg(feature = "pvec-write")]
+pub use pdf_to_pvec::{PdfToPvecError, pdf_page_to_pvec};
 pub use pdf_vector::{
     PdfDash, PdfFillRule, PdfGcs, PdfImagePlacement, PdfLgiDict, PdfMeasure, PdfNumberFormat,
     PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance, PdfStrokeParams,
