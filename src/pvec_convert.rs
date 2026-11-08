@@ -910,21 +910,23 @@ impl<'a> PvecConversion<'a> {
                 .any(|&k| !windows[k].0.frozen_layers.is_empty())
                 && let Some(mf) = &model_flat
             {
-                // Each scope an INSERT of some leaf's path sits in is read once.
-                let mut read: BTreeSet<String> = BTreeSet::new();
+                // Each scope an INSERT of some leaf's path sits in is read once: model space, and
+                // each block definition by name, whichever instance reached it first. An INSERT's
+                // handle and layer inside a definition are the same in every instance (#1581).
+                let mut read: BTreeSet<Option<&str>> = BTreeSet::new();
                 for f in &mf.entities {
                     let steps = f.entity.provenance.block_path.steps();
                     let mut via_path = crate::pvec::InstancePath::root();
                     for (i, step) in steps.iter().enumerate() {
-                        let scope = if i == 0 {
-                            EntityScope::Layout(model.id)
-                        } else {
-                            EntityScope::BlockDefinition {
-                                name: steps[i - 1].block_name.clone(),
-                                reached_via: via_path.clone(),
-                            }
-                        };
-                        if read.insert(via_path.to_string()) {
+                        let container = i.checked_sub(1).map(|j| steps[j].block_name.as_str());
+                        if read.insert(container) {
+                            let scope = match container {
+                                None => EntityScope::Layout(model.id),
+                                Some(name) => EntityScope::BlockDefinition {
+                                    name: name.to_owned(),
+                                    reached_via: via_path.clone(),
+                                },
+                            };
                             let entities = provider
                                 .entities(&scope)
                                 .and_then(|mut c| c.collect_all())
