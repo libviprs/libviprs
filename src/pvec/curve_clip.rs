@@ -35,7 +35,15 @@
 //! `docs/adr/pvec-normalized-geometry.md`): every point comes from `Curve2d::eval`, every spline
 //! piece from `BSpline::sub_range`, and every tolerance from `Policy::V1`. A spurious crossing
 //! parameter costs nothing, because neighbours on the same side are joined again, so an edge end
-//! is matched with the policy's slack rather than missed.
+//! is matched with the policy's slack rather than missed. Edge parameters run over `[0, 1]`, so
+//! that slack is `Policy::V1`'s tolerance at unit scale.
+//!
+//! A piece that runs exactly along a clip edge has its middle on the boundary, and the even-odd
+//! ray test keeps or drops a boundary point depending on which edge it is (kept on the low side
+//! of an axis-aligned rectangle, dropped on the high side). It is a measure-zero case and the
+//! print profile does not depend on it, but a frame drawn on a viewport's own border can be cut
+//! that way. Only a whole circle or ellipse is joined across the seam of its parameter; a closed
+//! polyline, spline or composite that starts inside comes back as two pieces meeting at its start.
 
 use core::f64::consts::TAU;
 use std::fmt;
@@ -57,7 +65,9 @@ pub enum CurveClip {
     Inside,
     /// Wholly outside: nothing of it is drawn (`OutsideViewport`).
     Outside,
-    /// It crosses the clip: the pieces inside, in the order the source runs through them.
+    /// It crosses the clip: the pieces inside, in the order the source runs through them. For a
+    /// whole circle or ellipse, which has no start, the arc through the seam of its parameter
+    /// comes first.
     Split {
         /// The kept pieces.
         pieces: Vec<Curve>,
@@ -203,6 +213,7 @@ fn cut(curve: &Curve, ring: &[Point2]) -> Result<Cut, CurveClipError> {
     let scale = if matches!(curve, Curve::Line(_)) {
         let lo = params.iter().copied().fold(f64::INFINITY, f64::min);
         let hi = params.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        // One crossing or none: nothing to tell apart, so any scale does.
         if hi > lo { hi - lo } else { 1.0 }
     } else {
         domain[1] - domain[0]
@@ -329,14 +340,23 @@ fn crossings(curve: &Curve, ring: &[Point2]) -> Result<(Vec<f64>, Option<f64>), 
         Curve::Polyline(pl) => {
             let v = pl.vertices();
             let mut out = Vec::new();
+            let slack = POLICY.tol(1.0, 1.0);
             for (i, w) in v.windows(2).enumerate() {
                 let dir = w[0].vector_to(w[1]);
-                let slack = POLICY.tol(1.0, 1.0);
-                out.extend(
-                    segment_hits(w[0], dir, ring)
-                        .filter(|u| (-slack..=1.0 + slack).contains(u))
-                        .map(|u| i as f64 + u.clamp(0.0, 1.0)),
-                );
+                for u in
+                    segment_hits(w[0], dir, ring).filter(|u| (-slack..=1.0 + slack).contains(u))
+                {
+                    // A crossing the policy cannot tell from a vertex (NP-06, the rule
+                    // `Polyline::new` applies) is that vertex, or the piece built on it would
+                    // carry a degenerate first or last segment and be refused.
+                    let t = i as f64 + u.clamp(0.0, 1.0);
+                    let c = curve.eval(t)?;
+                    let snapped = [(i, w[0]), (i + 1, w[1])].into_iter().find(|(_, q)| {
+                        let mag = c.x.abs().max(c.y.abs()).max(q.x.abs()).max(q.y.abs());
+                        POLICY.degenerate_length(c.distance(*q), mag)
+                    });
+                    out.push(snapped.map_or(t, |(k, _)| k as f64));
+                }
             }
             Ok((out, None))
         }
@@ -512,6 +532,8 @@ fn spline_hits(s: &BSpline, ring: &[Point2]) -> Result<(Vec<f64>, f64), CurveCli
         }
         let mid = t0 + 0.5 * (t1 - t0);
         // Past the policy's resolution: one candidate, which costs nothing if spurious.
+        // The depth cap only bounds the recursion: 64 halvings are past f64's resolution of any
+        // domain, so the tolerance or the stalled midpoint stops it first.
         if t1 - t0 <= tol || depth >= 64 || mid <= t0 || mid >= t1 {
             return on_edge(mid, out);
         }
