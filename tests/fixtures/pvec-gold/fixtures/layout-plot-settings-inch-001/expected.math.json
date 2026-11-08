@@ -14,11 +14,11 @@
     "derivation": "AUTHORING_PARAMETERS",
     "authoring_script": "tools/authoring/author_probes.py",
     "parameter_file": "tools/authoring/params-r3/layout-plot-settings-inch-001.json",
-    "parameter_file_sha256": "39fc12fb2c4d80795c02262530ae7110d7729a83a83971ea7f2bede7053b196f",
+    "parameter_file_sha256": "f0c42e007fc0cf4fc99dcf9402cb4328a3e08361de2dfa4bb45d29243e1923c9",
     "parameters": {
       "id": "layout-plot-settings-inch-001",
       "kind": "viewport_print",
-      "description": "A layout with plot settings in inches: ANSI B (11 by 17 inches, stored as 279.4 by 431.8 millimetres), no rotation, plot scale 1:96, margins 0.25 all round, plot origin (0.5, 0.75), lineweights printed and the acad.ctb style table named. One viewport and a paper-space border line. Every plot setting has to survive.",
+      "description": "A layout with plot settings in inches: ANSI B (11 by 17 inches, stored as 279.4 by 431.8 millimetres), no rotation, plot scale 1:96, margins 0.25 mm all round and plot origin (0.5, 0.75) mm (a DWG keeps margins and origin in millimetres whatever the paper unit), lineweights printed and the acad.ctb style table named. One viewport and a paper-space border line. Every plot setting has to survive.",
       "layout": "Layout1",
       "layers": [],
       "model_curves": [

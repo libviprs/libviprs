@@ -14,11 +14,11 @@
     "derivation": "AUTHORING_PARAMETERS",
     "authoring_script": "tools/authoring/author_probes.py",
     "parameter_file": "tools/authoring/params-r3/layout-plot-settings-mm-001.json",
-    "parameter_file_sha256": "3b450988cf559db04b4a440a0032cbce8c27e8417a12df258bc5c1bfc4812f9e",
+    "parameter_file_sha256": "44e32475c18977c7eea1cb94f4cfb860d282cd8522a5d89ff257242ad6185f01",
     "parameters": {
       "id": "layout-plot-settings-mm-001",
       "kind": "viewport_print",
-      "description": "A layout with plot settings in millimetres: ISO A3 (420 by 297), landscape rotation code 1, plot scale 1:50, margins 5, 6, 7 and 8 (left, bottom, right, top), plot origin (10, 12), lineweights not printed and the monochrome.ctb style table named. One viewport and a paper-space border line. Every plot setting has to survive.",
+      "description": "A layout with plot settings in millimetres: ISO A3 (420 by 297), landscape rotation code 1, plot scale 1:50, margins 5, 6, 7 and 8 mm (left, bottom, right, top), plot origin (10, 12) mm, lineweights not printed and the monochrome.ctb style table named. One viewport and a paper-space border line. Every plot setting has to survive.",
       "layout": "Layout1",
       "layers": [],
       "model_curves": [

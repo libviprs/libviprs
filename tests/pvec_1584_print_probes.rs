@@ -20,6 +20,7 @@ use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::{ConversionReport, EntityRow, SheetSummary};
 use libviprs::pvec::{DwgProvider, ReasonCode, SourceUnit, ViewProfile};
 use libviprs::pvec_convert::{PvecConversion, PvecConvertError};
+use pvec_facade::Curve;
 use pvec_facade::unstable::Provenance;
 
 fn drawing(id: &str) -> Vec<u8> {
@@ -28,23 +29,47 @@ fn drawing(id: &str) -> Vec<u8> {
     fs::read(&p).unwrap_or_else(|e| panic!("{id} is not in the vendored corpus: {e}"))
 }
 
-fn scratch(id: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("libviprs-1584-{id}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&d);
-    fs::create_dir_all(&d).unwrap();
-    d
-}
-
 /// Converts `id` as `Layout1`; the drawings are in metres.
 fn sheet(id: &str) -> (Result<ConversionReport, PvecConvertError>, PathBuf) {
     let bytes = drawing(id);
-    let dir = scratch(id);
+    let dir = std::env::temp_dir().join(format!("libviprs-1584-{id}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
     let out = PvecConversion::new(CadSource::Bytes(&bytes), &dir.join("sheet.pvec"))
         .unit(SourceUnit::Meters)
         .view_profile(ViewProfile::print_profile("Layout1"))
         .convert()
         .map(|o| o.report);
     (out, dir)
+}
+
+/// The two ends of every line written through `viewport` (`None`: the sheet's own), read back
+/// from the artifact: its entities are the rows that carry geometry, in id order.
+fn drawn(report: &ConversionReport, dir: &Path, viewport: Option<u64>) -> Vec<[[f64; 2]; 2]> {
+    let curves = open_published(&dir.join("sheet.pvec"))
+        .unwrap()
+        .entities()
+        .unwrap();
+    let kept: Vec<&EntityRow> = report
+        .entities
+        .iter()
+        .filter(|r| r.semantic_type.is_some())
+        .collect();
+    assert_eq!(kept.len(), curves.len(), "{:#?}", report.entities);
+    kept.iter()
+        .zip(curves)
+        .filter(|(r, _)| r.source_class == "LINE" && r.viewport == viewport)
+        .map(|(_, (_, c))| {
+            let Curve::Trimmed(t) = &c else {
+                panic!("a trimmed line, not {c:?}");
+            };
+            let Curve::Line(l) = t.basis() else {
+                panic!("a trimmed line, not {c:?}");
+            };
+            let (o, d, span) = (l.origin(), l.direction(), t.trim().span);
+            [[o.x, o.y], [o.x + d.x * span, o.y + d.y * span]]
+        })
+        .collect()
 }
 
 fn summary(report: &ConversionReport) -> &SheetSummary {
@@ -142,10 +167,20 @@ fn issue_1584_a_layer_frozen_in_one_viewport_is_dropped_there_and_drawn_in_the_o
             .count(),
         1
     );
-    assert!(
-        lines(&report, Some(second))
-            .iter()
-            .all(|r| r.semantic_type.is_some())
+    // Which line is which, from the record: s = 80 / 8 = 10 about view centre (5, 1), so WALLS
+    // (y = 0) lands at y = 50 and DOORS (y = 2) at y = 70, across x = centre +- 50.
+    assert_eq!(
+        drawn(&report, &dir, Some(first)),
+        [[[10.0, 50.0], [110.0, 50.0]]],
+        "only WALLS shows through the first viewport"
+    );
+    assert_eq!(
+        drawn(&report, &dir, Some(second)),
+        [
+            [[130.0, 50.0], [230.0, 50.0]],
+            [[130.0, 70.0], [230.0, 70.0]]
+        ],
+        "WALLS and DOORS both show through the second"
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -194,17 +229,12 @@ fn issue_1584_a_no_plot_layer_is_left_out_in_model_and_in_paper_space() {
             .iter()
             .all(|r| r.semantic_type.is_none() && r.viewport.is_none())
     );
-    let drawn = |viewport: Option<u64>| {
-        lines(&report, viewport)
-            .iter()
-            .filter(|r| r.semantic_type.is_some())
-            .count()
-    };
+    // The lines on layer 0 are drawn: the paper one where it was drawn, the model one at
+    // s = 90 / 12 = 7.5 about view centre (5, 1) on the viewport centred at (100, 80).
+    assert_eq!(drawn(&report, &dir, None), [[[10.0, 10.0], [200.0, 10.0]]]);
     assert_eq!(
-        (drawn(None), drawn(Some(vp))),
-        (1, 1),
-        "{:#?}",
-        report.entities
+        drawn(&report, &dir, Some(vp)),
+        [[[62.5, 72.5], [137.5, 72.5]]]
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -220,6 +250,14 @@ fn issue_1584_plot_settings_in_millimetres_frame_and_calibrate_the_sheet() {
         ("paper", "Millimeters")
     );
     assert_eq!(s.unit_source, "plot-paper-units");
+    // The frame from today's unmeasured rule: rotation 1 swaps A3 to 297 by 420, and the lower left
+    // sits at -(margin + origin) = (-(5 + 10), -(6 + 12)). A change to the rule shows up here.
+    assert_eq!(
+        s.sheet_box
+            .as_ref()
+            .map(|b| b.clone().map(|v| v.parse::<f64>().unwrap())),
+        Some([-15.0, -18.0, 282.0, 402.0])
+    );
     // Where the paper sits from the margins and the origin is still unmeasured.
     assert_eq!(s.position.as_deref(), Some("unmeasured"));
     let plot = s.plot.as_ref().expect("the plot settings");
@@ -267,6 +305,15 @@ fn issue_1584_plot_settings_in_inches_frame_and_calibrate_the_sheet() {
     let report = out.expect("the sheet converts");
     let s = summary(&report);
     assert_eq!((s.frame.as_str(), s.unit.as_str()), ("paper", "Inches"));
+    // Margins and origin are millimetres in a DWG, so the lower left is (0.25 + 0.5, 0.25 + 0.75)
+    // mm in inches, and the paper is 279.4 by 431.8 mm, 11 by 17 inches.
+    let (x0, y0) = (0.0 - 0.75 / 25.4, 0.0 - 1.0 / 25.4);
+    assert_eq!(
+        s.sheet_box
+            .as_ref()
+            .map(|b| b.clone().map(|v| v.parse::<f64>().unwrap())),
+        Some([x0, y0, x0 + 279.4 / 25.4, y0 + 431.8 / 25.4])
+    );
     let plot = s.plot.as_ref().expect("the plot settings");
     assert_eq!(plot.style_sheet, "acad.ctb");
     assert!(plot.print_lineweights);

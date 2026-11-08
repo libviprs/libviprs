@@ -1546,8 +1546,8 @@
    "expects_rejection": false,
    "files": {
     "expected.math.json": {
-     "bytes": 7545,
-     "sha256": "dc4ce76a54e47706d2699e8406155692a163c13ebbd53eb5d145094522595b6d"
+     "bytes": 7551,
+     "sha256": "70894b714506449108f53922e947dcb06cd89b3b12ac2ceaf3286e66a796db36"
     },
     "source.dwg": {
      "bytes": 20947,
@@ -1565,8 +1565,8 @@
    "expects_rejection": false,
    "files": {
     "expected.math.json": {
-     "bytes": 7546,
-     "sha256": "ba8f51a067a0df1b1935e8dc277ef8b6b58e6b44b9a902d4ab3734d62c5ee6dd"
+     "bytes": 7627,
+     "sha256": "adc6a2468ded4df7101cb2b9236d7bb442a59375352c984711f8a5fffc5c3fe1"
     },
     "source.dwg": {
      "bytes": 20947,

@@ -33,7 +33,7 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 | `xrefs` | report-external |
 
 **4. The accepted fixture corpus revision.** `r3-open` of `libviprs/pvec-gold-fixtures`, gold commit
-`7e251ab0d3642e4e154494205a0e9fb4b505d3f9`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
+`a185ad489967d76432990c8bc1688d5b6fafeb9c`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
 `tests/common/pvec_gold.rs`.
 
 **5. The provider compatibility range.** The default provider is `acadrust`, at revision
