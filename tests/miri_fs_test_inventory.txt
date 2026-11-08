@@ -670,6 +670,12 @@ annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::points_an_affine_cann
 annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::the_viewport_that_covers_the_page_wins_over_a_smaller_one
 annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::two_control_points_give_a_similarity_with_no_residual
 annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::with_no_covering_viewport_the_largest_is_used
+annotated   fs-detected  tests/pvec_1548_lgidict.rs::a_geopdf_viewport_wins_over_the_lgidict
+annotated   fs-detected  tests/pvec_1548_lgidict.rs::another_projection_is_reported_and_not_mapped
+annotated   fs-detected  tests/pvec_1548_lgidict.rs::the_ctm_follows_the_page_rotation
+annotated   fs-detected  tests/pvec_1548_lgidict.rs::utm_north_on_wgs84_is_epsg_326_and_the_zone
+annotated   fs-detected  tests/pvec_1548_lgidict.rs::utm_on_another_datum_is_not_mapped
+annotated   fs-detected  tests/pvec_1548_lgidict.rs::utm_south_is_epsg_327_and_an_array_of_dictionaries_is_read
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs
