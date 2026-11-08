@@ -886,7 +886,8 @@ pub fn extract_page_paths_from_bytes(
             .get_dictionary(page_id)
             .ok()
             .and_then(|d| d.get(b"UserUnit").ok())
-            .and_then(number)
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| number(o))
             .unwrap_or(1.0),
     })
 }

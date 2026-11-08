@@ -15,7 +15,8 @@
 //! `declared_unit` scale of 0.0254 / 72 metres (times `/UserUnit`), or the plan scale a `/VP`
 //! viewport states (issue #1547). A GeoPDF viewport adds a georeference fitted to its control points,
 //! in the same page space as the geometry. The report's `pdf.calibration` says which viewport was
-//! used and why anything the page said was not. The manifest box is the displayed page (after `/Rotate`) grown to take in any path that leaves it.
+//! used and why anything the page said was not. The manifest box is the displayed page (after
+//! `/Rotate`) grown to take in any path that leaves it.
 //!
 //! The vectors go through the geometry funnel (`pvec::writer::open_geometry`),
 //! which is the one writer for entities, and the rasters are added to the open artifact before it is
@@ -252,6 +253,9 @@ impl<'a> PdfConversion<'a> {
                         {
                             note("rl-anisotropic");
                         }
+                        // A factor that is not a positive finite number is no scale, and would never
+                        // end the continued fraction below.
+                        Some(fx) if !(fx.is_finite() && fx > 0.0) => note("rl-refused"),
                         Some(fx) => {
                             // The paper to world ratio as the smallest fraction within one part in a million
                             // of it (PDF reals are often single precision), by continued fractions.
@@ -261,7 +265,12 @@ impl<'a> PdfConversion<'a> {
                             let mut best = None;
                             while rest.is_finite() && rest < 4.3e9 {
                                 let a = rest.floor() as u64;
-                                let (h, k) = (a * h1 + h0, a * k1 + k0);
+                                let (Some(h), Some(k)) = (
+                                    a.checked_mul(h1).and_then(|v| v.checked_add(h0)),
+                                    a.checked_mul(k1).and_then(|v| v.checked_add(k0)),
+                                ) else {
+                                    break;
+                                };
                                 if h > u64::from(u32::MAX) || k > u64::from(u32::MAX) {
                                     break;
                                 }
@@ -272,9 +281,20 @@ impl<'a> PdfConversion<'a> {
                                 }
                                 rest = 1.0 / (rest - a as f64);
                             }
-                            let mut chars = ratio.chars().filter(|c| !c.is_control());
-                            let text: String = chars
-                                .by_ref()
+                            // The note keeps what the block allows: no control, separator or
+                            // bidi character, at most 255 bytes.
+                            let text: String = ratio
+                                .chars()
+                                .filter(|c| {
+                                    !c.is_control()
+                                        && !matches!(
+                                            c,
+                                            '\u{2028}'
+                                                | '\u{2029}'
+                                                | '\u{202a}'..='\u{202e}'
+                                                | '\u{2066}'..='\u{2069}'
+                                        )
+                                })
                                 .scan(0, |len, c| {
                                     *len += c.len_utf8();
                                     (*len <= 255).then_some(c)
