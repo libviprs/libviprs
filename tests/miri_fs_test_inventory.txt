@@ -719,6 +719,7 @@ annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_each_sheet_is
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_one_failing_sheet_does_not_lose_the_others
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_the_number_is_as_wide_as_the_count_and_counts_every_paper_layout
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_the_stem_comes_from_the_file_name_and_bytes_need_one
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1583_a_blank_layout_is_empty_after_view_without_being_converted
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs

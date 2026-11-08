@@ -98,6 +98,7 @@ fn scene(bytes: &[u8]) -> Vec<String> {
         .to_vec(),
         b"MOCK-viewports" => [
             "VP paper view",
+            "VP numbered 1",
             "VP off",
             "VP hide plot",
             "VP no-plot layer",
@@ -183,8 +184,10 @@ impl DwgProvider for Mock {
     }
 
     /// One viewport on each `VP` layout, each failing one part of the rule a viewport has to meet
-    /// to make its layout a sheet, except `VP paper view` (id 1, which the set does not take to be
-    /// the paper view) and `VP model`. "Viewport only" has a VIEWPORT entity and no listed viewport.
+    /// to make its layout a sheet, except `VP numbered 1` (number 1, but a window onto the model)
+    /// and `VP model`. `VP paper view` holds only the paper view itself, number 1 showing paper
+    /// space 1:1 centred on itself (#1583). "Viewport only" has a VIEWPORT entity and no listed
+    /// viewport.
     fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
         Ok(self
             .layouts
@@ -217,7 +220,12 @@ impl DwgProvider for Mock {
                     non_rectangular_clipping: false,
                 };
                 match l.name.as_str() {
-                    "VP paper view" => v.id = 1,
+                    "VP paper view" => {
+                        v.id = 1;
+                        v.view_center = v.center;
+                        v.view_height = v.height;
+                    }
+                    "VP numbered 1" => v.id = 1,
                     "VP off" => v.visible = false,
                     "VP hide plot" => v.hide_plot = true,
                     "VP no-plot layer" => v.layer = "DEFPOINTS".into(),
@@ -664,15 +672,51 @@ fn issue_1564_a_viewport_makes_a_sheet_only_when_it_would_print() {
             outcome(name)
         );
     }
-    // A viewport that would print makes the layout a sheet, whatever its number: the set does not
-    // guess which one is the paper view, so it never calls a layout that shows the model empty.
-    for name in ["VP paper view", "VP model"] {
-        assert!(
-            !matches!(outcome(name), Err(SheetSkip::Empty | SheetSkip::Failed(_))),
-            "{name}: {:?}",
-            outcome(name)
-        );
+    // A viewport onto the model makes the layout a sheet, whatever its number.
+    for name in ["VP numbered 1", "VP model"] {
+        assert!(outcome(name).is_ok(), "{name}: {:?}", outcome(name));
     }
+    // A layout holding only its paper view is a blank sheet: listed, nothing written (#1583).
+    assert!(
+        matches!(outcome("VP paper view"), Err(SheetSkip::EmptyAfterView)),
+        "{:?}",
+        outcome("VP paper view")
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1583_a_blank_layout_is_empty_after_view_without_being_converted() {
+    // No unit anywhere: a layout that is converted fails for the want of one, but a layout holding
+    // only its paper view is told blank by the paper-view rule and never converted.
+    let dir = scratch("blank");
+    let out = PvecLayoutSet::new(CadSource::Bytes(b"MOCK-viewports"), &dir)
+        .stem("plan")
+        .convert_with::<Mock>()
+        .unwrap();
+    let sheet = |name: &str| out.sheets.iter().find(|s| s.layout == name).unwrap();
+    let blank = sheet("VP paper view");
+    assert!(
+        matches!(blank.outcome, Err(SheetSkip::EmptyAfterView)),
+        "{:?}",
+        blank.outcome
+    );
+    assert!(!blank.file.exists());
+    assert!(
+        matches!(sheet("VP model").outcome, Err(SheetSkip::Failed(_))),
+        "{:?}",
+        sheet("VP model").outcome
+    );
+    let json = index(&dir);
+    let row = json["sheets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["layout"] == "VP paper view")
+        .unwrap()
+        .clone();
+    assert_eq!(row["status"], "empty-after-view");
     fs::remove_dir_all(&dir).unwrap();
 }
 
