@@ -201,6 +201,9 @@ pub struct PdfPathEntity {
     pub paint: PdfPaintIntent,
     /// The rule of a `W` or `W*` that applied to this path.
     pub clip: Option<PdfFillRule>,
+    /// The fill colour in force when the path was painted, as sRGB (issue #1544). Black until a
+    /// colour operator sets it; a pattern or a colour space this does not know leaves it alone.
+    pub fill_colour: [u8; 3],
     /// The `sequence` of every clip-defining entity in force when this path was painted,
     /// outermost first. A path's own `W` takes effect after it is painted, so it is not in
     /// its own list. Scoped by `q`/`Q` and by Form XObject boundaries (N5.3).
@@ -1417,7 +1420,7 @@ struct Run<'a> {
     text: TextReport,
     /// The font the last `Tf` named, part of the graphics state.
     font: TextFontOutcome,
-    /// The fill colour in force as sRGB, for an image mask (issue #1332).
+    /// The fill colour in force as sRGB, for an image mask (issue #1332) and a path (issue #1544).
     fill: [u8; 3],
     /// Encoded image bytes kept so far, for `max_image_bytes`.
     image_bytes: u64,
@@ -1697,6 +1700,7 @@ impl Run<'_> {
                 close: close_first,
             },
             clip: state.clip,
+            fill_colour: self.fill,
             active_clips: self.clips.clone(),
             soft_masked: self.soft_mask,
             text_clipped: self.text_clip,

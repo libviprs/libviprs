@@ -63,6 +63,7 @@ fn entity(u: &mut Unstructured<'_>, sequence: u64) -> AResult<PdfPathEntity> {
             close: u.arbitrary()?,
         },
         clip: if u.ratio(1, 3)? { Some(rule(u)?) } else { None },
+        fill_colour: u.arbitrary()?,
         active_clips,
         soft_masked: u.arbitrary()?,
         text_clipped: u.arbitrary()?,
