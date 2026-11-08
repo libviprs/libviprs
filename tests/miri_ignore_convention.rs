@@ -877,7 +877,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1573 removes 1: `tests/pvec_drift.rs::n_1471_the_fixtures_whose_bits_differ_between_architectures_agree_within_the_numeric_policy` read the arm64 accepted dump, which is gone now both architectures agree. It said 1069 before this line moved.
 /// #1562 adds 15: the `tests/pvec_1562_paper_sheet.rs` cells that convert a sheet into a temp dir and read the artifact back. Two `tests/pvec_1559_print_profile.rs` cells are renamed, not added. It said 1068 before this line moved.
 /// #1562 adds 1 more: `tests/pvec_1562_paper_sheet.rs::issue_1562_a_decimal_ratio_that_is_not_a_binary_fraction_still_reduces`, which converts into a temp dir. It said 1083 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1084;
+/// #1564 adds 13: the `tests/pvec_1564_layout_set.rs` cells that convert a layout set into a temp dir and read its files and index back. It said 1084 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1097;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
