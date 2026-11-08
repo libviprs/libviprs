@@ -20,7 +20,6 @@ use std::path::PathBuf;
 
 use libviprs::cad::{CadSource, ItemHandle};
 use libviprs::pvec::components::StreamSelection;
-use libviprs::pvec::diagnostics::DiagnosticCode;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::{ConversionReport, EntityRow};
 use libviprs::pvec::{
@@ -503,7 +502,8 @@ fn issue_1562_lines_and_polylines_are_cut_exactly_at_the_sheet_edge() {
     }
 
     let curves = written(report, &dir);
-    assert_eq!(out.written, 6);
+    // Six, and the crossing circle's arc since curves are cut (#1565).
+    assert_eq!(out.written, 7);
     let of = |h: u64| -> Vec<&Curve> {
         curves
             .iter()
@@ -542,16 +542,17 @@ fn issue_1562_lines_and_polylines_are_cut_exactly_at_the_sheet_edge() {
 
     let sheet = report.sheet.as_ref().expect("a sheet section");
     let clip: Vec<(&str, u64)> = sheet.clip.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    // The crossing circle and the bulged polyline are cut too since #1565, one piece each.
     assert_eq!(
         clip,
-        [("crossing", 2), ("cut", 3), ("outside", 2), ("pieces", 4)]
+        [("crossing", 0), ("cut", 5), ("outside", 2), ("pieces", 6)]
     );
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_refused_with_508() {
+fn issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_cut() {
     let (out, dir) = convert("curves", clipping_sheet(), |c| c);
     let report = out.unwrap().report;
     assert_eq!(row_of(&report, INSIDE_CIRCLE).fidelity, "SupportedExact");
@@ -566,18 +567,21 @@ fn issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_refused_with_5
             "{r:?}"
         );
     }
-    for h in [CROSSING_CIRCLE, BULGED] {
-        let r = row_of(&report, h);
-        assert_eq!(r.fidelity, "Unsupported", "{r:?}");
-        assert_eq!(r.reason.as_deref(), Some("view-not-enabled"));
-        assert!(r.warnings.iter().any(|w| w.contains("sheet edge")), "{r:?}");
-        let d = report
-            .diagnostics
-            .iter()
-            .find(|d| d.handle == Some(h))
-            .expect("a diagnostic");
-        assert_eq!(d.code, DiagnosticCode::EntityUnsupported);
-        assert_eq!(d.message_id, "view-not-enabled");
+    // A curve over the sheet edge is cut exactly since curve splitting landed (#1565): every
+    // piece is a row of its own, and none is refused with 508. The circle is an arc of itself;
+    // the bulged polyline's pieces are composites, which PVec's container cannot store yet, the
+    // same as the whole polyline when it is inside.
+    let ring = rows_of(&report, CROSSING_CIRCLE);
+    assert!(!ring.is_empty());
+    for r in ring {
+        assert_eq!(r.fidelity, "SupportedExact", "{r:?}");
+        assert_eq!(r.reason, None, "{r:?}");
+    }
+    let bulged = rows_of(&report, BULGED);
+    assert!(!bulged.is_empty());
+    for r in bulged {
+        assert_eq!(r.fidelity, "RequiresPVecCapability", "{r:?}");
+        assert_eq!(r.reason.as_deref(), Some("pvec-cannot-store"), "{r:?}");
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -1086,10 +1090,17 @@ mod with_a_drawing {
             .view_profile(ViewProfile::print_profile("Layout1"))
             .probe()
             .expect("Layout1 is walked");
-        assert_eq!(probed.encountered(), 20);
-        assert_eq!(probed.count(FidelityClass::Unsupported), 20);
+        // Since #1579 the probe's targets are at the origin, so each of the 20 viewports is
+        // placed and the model line is counted once through each of them.
+        assert_eq!(probed.encountered(), 40);
+        assert_eq!(probed.count(FidelityClass::Unsupported), 0);
         let reasons: Vec<_> = probed.reasons().collect();
-        assert_eq!(reasons, [(ReasonCode::ViewNotEnabled, "VIEWPORT", 20)]);
+        assert!(
+            !reasons
+                .iter()
+                .any(|(r, _, _)| *r == ReasonCode::ViewNotEnabled),
+            "{reasons:?}"
+        );
     }
 
     #[test]

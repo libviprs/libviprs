@@ -1,0 +1,178 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "viewport-twisted-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params-r3/viewport-twisted-001.json",
+    "parameter_file_sha256": "23e4a0ec526f04f9db44ac98b20c7fafccb7d21ab7897aa631e7531bd1212392",
+    "parameters": {
+      "id": "viewport-twisted-001",
+      "kind": "viewport_print",
+      "description": "One plan viewport twisted by 30 degrees about its view direction, looking at one model-space line. The twist, the view and the rectangle have to survive; the sign of the twist is what a reader has to get right.",
+      "layout": "Layout1",
+      "layers": [],
+      "model_curves": [
+        {
+          "layer": "0",
+          "start": [
+            "0",
+            "0",
+            "0"
+          ],
+          "end": [
+            "12",
+            "9",
+            "0"
+          ]
+        }
+      ],
+      "paper_curves": [],
+      "viewports": [
+        {
+          "id": "vp01",
+          "center": [
+            "100",
+            "80"
+          ],
+          "width": "120",
+          "height": "90",
+          "view_center": [
+            "6",
+            "4.5"
+          ],
+          "view_height": "12",
+          "twist_deg": "30"
+        }
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "viewport-twisted-001-model-1",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "12.0",
+            "f64_hex": "0x4028000000000000"
+          },
+          {
+            "decimal": "9.0",
+            "f64_hex": "0x4022000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "0",
+        "on": true,
+        "frozen": false
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "viewport-twisted-001-model-1",
+      "claim": "VIEWPORT_COUNT_PRESERVED",
+      "statement": "The layout Layout1 keeps exactly 1 viewport(s); none is dropped or merged."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "vp01",
+      "claim": "VIEWPORT_VIEW_PRESERVED",
+      "statement": "The view direction and twist are kept as authored, so a plan view stays plan and a twisted one keeps its sign."
+    }
+  ],
+  "viewports": [
+    {
+      "id": "vp01",
+      "layout": "Layout1",
+      "paper": {
+        "center": [
+          {
+            "decimal": "100.0",
+            "f64_hex": "0x4059000000000000"
+          },
+          {
+            "decimal": "80.0",
+            "f64_hex": "0x4054000000000000"
+          }
+        ],
+        "width": {
+          "decimal": "120.0",
+          "f64_hex": "0x405e000000000000"
+        },
+        "height": {
+          "decimal": "90.0",
+          "f64_hex": "0x4056800000000000"
+        }
+      },
+      "view": {
+        "center": [
+          {
+            "decimal": "6.0",
+            "f64_hex": "0x4018000000000000"
+          },
+          {
+            "decimal": "4.5",
+            "f64_hex": "0x4012000000000000"
+          }
+        ],
+        "height": {
+          "decimal": "12.0",
+          "f64_hex": "0x4028000000000000"
+        },
+        "twist": {
+          "decimal": "0.5235987755982989",
+          "f64_hex": "0x3fe0c152382d7366"
+        }
+      }
+    }
+  ]
+}

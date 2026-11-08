@@ -206,9 +206,12 @@ type Problems = Vec<String>;
 /// periodic source is never claimed exact.
 fn policy(c: &Converted, truth: &Value) -> Result<(), Failure> {
     let all = truth["entities"].as_array().unwrap();
+    // A paper-space entity (`space: PAPER`) is never met by a model-space conversion, so it is
+    // neither held nor ignored.
     let primary = all
         .iter()
         .filter(|e| !e["id"].as_str().is_some_and(|i| i.contains("-equivalent-")))
+        .filter(|e| e["space"].as_str() != Some("PAPER"))
         .count();
     let dropped = (primary - live(truth).len()) as u64;
     let ignored = c
