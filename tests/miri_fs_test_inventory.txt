@@ -596,14 +596,6 @@ annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_reject_input_
 annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_strict_refuses_an_equivalent_entity_and_accepts_the_all_exact_drawing
 annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_the_capability_type_is_pvecs_own_and_no_local_copy_exists
 annotated   fs-detected  tests/pvec_1414_capability.rs::issue_1414_the_profiles_are_written_down_once_and_the_report_records_the_one_used
-annotated   fs-detected  tests/pvec_1415_georef.rs::issue_1415_a_failed_run_leaves_the_previous_sidecar_as_it_was
-annotated   fs-detected  tests/pvec_1415_georef.rs::issue_1415_an_undeclared_unit_stays_unknown_and_no_default_is_substituted
-annotated   fs-detected  tests/pvec_1415_georef.rs::issue_1415_recalibrating_rewrites_the_sidecar_and_nothing_else
-annotated   fs-detected  tests/pvec_1415_georef.rs::issue_1415_the_report_names_the_sidecar_and_a_bad_control_point_is_refused
-annotated   fs-detected  tests/pvec_1415_georef.rs::issue_1415_the_sidecar_bounds_are_the_artifacts_bit_for_bit
-annotated   fs-detected  tests/pvec_1415_georef.rs::issue_1415_the_sidecar_round_trips_carries_a_version_and_refuses_an_unknown_one
-annotated   fs-detected  tests/pvec_1415_georef.rs::issue_1415_two_calibrations_differ_only_in_the_calibration_block_and_the_sidecar
-annotated   fs-detected  tests/pvec_1415_georef.rs::issue_1415_without_a_calibration_no_transform_or_crs_reaches_the_artifact
 annotated   fs-detected  tests/pvec_1416_diagnostics.rs::issue_1416_a_clean_drawing_makes_no_diagnostic_and_allocates_nothing_for_them
 annotated   fs-detected  tests/pvec_1416_diagnostics.rs::issue_1416_a_failure_carries_the_entitys_handle_layer_and_block_path_in_the_error
 annotated   fs-detected  tests/pvec_1416_diagnostics.rs::issue_1416_diagnostics_round_trip_through_json_with_stable_field_names
@@ -684,6 +676,12 @@ annotated   fs-detected  tests/pvec_1552_calibration_write.rs::a_pdf_with_no_vie
 annotated   fs-detected  tests/pvec_1552_calibration_write.rs::recalibrate_removes_adds_and_replaces_without_moving_the_geometry
 annotated   fs-detected  tests/pvec_1552_calibration_write.rs::recalibrating_a_missing_file_is_an_error_and_writes_nothing
 annotated   fs-detected  tests/pvec_1552_calibration_write.rs::the_geopdf_control_points_are_read_back_from_the_artifact
+annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::a_conversion_writes_no_sidecar_and_the_report_names_none
+annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::a_sidecar_of_an_unknown_version_is_refused_and_writes_nothing
+annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::a_sidecar_with_no_id_has_nothing_to_import
+annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::an_id_nothing_resolves_writes_nothing
+annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::an_old_sidecar_imports_through_the_resolver_with_its_id_kept
+annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::without_a_calibration_no_transform_or_crs_reaches_the_artifact
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs

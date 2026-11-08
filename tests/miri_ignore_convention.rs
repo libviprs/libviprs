@@ -870,7 +870,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1547 adds 13: the `tests/pvec_1547_pdf_viewports.rs` cells that convert a viewport fixture into a temp dir. It said 1039 before this line moved.
 /// #1548 adds 6: the `tests/pvec_1548_lgidict.rs` cells that convert an LGIDict fixture into a temp dir. It said 1052 before this line moved.
 /// #1552 adds 7: the `tests/pvec_1552_calibration_write.rs` cells that convert into a temp dir, read the calibration back and recalibrate it. Two `tests/pvec_1415_georef.rs` cells are renamed, not added. It said 1058 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1065;
+/// #1554 removes 8 and adds 6: `tests/pvec_1415_georef.rs` goes with the sidecar it tested, and the `tests/pvec_1554_sidecar_retired.rs` cells convert into a temp dir and import an old sidecar. It said 1065 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1063;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
