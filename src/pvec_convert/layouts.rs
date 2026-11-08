@@ -12,8 +12,8 @@
 //! `[A-Za-z0-9._-]` turned into `-`, runs of `-` collapsed, leading and trailing `-` and `.` trimmed,
 //! at most 64 bytes, and `layout` when nothing is left.
 //!
-//! A layout with no paper-space entity other than its viewports, and no viewport that is on, plotted,
-//! on a plotting layer and has a view, is [`SheetSkip::Empty`]: listed, nothing written. One whose
+//! A layout with no paper-space entity other than its viewports, and no viewport that is on, plotted
+//! and has a view, is [`SheetSkip::Empty`]: listed, nothing written. One whose
 //! kept content writes nothing is [`SheetSkip::EmptyAfterView`]; until the print profile says which
 //! viewport is the paper view itself, a layout holding only that one comes out this way. Either way a
 //! file an earlier run left at that sheet's path is removed. Any other failure of one sheet is
@@ -266,45 +266,28 @@ impl<'a> PvecLayoutSet<'a> {
         let width = paper.len().to_string().len().max(2);
 
         // A layout is a sheet (#1557, item 6) when it has an entity of its own other than a
-        // viewport, or a viewport that is on, not hidden when plotting, not on a no-plot layer and
-        // has a view height. Which viewport is the paper view itself is the print profile's call
-        // (#1560) and not made yet, so a layout holding only its paper view is a sheet that comes
-        // out `EmptyAfterView`, never one that is called empty when it shows the model. A provider
-        // that cannot list viewports, or layers, has none to show, or none that is no-plot.
-        let facts = provider
-            .viewports()
-            .or_else(|e| match e {
-                ProviderError::CannotReport(_) => Ok(Vec::new()),
-                e => Err(e),
-            })
-            .and_then(|viewports| {
-                let no_plot: Vec<String> = match provider.layers() {
-                    Ok(l) => l
-                        .into_iter()
-                        .filter(|l| !l.plottable)
-                        .map(|l| l.name)
-                        .collect(),
-                    Err(ProviderError::CannotReport(_)) => Vec::new(),
-                    Err(e) => return Err(e),
-                };
-                Ok((viewports, no_plot))
-            });
-        let has_content = |layout: &LayoutState| -> Result<bool, ProviderError> {
-            let mut cursor = provider.entities(&EntityScope::Layout(layout.id))?;
-            while let Some(e) = cursor.next_entity()? {
-                if e.provenance.class_name != "VIEWPORT" {
-                    return Ok(true);
+        // viewport, or a viewport that is on, not hidden when plotting and has a view height. One
+        // on a no-plot layer counts: it prints what it shows and only its border is hidden (P-3,
+        // #1577). Which viewport is the paper view itself is the print profile's call (#1560) and
+        // not made yet, so a layout holding only its paper view is a sheet that comes out
+        // `EmptyAfterView`, never one that is called empty when it shows the model. A provider
+        // that cannot list viewports has none to show.
+        let viewports = provider.viewports().or_else(|e| match e {
+            ProviderError::CannotReport(_) => Ok(Vec::new()),
+            e => Err(e),
+        });
+        let has_content =
+            |layout: &LayoutState| -> Result<bool, ProviderError> {
+                let mut cursor = provider.entities(&EntityScope::Layout(layout.id))?;
+                while let Some(e) = cursor.next_entity()? {
+                    if e.provenance.class_name != "VIEWPORT" {
+                        return Ok(true);
+                    }
                 }
-            }
-            let (viewports, no_plot) = facts.as_ref().map_err(Clone::clone)?;
-            Ok(viewports.iter().any(|v| {
-                v.layout == layout.id
-                    && v.visible
-                    && !v.hide_plot
-                    && v.view_height > 0.0
-                    && !no_plot.iter().any(|n| n.eq_ignore_ascii_case(&v.layer))
-            }))
-        };
+                Ok(viewports.as_ref().map_err(Clone::clone)?.iter().any(|v| {
+                    v.layout == layout.id && v.visible && !v.hide_plot && v.view_height > 0.0
+                }))
+            };
         // The layout name as a file name part: every byte outside `[A-Za-z0-9._-]` becomes `-`, runs
         // of `-` collapse, `-` and `.` are trimmed from both ends, at most 64 bytes, `layout` when
         // nothing is left.
