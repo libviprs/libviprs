@@ -184,7 +184,11 @@ fn an_old_sidecar_imports_through_the_resolver_with_its_id_kept() {
     .unwrap();
     assert_eq!(done, SidecarImport::Imported);
     assert_eq!(asked.as_deref(), Some("site-survey-1"));
-    let c = open_published(&dest).unwrap().calibration().unwrap().unwrap();
+    let c = open_published(&dest)
+        .unwrap()
+        .calibration()
+        .unwrap()
+        .unwrap();
     assert_eq!(c.external_id, "site-survey-1");
     assert_eq!(c.scale.unwrap().metres_per_source_unit, 0.001);
     fs::remove_dir_all(&dir).unwrap();

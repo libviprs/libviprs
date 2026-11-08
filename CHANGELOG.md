@@ -75,6 +75,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write so the counts still add up. `probe` cannot predict this (the rule is PVec's and is not copied),
   so a probe can count as supported what the conversion then refuses.
 
+### Deprecated
+
+- **`GeoreferenceHandoff`, `HandoffV1` and `PvecConversion::control_points` are deprecated** (issue #1554). For one minor release `pvec_convert::import_sidecar(artifact, sidecar, resolve)` brings an old sidecar in: the application's resolver turns its `calibration_id` into a calibration, which is written into the artifact with that id as its `external_id`, and nothing is written when there is no id or nothing resolves (`SidecarImport`). `control_points` only ever fed the sidecar, so its points are checked and dropped; a `Georeference` carries both sides of a control point. All of them go in the next minor release. `docs/pvec-georeference.md` describes the calibration block and the importer.
+
+### Removed
+
+- **The georeference sidecar is retired** (issue #1554, slice 5 of #1543). A conversion no longer writes `<dest>.georef.json`; the calibration lives in the artifact's calibration block (#1552), and the report's `georeference` is always absent now. `GeoreferenceHandoff::write_to`, `GeoreferenceHandoff::recalibrate` and `UnitRecord::new` are gone with it.
+
 ### Changed
 
 - **`PvecConversion::calibration` takes a `Calibration`** (issue #1552). It used to take the sidecar's opaque id, which is now the calibration's `external_id`, so an id needs a record beside it. Two calibrations no longer give identical artifact bytes: they differ in the calibration block, and nothing else. `DefinitionFormat::Wkt` is now `Wkt1`, with `Wkt2` beside it, as in pvec. libviprs links pvec at `07b7a82f`, the first revision with the calibration block.

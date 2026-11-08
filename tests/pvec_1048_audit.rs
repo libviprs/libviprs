@@ -44,6 +44,9 @@ fn depth(e: &dyn Error) -> usize {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+// `control_points` is deprecated with the sidecar (#1554), and still the one way to reach
+// `PvecConvertError::Georeference` until both go.
+#[allow(deprecated)]
 fn issue_1048_every_wrapping_variant_a_drawing_can_reach_keeps_its_source() {
     let dir = scratch("chain");
     let dest = dir.join("o.pvec");

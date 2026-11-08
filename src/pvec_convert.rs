@@ -69,8 +69,10 @@ pub use calibration::{
     Georeference, GeoreferenceMethod, ScaleClaim, ScaleProvenance,
 };
 pub use capability::{CapabilityPolicy, ConversionProfile};
+#[allow(deprecated)]
 pub use georef::{
-    GeoreferenceError, GeoreferenceHandoff, HandoffV1, SourceBox, UnitRecord, georef_path,
+    GeoreferenceError, GeoreferenceHandoff, HandoffV1, SidecarImport, SourceBox, UnitRecord,
+    georef_path, import_sidecar,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
@@ -160,8 +162,8 @@ pub enum PvecConvertError {
     /// The artifact and report could not be published.
     #[error("the artifact could not be published")]
     Publish(#[source] PublishError),
-    /// The georeference sidecar could not be built or written.
-    #[error("the georeference sidecar could not be produced")]
+    /// A control point given to the deprecated [`PvecConversion::control_points`] is not finite.
+    #[error("a control point is not finite")]
     Georeference(#[source] GeoreferenceError),
     /// An entity needs a PVec capability the run did not allow, and the policy is
     /// [`CapabilityPolicy::RejectInput`].
@@ -329,17 +331,19 @@ impl<'a> PvecConversion<'a> {
     }
 
     /// The drawing's calibration, written into the artifact's calibration block (issue #1552). A
-    /// DWG gets none unless it is given here: its `$INSUNITS` is already the manifest's unit. The
-    /// calibration's [`external_id`](Calibration::external_id) is also the georeference sidecar's
-    /// `calibration_id`.
+    /// DWG gets none unless it is given here: its `$INSUNITS` is already the manifest's unit.
     #[must_use]
     pub fn calibration(mut self, calibration: Calibration) -> Self {
         self.calibration = Some(calibration);
         self
     }
 
-    /// Control points in source space (drawing coordinates, no world coordinates), for the
-    /// georeference sidecar.
+    /// Control points in source space with no world side, which only the georeference sidecar
+    /// carried. The sidecar is no longer written (#1554), so they are checked for finite values and
+    /// then dropped; a [`Georeference`]'s control points carry both sides.
+    #[deprecated(
+        note = "the georeference sidecar is retired; put control points in a Georeference passed to `calibration`"
+    )]
     #[must_use]
     pub fn control_points(mut self, points: impl IntoIterator<Item = [f64; 2]>) -> Self {
         self.control_points = points.into_iter().collect();
@@ -416,9 +420,8 @@ impl<'a> PvecConversion<'a> {
             AcadrustProvider::open(self.source)
                 .map_err(PvecConvertError::Open)
                 .and_then(|provider| {
-                    let declared = provider.source_unit();
-                    let unit = self.unit.unwrap_or(declared);
-                    self.run(&provider, declared, unit)
+                    let unit = self.unit.unwrap_or_else(|| provider.source_unit());
+                    self.run(&provider, unit)
                 })
         };
         report_failure(observer.as_deref(), result)
@@ -438,9 +441,7 @@ impl<'a> PvecConversion<'a> {
                 .ok_or(PvecConvertError::UnitRequired)
                 .and_then(|unit| {
                     let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-                    // The trait reports no unit, so the drawing's own is unknown; the caller's is
-                    // applied.
-                    self.run(&provider, SourceUnit::Unknown, unit)
+                    self.run(&provider, unit)
                 })
         };
         report_failure(observer.as_deref(), result)
@@ -715,7 +716,6 @@ impl<'a> PvecConversion<'a> {
     fn run<P: DwgProvider>(
         self,
         provider: &P,
-        declared: SourceUnit,
         unit: SourceUnit,
     ) -> Result<PvecConversionOutput, PvecConvertError> {
         georef::check_finite(&self.control_points).map_err(PvecConvertError::Georeference)?;
@@ -740,7 +740,6 @@ impl<'a> PvecConversion<'a> {
             cancel,
             gate,
             calibration,
-            control_points,
             observer,
             components: select,
             regions,
@@ -752,22 +751,14 @@ impl<'a> PvecConversion<'a> {
             }
         };
 
-        let calibration_id = calibration
-            .as_ref()
-            .and_then(Calibration::external_id)
-            .map(str::to_owned);
-        let sidecar = georef_path(dest);
-        // The sidecar is staged first and moved into place once the pair is published, so a failed
-        // or cancelled run leaves the previous one as it was.
-        let staged = PathBuf::from(format!("{}.partial", sidecar.display()));
         let write_error = |e: WriteError| match e {
             WriteError::Cancelled => PvecConvertError::Cancelled,
             other => PvecConvertError::Write(other),
         };
         // What both paths do once the artifact is written: tell the observer, close the report against
-        // what went in, and stage the georeference sidecar. It runs once, so it takes the rows.
+        // what went in. It runs once, so it takes the rows.
         // With no `written` (PVec refused every curve) there is no artifact, so the report is closed
-        // against nothing written, the observer is not told, and no sidecar is staged.
+        // against nothing written and the observer is not told.
         // The tally is sealed here and not at classification: an entity the classifier called
         // supported can still be one PVec's container refuses, and it is counted as that.
         let seal = |written: Option<(&BoundsReport, u64, u64)>,
@@ -804,25 +795,6 @@ impl<'a> PvecConversion<'a> {
             report.diagnostics = diagnostics;
             report.components = components;
             report.regions = found;
-            report.georeference = written.and(
-                sidecar
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned()),
-            );
-            let Some((bounds, ..)) = written else {
-                return Ok((report, fidelity));
-            };
-            GeoreferenceHandoff::V1(HandoffV1 {
-                bounds: bounds.drawing_bounds().map(|b| SourceBox {
-                    min: [b.min().x, b.min().y],
-                    max: [b.max().x, b.max().y],
-                }),
-                unit: UnitRecord::new(declared, unit),
-                calibration_id,
-                control_points,
-            })
-            .write_to(&staged)
-            .map_err(PvecConvertError::Georeference)?;
             Ok((report, fidelity))
         };
         let config = WriteConfig { unit, leaves };
@@ -1024,15 +996,7 @@ impl<'a> PvecConversion<'a> {
                 write_report,
             )
             .map_err(publish_error),
-        }
-        .and_then(|done| {
-            std::fs::rename(&staged, &sidecar)
-                .map_err(|e| PvecConvertError::Georeference(GeoreferenceError::Io(e)))?;
-            Ok(done)
-        });
-        if published.is_err() {
-            let _ = std::fs::remove_file(&staged);
-        }
+        };
         let (report, fidelity, written) = published?;
         tell(EngineEvent::ConversionPublished);
         Ok(PvecConversionOutput {

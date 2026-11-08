@@ -1,18 +1,17 @@
-//! The georeference handoff (issue #1415, N7.3): what libviprs gives an application so a drawing
-//! can be placed on a map without a GIS transform ever entering PVec coordinates.
+//! The retired georeference sidecar (issues #1415 and #1554): a reader for one minor release, so a
+//! drawing converted before the calibration moved into the artifact can still be placed.
 //!
-//! `src/geo.rs` is raster georeferencing and belongs to the pyramid path. A drawing has no pixel
-//! grid, its geometry is in source CAD units, and the epic keeps georeferencing out of source
-//! geometry. So a conversion writes one small sidecar beside the artifact, `<dest>.georef.json`,
-//! and the report names it.
+//! A conversion used to write `<dest>.georef.json` beside the artifact: the drawing box, the unit
+//! and its evidence, an opaque `calibration_id` naming a record the application holds, and
+//! source-space control points with no world side. Since #1552 the calibration is written into the
+//! artifact's calibration block, and since #1554 no sidecar is written at all.
 //!
-//! # The rule
-//!
-//! PVec coordinates are always source space. Since #1552 the calibration itself (a scale, a
-//! georeference or both) is written into the artifact's calibration block, and
-//! [`recalibrate`](super::recalibrate) rewrites that block. The sidecar carries no world coordinate:
-//! its control points are drawing coordinates, and its `calibration_id` is the calibration's
-//! `external_id`. [`GeoreferenceHandoff::recalibrate`] rewrites the sidecar alone.
+//! [`import_sidecar`] brings an old one in: it reads the sidecar, asks the application's resolver
+//! for the calibration its `calibration_id` names (the sidecar holds no world coordinate, so it
+//! cannot become a georeference by itself), and writes that calibration into the artifact with the
+//! id as its `external_id`. When there is no id, or nothing resolves, nothing is written.
+//! [`GeoreferenceHandoff`] reads the file and is deprecated with it; both go in the next minor
+//! release.
 //!
 //! # The sidecar
 //!
@@ -37,7 +36,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::pvec::SourceUnit;
+use super::calibration::{Calibration, CalibrationError};
+use crate::pvec::writer::WriteError;
 
 /// Where the sidecar for the artifact at `dest` is published: `dest` with `.georef.json` appended.
 #[must_use]
@@ -71,25 +71,8 @@ pub struct UnitRecord {
     pub applied: String,
 }
 
-impl UnitRecord {
-    /// The record for a drawing whose header says `source`, written as `applied`.
-    #[must_use]
-    pub fn new(source: SourceUnit, applied: SourceUnit) -> Self {
-        let insunits = source.insunits_code();
-        UnitRecord {
-            source: source.name().to_owned(),
-            insunits,
-            physical: source.is_physical(),
-            evidence: match insunits {
-                Some(code) => format!("the drawing header declares $INSUNITS = {code}"),
-                None => "the provider reports no unit for this drawing".to_owned(),
-            },
-            applied: applied.name().to_owned(),
-        }
-    }
-}
-
 /// Schema 1 of the sidecar.
+#[deprecated(note = "the georeference sidecar is retired; use `import_sidecar` to bring one in")]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HandoffV1 {
     /// The exact drawing box.
@@ -103,6 +86,8 @@ pub struct HandoffV1 {
 }
 
 /// The versioned sidecar. `schema_version` is the serde tag.
+#[deprecated(note = "the georeference sidecar is retired; use `import_sidecar` to bring one in")]
+#[allow(deprecated)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "schema_version")]
 pub enum GeoreferenceHandoff {
@@ -130,8 +115,60 @@ pub enum GeoreferenceError {
         /// The point's index.
         index: usize,
     },
+    /// The resolved calibration, with the sidecar's id as its `external_id`, was refused.
+    #[error("the resolved calibration was refused")]
+    Calibration(#[source] CalibrationError),
+    /// The artifact could not be rewritten with the calibration.
+    #[error("the artifact could not be rewritten with the calibration")]
+    Rewrite(#[source] WriteError),
 }
 
+/// What [`import_sidecar`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SidecarImport {
+    /// The resolved calibration is in the artifact, with the sidecar's id as its `external_id`.
+    Imported,
+    /// The sidecar names no calibration, so there was nothing to import. Nothing was written.
+    NoCalibrationId,
+    /// The resolver knew no calibration by this id. Nothing was written.
+    Unresolved(String),
+}
+
+/// Brings an old `.georef.json` sidecar into the artifact at `artifact` (issue #1554): reads it,
+/// hands its `calibration_id` to `resolve`, and writes what comes back into the artifact's
+/// calibration block, keeping the id as its `external_id`, through [`recalibrate`](super::recalibrate).
+/// The sidecar's control points have no world side and are not carried over; the resolved
+/// calibration's are. The sidecar itself is left where it is.
+///
+/// # Errors
+///
+/// [`GeoreferenceError`] for a sidecar that cannot be read or has another schema version, a resolved
+/// calibration refused with the id attached, or an artifact that cannot be rewritten. Nothing is
+/// written then.
+#[allow(deprecated)]
+pub fn import_sidecar(
+    artifact: &Path,
+    sidecar: &Path,
+    resolve: impl FnOnce(&str) -> Option<Calibration>,
+) -> Result<SidecarImport, GeoreferenceError> {
+    let GeoreferenceHandoff::V1(v1) = GeoreferenceHandoff::read_from(sidecar)?;
+    let Some(id) = v1.calibration_id else {
+        return Ok(SidecarImport::NoCalibrationId);
+    };
+    let Some(found) = resolve(&id) else {
+        return Ok(SidecarImport::Unresolved(id));
+    };
+    let calibration = Calibration::new(
+        found.scale().cloned(),
+        found.georeference().cloned(),
+        Some(id),
+    )
+    .map_err(GeoreferenceError::Calibration)?;
+    super::recalibrate(artifact, Some(&calibration)).map_err(GeoreferenceError::Rewrite)?;
+    Ok(SidecarImport::Imported)
+}
+
+#[allow(deprecated)]
 impl GeoreferenceHandoff {
     /// The schema 1 payload.
     #[must_use]
@@ -167,16 +204,6 @@ impl GeoreferenceHandoff {
         }
     }
 
-    /// Writes the sidecar to `path`, replacing it atomically.
-    ///
-    /// # Errors
-    ///
-    /// [`GeoreferenceError`].
-    pub fn write_to(&self, path: &Path) -> Result<(), GeoreferenceError> {
-        let json = self.to_json_string()?;
-        crate::resume::atomic_write(path, json.as_bytes()).map_err(GeoreferenceError::Io)
-    }
-
     /// Reads the sidecar at `path`.
     ///
     /// # Errors
@@ -184,24 +211,6 @@ impl GeoreferenceHandoff {
     /// [`GeoreferenceError`].
     pub fn read_from(path: &Path) -> Result<Self, GeoreferenceError> {
         Self::from_json_slice(&fs::read(path).map_err(GeoreferenceError::Io)?)
-    }
-
-    /// Re-calibrates an already converted drawing: rewrites the sidecar at `path` with a new
-    /// calibration and control points, and nothing else.
-    ///
-    /// # Errors
-    ///
-    /// [`GeoreferenceError`], including [`GeoreferenceError::NonFinite`] for a control point.
-    pub fn recalibrate(
-        path: &Path,
-        calibration_id: Option<String>,
-        control_points: Vec<[f64; 2]>,
-    ) -> Result<(), GeoreferenceError> {
-        check_finite(&control_points)?;
-        let GeoreferenceHandoff::V1(mut v1) = Self::read_from(path)?;
-        v1.calibration_id = calibration_id;
-        v1.control_points = control_points;
-        GeoreferenceHandoff::V1(v1).write_to(path)
     }
 }
 

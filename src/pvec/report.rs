@@ -291,8 +291,9 @@ pub struct ConversionReport {
     /// The capability profile the conversion ran under. Absent when none was recorded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<CapabilitySummary>,
-    /// The file name of the georeference sidecar published beside the artifact (N7.3). Absent
-    /// when the conversion wrote none.
+    /// The file name of the georeference sidecar a conversion used to publish beside the artifact
+    /// (N7.3). No conversion writes one since #1554, so it is always absent now; it stays so older
+    /// reports still read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub georeference: Option<String>,
     /// The diagnostics of the conversion, in entity id order (N7.5). Its own section, never mixed

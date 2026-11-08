@@ -816,7 +816,7 @@ name = "pvec_1414_capability"
 required-features = ["pvec-convert"]
 
 [[test]]
-name = "pvec_1415_georef"
+name = "pvec_1554_sidecar_retired"
 required-features = ["pvec-convert"]
 
 [[test]]
