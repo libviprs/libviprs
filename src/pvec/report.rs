@@ -220,6 +220,9 @@ pub struct PdfSummary {
 pub struct PdfCalibrationSummary {
     /// The `/VP` viewports on the page.
     pub viewports: u64,
+    /// The `/LGIDict` georeferences on the page (#1548).
+    #[serde(default)]
+    pub lgidicts: u64,
     /// The index in `/VP` of the viewport whose measure was used, absent when none was.
     pub viewport: Option<u64>,
     /// The scale's provenance: `declared-unit` (the point) or `plan-scale` (the viewport's `/RL`).
@@ -228,7 +231,7 @@ pub struct PdfCalibrationSummary {
     /// when there is no georeference.
     pub georeference: Option<String>,
     /// Why something the page said was not used, by key (`rl-unit-unknown`,
-    /// `geo-projected-without-definition`), in the order met.
+    /// `geo-projected-without-definition`, `lgidict-not-mapped`), in the order met.
     pub notes: Vec<String>,
 }
 

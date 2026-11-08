@@ -90,10 +90,7 @@ fn the_lgidict_is_read_with_its_ctm_in_page_space() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn utm_north_on_wgs84_is_epsg_326_and_the_zone() {
-    let done = convert(
-        &fixture(vec![("LGIDict", lgidict(utm(30, "N")))]),
-        "north",
-    );
+    let done = convert(&fixture(vec![("LGIDict", lgidict(utm(30, "N")))]), "north");
     let g = done.calibration.georeference().expect("a georeference");
     assert_eq!(g.crs_id.as_deref(), Some("EPSG:32630"));
     assert_eq!(g.crs_kind, CrsKind::Projected);
