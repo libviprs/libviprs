@@ -40,8 +40,8 @@ bytes on x86_64 and arm64, and the checked-in digests say so:
 - the x86_64 digest is the base file and arm64 rows that differ live next to it in
   `<name>.aarch64.baseline` (`determinism` for the artifact bytes, `drift` for the geometry the reader
   returns) and in `tests/fixtures/pvec-drift/accepted.aarch64.dump` for the accepted geometry;
-- `tests/pvec_1471_reproducibility.rs` pins the set of fixtures that have such a row to the list
-  below, so a third divergence cannot be added without this ADR changing;
+- `tests/pvec_1471_reproducibility.rs` pins the set of fixtures that have such a row (none since
+  #1573, see below), so a new divergence cannot be added without this ADR changing;
 - the drift check treats the two outputs as the same drawing: a conversion on either architecture is
   clean against the accepted geometry of both, because the difference is far inside `Policy::V1`.
 
@@ -63,10 +63,13 @@ division and `sqrt` now, which IEEE 754 rounds correctly, and a test scans `src/
 - `general-affine-chain-001`
 - `nonuniform-scale-rotated-001`
 
-With the pvec crates at afd2fe6 (`detmath::hypot`, pvec#261) the artifact bytes of
-`general-affine-chain-001` agree across architectures, so only `nonuniform-scale-rotated-001` keeps an
-arm64 row in `determinism.aarch64.baseline`. Both fixtures still have an arm64 row in the drift digest
-and the accepted dump, since the rest of their arithmetic differs in the last bit.
+With the pvec crates at afd2fe6 (`detmath::hypot`, pvec#261) both fixtures agree across
+architectures on Linux, in the artifact bytes and in the geometry the reader returns. The x86_64 side
+moved to what arm64 already gave, which the re-bless for that pin missed, so the x86_64 determinism and
+drift rows went stale until #1573 re-blessed them on native x86_64 and arm64. The arm64 bless found no
+differing row and removed the three override files, and `tests/pvec_1471_reproducibility.rs` now
+expects none: a new one is a new divergence and has to be recorded here first. The list above stays as
+the record of what #1471 found, and the override mechanism stays for the next divergence.
 
 ## macOS
 
