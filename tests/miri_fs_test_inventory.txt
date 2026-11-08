@@ -686,6 +686,10 @@ annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::without_a_calibrati
 annotated   fs-detected  tests/pvec_1559_print_profile.rs::issue_1559_every_print_knob_names_a_row_of_a_decision_table
 annotated   fs-detected  tests/pvec_1559_print_profile.rs::issue_1559_the_adr_holds_p1_to_p9_and_what_is_still_unmeasured
 annotated   fs-detected  tests/pvec_1559_print_profile.rs::issue_1559_the_unsupported_policy_no_longer_refuses_paper_space_as_a_whole
+annotated   fs-detected  tests/pvec_1561_dxf.rs::the_twin_rows_of_the_classification_and_view_baselines_equal_their_dwg_rows
+annotated   fs-detected  tests/pvec_1561_dxf.rs::the_twins_are_the_listed_gold_drawings_written_by_the_pinned_dxf_writer
+annotated   not-detected tests/pvec_1561_dxf.rs::every_twin_probes_and_opens_from_bytes_and_from_a_path_alike
+annotated   not-detected tests/pvec_1561_dxf.rs::every_twin_shows_the_same_layers_layouts_and_model_space_as_its_dwg
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_caller_calibration_wins_over_the_plot_scale
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_decimal_plot_scale_is_reduced_to_coprime_integers
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_decimal_ratio_that_is_not_a_binary_fraction_still_reduces
