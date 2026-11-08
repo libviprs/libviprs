@@ -15,11 +15,16 @@ use libviprs::pvec::publish::{open_published, report_path};
 use libviprs::pvec::{
     Availability, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet, FacetSource,
     InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, ProvenanceStub, ProviderCaps,
-    ProviderError, RawEntity, RawGeometry, SourceUnit, ViewportEntity,
+    ProviderError, RawEntity, RawGeometry, SourceUnit, ViewportClip, ViewportEntity,
 };
-use libviprs::pvec_convert::{LayoutSetError, PvecConvertError, PvecLayoutSet, SheetSkip};
+use libviprs::pvec_convert::{LayoutSetError, PvecLayoutSet, SheetSkip};
 
 // ---- a mock provider: the bytes it is opened with pick the drawing ----
+
+std::thread_local! {
+    /// How often this test's thread opened a mock drawing: a set opens it once.
+    static OPENED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
 
 struct Mock {
     layouts: Vec<LayoutState>,
@@ -78,6 +83,8 @@ fn scene(bytes: &[u8]) -> Vec<String> {
             "Fa\u{e7}ade".into(),
             "..".into(),
             "Detail ".to_owned() + &"x".repeat(80),
+            "-A--B-".into(),
+            "w".repeat(63) + "-z",
         ],
         b"MOCK-mixed" => [
             "Cover",
@@ -86,6 +93,16 @@ fn scene(bytes: &[u8]) -> Vec<String> {
             "Hidden",
             "Broken",
             "Plan",
+        ]
+        .map(String::from)
+        .to_vec(),
+        b"MOCK-viewports" => [
+            "VP paper view",
+            "VP off",
+            "VP hide plot",
+            "VP no-plot layer",
+            "VP zero height",
+            "VP model",
         ]
         .map(String::from)
         .to_vec(),
@@ -110,6 +127,7 @@ impl DwgProvider for Mock {
             })?,
             _ => Vec::new(),
         };
+        OPENED.with(|n| n.set(n.get() + 1));
         if !bytes.starts_with(b"MOCK") {
             return Err(ProviderError::Unrecognised {
                 provider: "mock",
@@ -149,21 +167,66 @@ impl DwgProvider for Mock {
     }
 
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
-        let layer = |name: &str, off| LayerState {
+        let layer = |name: &str, off, plottable| LayerState {
             name: name.into(),
             handle: None,
             off,
             frozen: false,
             locked: false,
-            plottable: true,
+            plottable,
         };
-        Ok(vec![layer("0", false), layer("OFF", true)])
+        Ok(vec![
+            layer("0", false, true),
+            layer("OFF", true, true),
+            layer("Defpoints", false, false),
+        ])
     }
 
-    /// No viewport of any layout shows model space, so "Viewport only" holds nothing but its own
-    /// paper view (the id 1 viewport the provider never lists).
+    /// One viewport on each `VP` layout, each failing one part of the rule a viewport has to meet
+    /// to make its layout a sheet, except `VP paper view` (id 1, which the set does not take to be
+    /// the paper view) and `VP model`. "Viewport only" has a VIEWPORT entity and no listed viewport.
     fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
-        Ok(Vec::new())
+        Ok(self
+            .layouts
+            .iter()
+            .filter(|l| l.name.starts_with("VP "))
+            .map(|l| {
+                let mut v = ViewportEntity {
+                    handle: ItemHandle::new(u64::from(l.id.0) * 100 + 1),
+                    layout: l.id,
+                    id: 2,
+                    visible: true,
+                    clip: ViewportClip::Rectangle([
+                        [0.0, 0.0],
+                        [10.0, 0.0],
+                        [10.0, 10.0],
+                        [0.0, 10.0],
+                    ]),
+                    frozen_layers: Vec::new(),
+                    layer: "0".into(),
+                    center: [5.0, 5.0],
+                    width: 10.0,
+                    height: 10.0,
+                    view_center: [0.0, 0.0],
+                    view_height: 100.0,
+                    view_target: [0.0, 0.0, 0.0],
+                    view_direction: [0.0, 0.0, 1.0],
+                    twist: 0.0,
+                    perspective: false,
+                    hide_plot: false,
+                    non_rectangular_clipping: false,
+                };
+                match l.name.as_str() {
+                    "VP paper view" => v.id = 1,
+                    "VP off" => v.visible = false,
+                    "VP hide plot" => v.hide_plot = true,
+                    "VP no-plot layer" => v.layer = "DEFPOINTS".into(),
+                    "VP zero height" => v.view_height = 0.0,
+                    _ => {}
+                }
+                v
+            })
+            .collect())
     }
 
     fn entities<'a>(
@@ -181,7 +244,7 @@ impl DwgProvider for Mock {
         let h = u64::from(id.0) * 100;
         let (items, fail) = match layout.name.as_str() {
             "Empty" => (Vec::new(), false),
-            "Viewport only" => (
+            n if n == "Viewport only" || n.starts_with("VP ") => (
                 vec![entity(
                     h + 1,
                     "VIEWPORT",
@@ -253,6 +316,10 @@ fn issue_1564_each_sheet_is_named_by_its_tab_position_and_a_slug_of_its_name() {
         // Nothing left after trimming, so the slug is `layout`.
         "plan.04-layout.pvec".to_owned(),
         format!("plan.05-{long}.pvec"),
+        // Runs of `-` collapse whatever made them.
+        "plan.06-A-B.pvec".to_owned(),
+        // Cut at 64 bytes, then trimmed again.
+        format!("plan.07-{}.pvec", "w".repeat(63)),
     ];
     let files: Vec<String> = out
         .sheets
@@ -264,7 +331,7 @@ fn issue_1564_each_sheet_is_named_by_its_tab_position_and_a_slug_of_its_name() {
     assert_eq!(names[0], "A-101 Plan");
     assert_eq!(
         out.sheets.iter().map(|s| s.tab_order).collect::<Vec<_>>(),
-        vec![1, 2, 3, 4, 5]
+        vec![1, 2, 3, 4, 5, 6, 7]
     );
 
     // Every sheet was written, with its report beside it, and the listing is the sheet order.
@@ -434,7 +501,13 @@ fn issue_1564_a_drawing_whose_layouts_are_all_empty_still_writes_the_index() {
 #[cfg_attr(miri, ignore)]
 fn issue_1564_one_failing_sheet_does_not_lose_the_others() {
     let dir = scratch("broken");
+    OPENED.with(|n| n.set(0));
     let out = set(b"MOCK-mixed", &dir).convert_with::<Mock>().unwrap();
+    assert_eq!(
+        OPENED.with(|n| n.get()),
+        1,
+        "the drawing is opened once for the set"
+    );
 
     let order: Vec<&str> = out.sheets.iter().map(|s| s.layout.as_str()).collect();
     assert_eq!(
@@ -565,17 +638,74 @@ fn issue_1564_a_cancelled_run_is_an_error_and_writes_no_index() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+// ---- the viewport half of the empty rule ----
+
 #[test]
-fn issue_1564_the_failure_keeps_the_conversion_error() {
-    // `SheetSkip::Failed` carries the sheet's own error, so a caller can tell a provider fault from
-    // a writer refusal without parsing the index.
-    fn takes(skip: &SheetSkip) -> Option<&PvecConvertError> {
-        match skip {
-            SheetSkip::Failed(e) => Some(e),
-            _ => None,
-        }
+#[cfg_attr(miri, ignore)]
+fn issue_1564_a_viewport_makes_a_sheet_only_when_it_would_print() {
+    let dir = scratch("viewports");
+    let out = set(b"MOCK-viewports", &dir).convert_with::<Mock>().unwrap();
+    let outcome = |name: &str| {
+        &out.sheets
+            .iter()
+            .find(|s| s.layout == name)
+            .unwrap()
+            .outcome
+    };
+    for name in [
+        "VP off",
+        "VP hide plot",
+        "VP no-plot layer",
+        "VP zero height",
+    ] {
+        assert!(
+            matches!(outcome(name), Err(SheetSkip::Empty)),
+            "{name}: {:?}",
+            outcome(name)
+        );
     }
-    assert!(takes(&SheetSkip::Empty).is_none());
-    assert!(takes(&SheetSkip::EmptyAfterView).is_none());
-    assert!(takes(&SheetSkip::Failed(PvecConvertError::UnitRequired)).is_some());
+    // A viewport that would print makes the layout a sheet, whatever its number: the set does not
+    // guess which one is the paper view, so it never calls a layout that shows the model empty.
+    for name in ["VP paper view", "VP model"] {
+        assert!(
+            !matches!(outcome(name), Err(SheetSkip::Empty | SheetSkip::Failed(_))),
+            "{name}: {:?}",
+            outcome(name)
+        );
+    }
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- a re-run into the same directory ----
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1564_a_rerun_leaves_no_stale_index_or_sheet() {
+    let dir = scratch("rerun");
+    // Files an earlier run left: an index, and a sheet at the path of a layout that is now empty.
+    fs::write(dir.join("plan.sheets.json"), b"{}").unwrap();
+    fs::write(dir.join("plan.02-Empty.pvec"), b"old").unwrap();
+    fs::write(dir.join("plan.02-Empty.pvec.report.json"), b"old").unwrap();
+    let cancel = CancelToken::new();
+    cancel.cancel();
+    let err = set(b"MOCK-mixed", &dir)
+        .sheets(move |c| c.unit(SourceUnit::Millimeters).cancel(cancel.clone()))
+        .convert_with::<Mock>()
+        .unwrap_err();
+    assert!(matches!(err, LayoutSetError::Cancelled), "{err:?}");
+    // A cancelled run removed the old index, so nothing says it finished.
+    assert!(!dir.join("plan.sheets.json").exists());
+
+    let out = set(b"MOCK-mixed", &dir).convert_with::<Mock>().unwrap();
+    assert!(matches!(out.sheets[1].outcome, Err(SheetSkip::Empty)));
+    assert!(!dir.join("plan.02-Empty.pvec").exists());
+    assert!(!dir.join("plan.02-Empty.pvec.report.json").exists());
+    assert_eq!(index(&dir)["sheets"].as_array().unwrap().len(), 6);
+
+    // A drawing with no paper layout removes an old index too, and writes none.
+    fs::write(dir.join("plan.sheets.json"), b"{}").unwrap();
+    let none = set(b"MOCK-model", &dir).convert_with::<Mock>().unwrap();
+    assert_eq!(none.index, None);
+    assert!(!dir.join("plan.sheets.json").exists());
+    fs::remove_dir_all(&dir).unwrap();
 }

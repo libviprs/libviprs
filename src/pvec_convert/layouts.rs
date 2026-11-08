@@ -12,11 +12,15 @@
 //! `[A-Za-z0-9._-]` turned into `-`, runs of `-` collapsed, leading and trailing `-` and `.` trimmed,
 //! at most 64 bytes, and `layout` when nothing is left.
 //!
-//! A layout with no paper-space entity other than its viewports, and no viewport that shows
-//! anything, is [`SheetSkip::Empty`]: listed, nothing written. One whose kept content writes nothing
-//! is [`SheetSkip::EmptyAfterView`]. Any other failure of one sheet is [`SheetSkip::Failed`] and the
-//! others go on. A drawing with no paper layout writes nothing at all and does not fall back to model
-//! space: [`PvecConversion::convert`] is the call for that.
+//! A layout with no paper-space entity other than its viewports, and no viewport that is on, plotted,
+//! on a plotting layer and has a view, is [`SheetSkip::Empty`]: listed, nothing written. One whose
+//! kept content writes nothing is [`SheetSkip::EmptyAfterView`]; until the print profile says which
+//! viewport is the paper view itself, a layout holding only that one comes out this way. Either way a
+//! file an earlier run left at that sheet's path is removed. Any other failure of one sheet is
+//! [`SheetSkip::Failed`], its path is left as it was, and the others go on. A drawing with no paper
+//! layout writes nothing at all and does not fall back to model space: [`PvecConversion::convert`] is
+//! the call for that. An index an earlier run left is removed before the first sheet, so a run that
+//! stops part way never leaves one that says it finished.
 
 use std::fs::{self, File};
 use std::io;
@@ -28,6 +32,7 @@ use thiserror::Error;
 use super::{PvecConversion, PvecConversionOutput, PvecConvertError, report_failure};
 use crate::cad::CadSource;
 use crate::pvec::dwg_acadrust::AcadrustProvider;
+use crate::pvec::publish::{PublishError, report_path};
 use crate::pvec::report::SheetSummary;
 use crate::pvec::writer::WriteError;
 use crate::pvec::{
@@ -213,18 +218,31 @@ impl<'a> PvecLayoutSet<'a> {
         header_unit: Option<SourceUnit>,
         stem: &str,
     ) -> Result<LayoutSetOutput, LayoutSetError> {
+        /// An error and its sources, for the index.
+        fn chain(e: &dyn std::error::Error) -> String {
+            let mut out = e.to_string();
+            let mut at = e.source();
+            while let Some(s) = at {
+                out.push_str(": ");
+                out.push_str(&s.to_string());
+                at = s.source();
+            }
+            out
+        }
+        /// Removes `path`; one that is not there is already gone.
+        fn remove(path: &Path) -> io::Result<()> {
+            match fs::remove_file(path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+                _ => Ok(()),
+            }
+        }
+
         let paper: Vec<LayoutState> = provider
             .layouts()
             .map_err(LayoutSetError::Layouts)?
             .into_iter()
             .filter(|l| l.kind == LayoutKind::Paper)
             .collect();
-        if paper.is_empty() {
-            return Ok(LayoutSetOutput {
-                sheets: Vec::new(),
-                index: None,
-            });
-        }
         let mut wanted = vec![self.select.is_none(); paper.len()];
         for name in self.select.iter().flatten() {
             let at = paper
@@ -236,7 +254,78 @@ impl<'a> PvecLayoutSet<'a> {
                 })?;
             wanted[at] = true;
         }
+        // An index from an earlier run would say this one finished, so it goes before any sheet.
+        let index = self.dest_dir.join(format!("{stem}.sheets.json"));
+        remove(&index).map_err(LayoutSetError::Index)?;
+        if paper.is_empty() {
+            return Ok(LayoutSetOutput {
+                sheets: Vec::new(),
+                index: None,
+            });
+        }
         let width = paper.len().to_string().len().max(2);
+
+        // A layout is a sheet (#1557, item 6) when it has an entity of its own other than a
+        // viewport, or a viewport that is on, not hidden when plotting, not on a no-plot layer and
+        // has a view height. Which viewport is the paper view itself is the print profile's call
+        // (#1560) and not made yet, so a layout holding only its paper view is a sheet that comes
+        // out `EmptyAfterView`, never one that is called empty when it shows the model. A provider
+        // that cannot list viewports, or layers, has none to show, or none that is no-plot.
+        let facts = provider
+            .viewports()
+            .or_else(|e| match e {
+                ProviderError::CannotReport(_) => Ok(Vec::new()),
+                e => Err(e),
+            })
+            .and_then(|viewports| {
+                let no_plot: Vec<String> = match provider.layers() {
+                    Ok(l) => l
+                        .into_iter()
+                        .filter(|l| !l.plottable)
+                        .map(|l| l.name)
+                        .collect(),
+                    Err(ProviderError::CannotReport(_)) => Vec::new(),
+                    Err(e) => return Err(e),
+                };
+                Ok((viewports, no_plot))
+            });
+        let has_content = |layout: &LayoutState| -> Result<bool, ProviderError> {
+            let mut cursor = provider.entities(&EntityScope::Layout(layout.id))?;
+            while let Some(e) = cursor.next_entity()? {
+                if e.provenance.class_name != "VIEWPORT" {
+                    return Ok(true);
+                }
+            }
+            let (viewports, no_plot) = facts.as_ref().map_err(Clone::clone)?;
+            Ok(viewports.iter().any(|v| {
+                v.layout == layout.id
+                    && v.visible
+                    && !v.hide_plot
+                    && v.view_height > 0.0
+                    && !no_plot.iter().any(|n| n.eq_ignore_ascii_case(&v.layer))
+            }))
+        };
+        // The layout name as a file name part: every byte outside `[A-Za-z0-9._-]` becomes `-`, runs
+        // of `-` collapse, `-` and `.` are trimmed from both ends, at most 64 bytes, `layout` when
+        // nothing is left.
+        let slug = |name: &str| -> String {
+            let mut s = String::with_capacity(name.len());
+            for b in name.bytes() {
+                let b = if b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_') {
+                    b
+                } else {
+                    b'-'
+                };
+                if !(b == b'-' && s.ends_with('-')) {
+                    s.push(char::from(b));
+                }
+            }
+            let trim = |s: &str| s.trim_matches(['-', '.']).to_owned();
+            let mut s = trim(&s);
+            s.truncate(64);
+            let s = trim(&s);
+            if s.is_empty() { "layout".to_owned() } else { s }
+        };
 
         let mut sheets = Vec::new();
         let mut rows = Vec::new();
@@ -244,40 +333,47 @@ impl<'a> PvecLayoutSet<'a> {
             let nn = format!("{:0width$}", n + 1);
             let name = format!("{stem}.{nn}-{}.pvec", slug(&layout.name));
             let file = self.dest_dir.join(&name);
-            let outcome = match has_content(provider, layout) {
-                Ok(false) => Err(SheetSkip::Empty),
-                Err(e) => Err(SheetSkip::Failed(PvecConvertError::View(e.into()))),
-                Ok(true) => {
-                    let mut c = (self.sheet)(
-                        PvecConversion::new(self.source, &file)
-                            .view_profile(ViewProfile::print_profile(layout.name.as_str())),
-                    );
-                    c.view_profile.space = SpaceSelection::PaperLayout(layout.name.clone());
-                    let observer = c.observer.clone();
-                    let result = if c.cancel.is_cancelled() {
-                        Err(PvecConvertError::Cancelled)
-                    } else {
-                        match c.unit.or(header_unit) {
-                            Some(unit) => c.run(provider, unit),
-                            None => Err(PvecConvertError::UnitRequired),
-                        }
-                    };
-                    match report_failure(observer.as_deref(), result) {
-                        Ok(out) => Ok(out),
-                        Err(PvecConvertError::Cancelled) => return Err(LayoutSetError::Cancelled),
-                        Err(
-                            PvecConvertError::NothingStorable { .. }
-                            | PvecConvertError::Write(WriteError::NoGeometry),
-                        ) => Err(SheetSkip::EmptyAfterView),
-                        Err(e) => Err(SheetSkip::Failed(e)),
-                    }
-                }
+            let mut c = (self.sheet)(
+                PvecConversion::new(self.source, &file)
+                    .view_profile(ViewProfile::print_profile(layout.name.as_str())),
+            );
+            c.view_profile.space = SpaceSelection::PaperLayout(layout.name.clone());
+            if c.cancel.is_cancelled() {
+                return Err(LayoutSetError::Cancelled);
+            }
+            let observer = c.observer.clone();
+            let result = match has_content(layout) {
+                Ok(false) => Ok(None),
+                Err(e) => Err(PvecConvertError::View(e.into())),
+                Ok(true) => match c.unit.or(header_unit) {
+                    Some(unit) => c.run(provider, unit).map(Some),
+                    None => Err(PvecConvertError::UnitRequired),
+                },
             };
+            let mut outcome = match report_failure(observer.as_deref(), result) {
+                Ok(Some(out)) => Ok(out),
+                Ok(None) => Err(SheetSkip::Empty),
+                Err(PvecConvertError::Cancelled) => return Err(LayoutSetError::Cancelled),
+                Err(
+                    PvecConvertError::NothingStorable { .. }
+                    | PvecConvertError::Write(WriteError::NoGeometry),
+                ) => Err(SheetSkip::EmptyAfterView),
+                Err(e) => Err(SheetSkip::Failed(e)),
+            };
+            // A sheet with nothing to print has no file, so one an earlier run left there goes. A
+            // failed sheet leaves its path as it was, the way a failed `PvecConversion` does.
+            if matches!(outcome, Err(SheetSkip::Empty | SheetSkip::EmptyAfterView))
+                && let Err(e) = remove(&file).and_then(|()| remove(&report_path(&file)))
+            {
+                outcome = Err(SheetSkip::Failed(PvecConvertError::Publish(
+                    PublishError::Io(e),
+                )));
+            }
             let (status, reason, written) = match &outcome {
                 Ok(o) => ("written", None, Some(o.written)),
                 Err(SheetSkip::Empty) => ("empty", None, None),
                 Err(SheetSkip::EmptyAfterView) => ("empty-after-view", None, None),
-                Err(SheetSkip::Failed(e)) => ("failed", Some(error_chain(e)), None),
+                Err(SheetSkip::Failed(e)) => ("failed", Some(chain(e)), None),
             };
             let sheet = outcome.as_ref().ok().and_then(|o| o.report.sheet.clone());
             rows.push(IndexRow {
@@ -298,7 +394,6 @@ impl<'a> PvecLayoutSet<'a> {
             });
         }
 
-        let index = self.dest_dir.join(format!("{stem}.sheets.json"));
         let partial = self.dest_dir.join(format!("{stem}.sheets.json.partial"));
         let body = Index {
             schema_version: 1,
@@ -346,88 +441,7 @@ struct IndexRow {
     status: &'static str,
     reason: Option<String>,
     written: Option<u64>,
-    /// The report's `sheet` section: paper, unit, rotation, plot scale, CTB name.
+    /// The report's `sheet` section: paper, unit, rotation, plot scale, CTB name. Absent for a
+    /// sheet with no file, which has no report to take it from.
     sheet: Option<SheetSummary>,
-}
-
-/// The layout name as a file name part: see the module docs.
-fn slug(name: &str) -> String {
-    let mut s = String::with_capacity(name.len());
-    for b in name.bytes() {
-        let keep = b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-');
-        if keep {
-            s.push(char::from(b));
-        } else if !s.ends_with('-') {
-            s.push('-');
-        }
-    }
-    let trim = |s: &str| s.trim_matches(['-', '.']).to_owned();
-    let mut s = trim(&s);
-    s.truncate(64);
-    let s = trim(&s);
-    if s.is_empty() { "layout".to_owned() } else { s }
-}
-
-/// Whether a paper layout is a sheet (#1557, item 6): it has an entity of its own other than a
-/// viewport, or a viewport other than its paper view (id 1) that is on, not hidden when plotting,
-/// not on a no-plot layer and has a view height. A provider that cannot list viewports, or layers,
-/// has none to show, or none that is no-plot.
-fn has_content<P: DwgProvider>(provider: &P, layout: &LayoutState) -> Result<bool, ProviderError> {
-    let mut cursor = provider.entities(&EntityScope::Layout(layout.id))?;
-    while let Some(e) = cursor.next_entity()? {
-        if e.provenance.class_name != "VIEWPORT" {
-            return Ok(true);
-        }
-    }
-    let viewports = match provider.viewports() {
-        Ok(v) => v,
-        Err(ProviderError::CannotReport(_)) => return Ok(false),
-        Err(e) => return Err(e),
-    };
-    let no_plot: Vec<String> = match provider.layers() {
-        Ok(l) => l
-            .into_iter()
-            .filter(|l| !l.plottable)
-            .map(|l| l.name)
-            .collect(),
-        Err(ProviderError::CannotReport(_)) => Vec::new(),
-        Err(e) => return Err(e),
-    };
-    Ok(viewports.iter().any(|v| {
-        v.layout == layout.id
-            && v.id != 1
-            && v.visible
-            && !v.hide_plot
-            && v.view_height > 0.0
-            && !no_plot.iter().any(|n| n.eq_ignore_ascii_case(&v.layer))
-    }))
-}
-
-/// An error and its sources, for the index.
-fn error_chain(e: &dyn std::error::Error) -> String {
-    let mut out = e.to_string();
-    let mut at = e.source();
-    while let Some(s) = at {
-        out.push_str(": ");
-        out.push_str(&s.to_string());
-        at = s.source();
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::slug;
-
-    #[test]
-    fn the_slug_keeps_safe_bytes_and_collapses_the_rest() {
-        assert_eq!(slug("A-101 Plan"), "A-101-Plan");
-        assert_eq!(slug("a/101  plan"), "a-101-plan");
-        assert_eq!(slug("Fa\u{e7}ade"), "Fa-ade");
-        assert_eq!(slug(".."), "layout");
-        assert_eq!(slug(""), "layout");
-        assert_eq!(slug("-x-"), "x");
-        assert_eq!(slug(&"y".repeat(100)).len(), 64);
-        assert_eq!(slug(&format!("{}-z", "w".repeat(63))), "w".repeat(63));
-    }
 }
