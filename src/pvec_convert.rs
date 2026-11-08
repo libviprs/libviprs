@@ -63,6 +63,7 @@ mod capability;
 mod georef;
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+pub use crate::pvec::writer::recalibrate;
 pub use calibration::{
     Calibration, CalibrationError, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat,
     Georeference, GeoreferenceMethod, ScaleClaim, ScaleProvenance,
@@ -213,7 +214,7 @@ pub struct PvecConversion<'a> {
     spill: Option<SpillConfig>,
     cancel: CancelToken,
     gate: Gate,
-    calibration: Option<String>,
+    calibration: Option<Calibration>,
     control_points: Vec<[f64; 2]>,
     observer: Option<Arc<dyn EngineObserver>>,
     queue_capacity: usize,
@@ -327,11 +328,13 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
-    /// The identifier of the calibration record the application holds for this drawing. It goes
-    /// into the georeference sidecar and nowhere else: the artifact's bytes do not depend on it.
+    /// The drawing's calibration, written into the artifact's calibration block (issue #1552). A
+    /// DWG gets none unless it is given here: its `$INSUNITS` is already the manifest's unit. The
+    /// calibration's [`external_id`](Calibration::external_id) is also the georeference sidecar's
+    /// `calibration_id`.
     #[must_use]
-    pub fn calibration(mut self, id: impl Into<String>) -> Self {
-        self.calibration = Some(id.into());
+    pub fn calibration(mut self, calibration: Calibration) -> Self {
+        self.calibration = Some(calibration);
         self
     }
 
@@ -749,6 +752,10 @@ impl<'a> PvecConversion<'a> {
             }
         };
 
+        let calibration_id = calibration
+            .as_ref()
+            .and_then(Calibration::external_id)
+            .map(str::to_owned);
         let sidecar = georef_path(dest);
         // The sidecar is staged first and moved into place once the pair is published, so a failed
         // or cancelled run leaves the previous one as it was.
@@ -811,7 +818,7 @@ impl<'a> PvecConversion<'a> {
                     max: [b.max().x, b.max().y],
                 }),
                 unit: UnitRecord::new(declared, unit),
-                calibration_id: calibration,
+                calibration_id,
                 control_points,
             })
             .write_to(&staged)
@@ -855,6 +862,10 @@ impl<'a> PvecConversion<'a> {
             );
             drop(geometries);
             let mut open = opened.map_err(write_error)?;
+            // PVec sorts the calibration block after every other kind, so it can go in first.
+            if let Some(c) = &calibration {
+                open.calibration(c).map_err(write_error)?;
+            }
             if select == StreamSelection::NONE && regions.is_none() {
                 return Ok((open, None, None));
             }

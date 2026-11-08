@@ -130,7 +130,12 @@ fn a_geopdf_wkt_is_stored_as_wkt1() {
         &geopdf(dictionary! { "Type" => "GEOGCS", "WKT" => literal(wkt.as_bytes()) }),
         &out,
     );
-    let def = stored(&out).unwrap().georeference.unwrap().definition.unwrap();
+    let def = stored(&out)
+        .unwrap()
+        .georeference
+        .unwrap()
+        .definition
+        .unwrap();
     assert_eq!(def.format, StoredFormat::Wkt1);
     assert_eq!(def.text, wkt);
     fs::remove_dir_all(&dir).unwrap();
