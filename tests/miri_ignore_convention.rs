@@ -874,7 +874,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1556 adds 1: `tests/pvec_1416_diagnostics.rs::issue_1556_a_retired_code_is_listed_as_retired_and_is_gone_from_the_closed_set`, which reads the diagnostics document. It said 1063 before this line moved.
 /// #1559 adds 3: the `tests/pvec_1559_print_profile.rs` cells that read the print profile ADR, the spike and the unsupported policy. It said 1064 before this line moved.
 /// #1561 adds 2: the `tests/pvec_1561_dxf.rs` cells that list the DXF twins on disk and read the gate baselines. Its two other annotated cells read the twins through the provider, which the detector does not see. It said 1067 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1069;
+/// #1573 removes 1: `tests/pvec_drift.rs::n_1471_the_fixtures_whose_bits_differ_between_architectures_agree_within_the_numeric_policy` read the arm64 accepted dump, which is gone now both architectures agree. It said 1069 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1068;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

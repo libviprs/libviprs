@@ -650,40 +650,6 @@ fn n_1471_the_accepted_dump_hashes_to_the_committed_digest() {
     }
 }
 
-#[test]
-#[cfg_attr(miri, ignore)]
-fn n_1471_the_fixtures_whose_bits_differ_between_architectures_agree_within_the_numeric_policy() {
-    // The x86_64 and aarch64 accepted outputs of these fixtures hash differently, and neither is a
-    // drift from the other: a check against either gives a clean report on both architectures.
-    let Ok(over) = std::fs::read_to_string(dir().join("accepted.aarch64.dump")) else {
-        panic!("tests/fixtures/pvec-drift/accepted.aarch64.dump is missing");
-    };
-    let base = std::fs::read_to_string(dir().join("accepted.dump")).unwrap();
-    let corpus = Corpus::open();
-    assert!(!sections(&over).is_empty());
-    for (id, arm) in sections(&over) {
-        let fx = corpus.get(id);
-        let x64 = drift::accepted_section(&base, id).unwrap();
-        assert_ne!(drift::digest(x64), drift::digest(arm));
-        let (bytes, refused) = convert_counting(fx).unwrap();
-        let truth = fx
-            .has("expected.math.json")
-            .then(|| fx.json("expected.math.json"));
-        for accepted in [x64, arm] {
-            let r = drift::check_refused(
-                id,
-                fx.class.tag(),
-                truth.as_ref(),
-                Some(accepted),
-                &bytes,
-                refused,
-            )
-            .unwrap();
-            assert!(r.is_clean(), "{}", r.to_text());
-        }
-    }
-}
-
 // ------------------------------------------------------------------------- the example binary
 
 #[test]
