@@ -582,6 +582,8 @@ fn issue_1565_viewport_clipped_001_draws_its_line_cut_at_the_clip_polygon() {
         close(z[0], 2060.0 / 17.0) && close(z[1], 1545.0 / 17.0),
         "{z:?}"
     );
-    assert_eq!(line[0].0.fidelity, "SupportedExact");
+    // The probe's line is SupportedEquivalent in model space already
+    // (tests/fixtures/pvec-gate/classification.baseline), and a straight cut keeps its class.
+    assert_eq!(line[0].0.fidelity, "SupportedEquivalent");
     let _ = fs::remove_dir_all(dir);
 }

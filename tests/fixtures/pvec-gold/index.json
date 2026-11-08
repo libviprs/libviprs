@@ -1399,7 +1399,7 @@
     },
     "source.dwg": {
      "bytes": 20883,
-     "sha256": "bb07f1bda7b6f5b035fe1f3092a9aa4e0ca38bb1406b26f36ed6b0de1f5a2f7d"
+     "sha256": "72114a9e56e413d8acfcc4f2d6f485dc52233785f584a59a12012c1c3afcafaf"
     }
    },
    "group": "viewports",
@@ -1418,7 +1418,7 @@
     },
     "source.dwg": {
      "bytes": 20883,
-     "sha256": "bb07f1bda7b6f5b035fe1f3092a9aa4e0ca38bb1406b26f36ed6b0de1f5a2f7d"
+     "sha256": "72114a9e56e413d8acfcc4f2d6f485dc52233785f584a59a12012c1c3afcafaf"
     }
    },
    "group": "viewports",
@@ -1436,8 +1436,8 @@
      "sha256": "26fd4da52aa6077772abe6d35e42dda7ded83e4fef1fa857b2e7f3bc3045a138"
     },
     "source.dwg": {
-     "bytes": 21491,
-     "sha256": "8abc2af72df15e3f8f42b72996fae2a7ab8bf0fc04186330f2c57e127e292d50"
+     "bytes": 21360,
+     "sha256": "2d15a2ad5ad7e8278c9183695748c9e751058e877eb12d417946e88dc70df75a"
     }
    },
    "group": "viewports",

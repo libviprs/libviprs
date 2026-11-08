@@ -1089,10 +1089,17 @@ mod with_a_drawing {
             .view_profile(ViewProfile::print_profile("Layout1"))
             .probe()
             .expect("Layout1 is walked");
-        assert_eq!(probed.encountered(), 20);
-        assert_eq!(probed.count(FidelityClass::Unsupported), 20);
+        // Since #1579 the probe's targets are at the origin, so each of the 20 viewports is
+        // placed and the model line is counted once through each of them.
+        assert_eq!(probed.encountered(), 40);
+        assert_eq!(probed.count(FidelityClass::Unsupported), 0);
         let reasons: Vec<_> = probed.reasons().collect();
-        assert_eq!(reasons, [(ReasonCode::ViewNotEnabled, "VIEWPORT", 20)]);
+        assert!(
+            !reasons
+                .iter()
+                .any(|(r, _, _)| *r == ReasonCode::ViewNotEnabled),
+            "{reasons:?}"
+        );
     }
 
     #[test]

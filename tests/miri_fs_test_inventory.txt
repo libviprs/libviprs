@@ -1007,6 +1007,9 @@ annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_each_viewport_
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_one_model_entity_through_two_viewports_has_two_provenance_rows_of_kind_2
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_what_a_viewport_shows_is_cut_exactly_at_its_rectangle
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1577_a_viewport_on_a_no_plot_layer_draws_what_it_shows_and_hides_its_border
+annotated   fs-detected  tests/pvec_1579_probe_viewports.rs::issue_1579_the_dxf_twin_of_the_probe_draws_the_same
+annotated   fs-detected  tests/pvec_1579_probe_viewports.rs::issue_1579_the_gold_probe_draws_its_line_through_every_viewport_where_the_record_puts_it
 annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_circle_over_a_viewport_edge_is_cut_into_an_arc_of_itself
 annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_circle_over_the_sheet_edge_is_cut_too
 annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_rational_spline_over_an_edge_is_still_refused_with_508
@@ -1304,6 +1307,8 @@ annotated   not-detected tests/pvec_1439_view_limits.rs::a_fan_out_past_the_inst
 annotated   not-detected tests/pvec_1439_view_limits.rs::the_default_limits_still_admit_an_ordinary_drawing
 annotated   not-detected tests/pvec_1559_print_profile.rs::issue_1559_applying_viewport_freezes_is_refused_not_ignored
 annotated   not-detected tests/pvec_1559_print_profile.rs::issue_1559_exact_viewport_clipping_is_refused_not_ignored
+annotated   not-detected tests/pvec_1579_probe_viewports.rs::issue_1579_every_probe_viewport_has_its_target_at_the_origin
+annotated   not-detected tests/pvec_1579_probe_viewports.rs::issue_1579_probing_the_gold_probe_refuses_no_viewport
 annotated   not-detected tests/pvec_end_to_end.rs::n2_3_1050_an_ordering_perturbation_turns_the_determinism_check_red
 annotated   not-detected tests/pvec_gate_classification.rs::n2_8_1060_reclassifying_one_entity_is_a_one_line_baseline_diff
 annotated   not-detected tests/pvec_gate_classification.rs::n2_8_1060_the_classification_of_every_fixture_matches_the_checked_in_baseline

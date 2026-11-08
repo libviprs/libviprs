@@ -337,7 +337,8 @@ pub struct SheetViewport {
     /// the entity.
     pub id: i16,
     /// `drawn` (model space shows through it), `paper-view` (the sheet's own view, not a window
-    /// onto the model), `off`, `hide-plot`, `no-plot-layer`, or `refused`.
+    /// onto the model), `off`, `hide-plot`, or `refused`. A viewport on a no-plot layer is not a
+    /// status of its own: it is drawn or refused like any other, and says so in `border`.
     pub status: String,
     /// Why a refused viewport is refused: `non-plan`, `perspective`, `view-height`, `twist`,
     /// `target`, `clip-bulge` (a polygon boundary with a bulged edge), `clip-polygon` (fewer than
@@ -353,6 +354,10 @@ pub struct SheetViewport {
     pub paper_box: Option<[String; 4]>,
     /// For a drawn viewport, the rows written through it.
     pub entities: u64,
+    /// `no-plot-layer` when the viewport sits on a layer that does not plot: what it shows is
+    /// drawn, its border is not (P-3, #1577).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub border: Option<String>,
 }
 
 /// A layout's plot settings in the report's [`SheetSummary`], as the drawing stores them.
