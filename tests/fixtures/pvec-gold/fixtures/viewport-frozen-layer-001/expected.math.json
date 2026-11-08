@@ -1,0 +1,324 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "viewport-frozen-layer-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params-r3/viewport-frozen-layer-001.json",
+    "parameter_file_sha256": "cdd40244af127df6024af787083cccf536669fc7ec24c41afa2d73a2a71ba5f3",
+    "parameters": {
+      "id": "viewport-frozen-layer-001",
+      "kind": "viewport_print",
+      "description": "Two viewports on one layout looking at the same model space, which has a line on WALLS and one on DOORS. DOORS is frozen in the first viewport only, so it shows in the second and not in the first.",
+      "layout": "Layout1",
+      "layers": [
+        {
+          "name": "WALLS",
+          "plottable": true
+        },
+        {
+          "name": "DOORS",
+          "plottable": true
+        }
+      ],
+      "model_curves": [
+        {
+          "layer": "WALLS",
+          "start": [
+            "0",
+            "0",
+            "0"
+          ],
+          "end": [
+            "10",
+            "0",
+            "0"
+          ]
+        },
+        {
+          "layer": "DOORS",
+          "start": [
+            "0",
+            "2",
+            "0"
+          ],
+          "end": [
+            "10",
+            "2",
+            "0"
+          ]
+        }
+      ],
+      "paper_curves": [],
+      "viewports": [
+        {
+          "id": "vp01",
+          "center": [
+            "60",
+            "60"
+          ],
+          "width": "100",
+          "height": "80",
+          "view_center": [
+            "5",
+            "1"
+          ],
+          "view_height": "8",
+          "frozen_layers": [
+            "DOORS"
+          ]
+        },
+        {
+          "id": "vp02",
+          "center": [
+            "180",
+            "60"
+          ],
+          "width": "100",
+          "height": "80",
+          "view_center": [
+            "5",
+            "1"
+          ],
+          "view_height": "8"
+        }
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "viewport-frozen-layer-001-model-1",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "10.0",
+            "f64_hex": "0x4024000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "WALLS",
+        "on": true,
+        "frozen": false
+      }
+    },
+    {
+      "id": "viewport-frozen-layer-001-model-2",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "10.0",
+            "f64_hex": "0x4024000000000000"
+          },
+          {
+            "decimal": "2.0",
+            "f64_hex": "0x4000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "DOORS",
+        "on": true,
+        "frozen": false
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "viewport-frozen-layer-001-model-1",
+      "claim": "VIEWPORT_COUNT_PRESERVED",
+      "statement": "The layout Layout1 keeps exactly 2 viewport(s); none is dropped or merged."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "vp01",
+      "claim": "VIEWPORT_FREEZE_PRESERVED",
+      "statement": "The layers frozen in this viewport (DOORS) stay frozen in it and nowhere else."
+    }
+  ],
+  "viewports": [
+    {
+      "id": "vp01",
+      "layout": "Layout1",
+      "paper": {
+        "center": [
+          {
+            "decimal": "60.0",
+            "f64_hex": "0x404e000000000000"
+          },
+          {
+            "decimal": "60.0",
+            "f64_hex": "0x404e000000000000"
+          }
+        ],
+        "width": {
+          "decimal": "100.0",
+          "f64_hex": "0x4059000000000000"
+        },
+        "height": {
+          "decimal": "80.0",
+          "f64_hex": "0x4054000000000000"
+        }
+      },
+      "view": {
+        "center": [
+          {
+            "decimal": "5.0",
+            "f64_hex": "0x4014000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "height": {
+          "decimal": "8.0",
+          "f64_hex": "0x4020000000000000"
+        }
+      },
+      "frozen_layers": [
+        "DOORS"
+      ]
+    },
+    {
+      "id": "vp02",
+      "layout": "Layout1",
+      "paper": {
+        "center": [
+          {
+            "decimal": "180.0",
+            "f64_hex": "0x4066800000000000"
+          },
+          {
+            "decimal": "60.0",
+            "f64_hex": "0x404e000000000000"
+          }
+        ],
+        "width": {
+          "decimal": "100.0",
+          "f64_hex": "0x4059000000000000"
+        },
+        "height": {
+          "decimal": "80.0",
+          "f64_hex": "0x4054000000000000"
+        }
+      },
+      "view": {
+        "center": [
+          {
+            "decimal": "5.0",
+            "f64_hex": "0x4014000000000000"
+          },
+          {
+            "decimal": "1.0",
+            "f64_hex": "0x3ff0000000000000"
+          }
+        ],
+        "height": {
+          "decimal": "8.0",
+          "f64_hex": "0x4020000000000000"
+        }
+      }
+    }
+  ],
+  "layers": [
+    {
+      "name": "WALLS",
+      "on": true,
+      "frozen": false,
+      "plottable": true
+    },
+    {
+      "name": "DOORS",
+      "on": true,
+      "frozen": false,
+      "plottable": true
+    }
+  ]
+}
