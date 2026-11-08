@@ -11,8 +11,11 @@
 //! ```
 //!
 //! Coordinates are the page's own, in points, unscaled. PVec cannot declare points as a unit, so the
-//! manifest says `metres_per_unit` 1.0 and a reader that wants metres multiplies by 0.0254 / 72. The
-//! manifest box is the displayed page (after `/Rotate`) grown to take in any path that leaves it.
+//! manifest says `metres_per_unit` 1.0, and the output's [`Calibration`] carries what a point is: a
+//! `declared_unit` scale of 0.0254 / 72 metres (times `/UserUnit`), or the plan scale a `/VP`
+//! viewport states (issue #1547). A GeoPDF viewport adds a georeference fitted to its control points,
+//! in the same page space as the geometry. The report's `pdf.calibration` says which viewport was
+//! used and why anything the page said was not. The manifest box is the displayed page (after `/Rotate`) grown to take in any path that leaves it.
 //!
 //! The vectors go through the geometry funnel (`pvec::writer::open_geometry`),
 //! which is the one writer for entities, and the rasters are added to the open artifact before it is
@@ -39,15 +42,22 @@ use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::ordering::EntityId;
 use crate::pvec::pdf_bezier::{PdfNormalizedEntity, normalize_page};
 use crate::pvec::pdf_image::{PdfImageNote, PdfImageOptions, PdfImageReport, bake_page_images};
-use crate::pvec::pdf_vector::{PdfVectorError, PdfVectorLimits, extract_page_paths_from_bytes};
+use crate::pvec::pdf_vector::{
+    PdfMeasure, PdfVectorError, PdfVectorLimits, PdfVectorPage, extract_page_paths_from_bytes,
+};
 use crate::pvec::publish::{PublishError, publish};
 use crate::pvec::report::{
-    BoundsSplit, ConversionReport, EntityRow, PdfSummary, ReportBuilder, ReportError, ViewSummary,
-    XrefSummary,
+    BoundsSplit, ConversionReport, EntityRow, PdfCalibrationSummary, PdfSummary, ReportBuilder,
+    ReportError, ViewSummary, XrefSummary,
 };
 use crate::pvec::units::SourceUnit;
 use crate::pvec::writer::{WriteConfig, WriteError, open_geometry};
 use crate::raster_pvec::container::RasterWriteError;
+
+use super::calibration::{
+    Calibration, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat, Georeference,
+    GeoreferenceMethod, ScaleClaim, ScaleProvenance,
+};
 
 /// Why a PDF conversion failed. Every variant that wraps a lower error keeps it as `source()`.
 #[derive(Debug, Error)]
@@ -100,6 +110,9 @@ pub struct PdfConversionOutput {
     pub images: PdfImageReport,
     /// The fill, shading, pattern and image constructs counted on the page.
     pub fills: FillReport,
+    /// What the page says about its scale and place: always a scale (the point, or the plan scale
+    /// a viewport states), and a georeference when a GeoPDF viewport gives one (issue #1547).
+    pub calibration: Calibration,
 }
 
 /// One PDF page conversion, configured the way [`PvecConversion`](super::PvecConversion) is.
@@ -171,6 +184,220 @@ impl<'a> PdfConversion<'a> {
     ///
     /// [`PdfConvertError`]. After any error the destination and its report are as they were.
     pub fn convert(self) -> Result<PdfConversionOutput, PdfConvertError> {
+        /// What the page says about its scale and place (issue #1547), and the report's account of it.
+        ///
+        /// The viewport used is the last one with a measure whose box covers the displayed page (the
+        /// topmost, as PDF's own lookup picks), else the largest with a measure. An `/RL` measure gives a
+        /// plan scale, a `/GEO` measure a georeference fitted to its points; anything that cannot be used is
+        /// a note, and the scale falls back to the point.
+        fn calibrate(page: &PdfVectorPage) -> (Calibration, PdfCalibrationSummary) {
+            let mut notes = Vec::new();
+            let mut note = |key: &str| notes.push(key.to_owned());
+            // `/UserUnit` is a positive number of points; anything outside 2^-20 to 2^20 is ignored.
+            let user_unit = if (1.0 / 1_048_576.0..=1_048_576.0).contains(&page.user_unit) {
+                page.user_unit
+            } else {
+                note("user-unit-ignored");
+                1.0
+            };
+            let paper = user_unit * 0.0254 / 72.0;
+            let declared = ScaleClaim {
+                metres_per_source_unit: paper,
+                provenance: ScaleProvenance::DeclaredUnit,
+                uncertainty: None,
+                note: String::new(),
+            };
+            let area = |b: &[f64; 4]| (b[2] - b[0]) * (b[3] - b[1]);
+            let covers = |b: &[f64; 4]| {
+                b[0] <= 0.5 && b[1] <= 0.5 && b[2] >= page.width - 0.5 && b[3] >= page.height - 0.5
+            };
+            let measured = || {
+                page.viewports
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(n, v)| Some((n, &v.bbox, v.measure.as_ref()?)))
+            };
+            let chosen = measured().rfind(|(_, b, _)| covers(b)).or_else(|| {
+                measured().fold(None, |best, c| match best {
+                    Some(b) if area(b.1) >= area(c.1) => Some(b),
+                    _ => Some(c),
+                })
+            });
+            let (mut scale, mut georeference) = (None, None);
+            match chosen.map(|c| c.2) {
+                None => {}
+                Some(PdfMeasure::Rl { ratio, x, y }) => {
+                    let metres = |label: &str| -> Option<f64> {
+                        Some(match label.trim().to_ascii_lowercase().as_str() {
+                            "m" | "meter" | "meters" | "metre" | "metres" => 1.0,
+                            "km" => 1000.0,
+                            "cm" => 0.01,
+                            "mm" => 0.001,
+                            "in" | "inch" | "inches" | "\"" => 0.0254,
+                            "ft" | "foot" | "feet" | "'" => 0.3048,
+                            "yd" | "yard" | "yards" => 0.9144,
+                            "mi" | "mile" | "miles" => 1609.344,
+                            _ => return None,
+                        })
+                    };
+                    let factor = |f: &crate::pvec::pdf_vector::PdfNumberFormat| {
+                        metres(&f.unit).map(|m| f.factor * m)
+                    };
+                    match x.as_ref().and_then(factor) {
+                        None => note("rl-unit-unknown"),
+                        Some(fx)
+                            if y.as_ref()
+                                .and_then(factor)
+                                .is_some_and(|fy| (fx - fy).abs() > 1e-9 * fx.abs()) =>
+                        {
+                            note("rl-anisotropic");
+                        }
+                        Some(fx) => {
+                            // The paper to world ratio as the smallest fraction within one part in a million
+                            // of it (PDF reals are often single precision), by continued fractions.
+                            let r = fx / paper;
+                            let (mut h0, mut h1, mut k0, mut k1) = (0u64, 1u64, 1u64, 0u64);
+                            let mut rest = r;
+                            let mut best = None;
+                            while rest.is_finite() && rest < 4.3e9 {
+                                let a = rest.floor() as u64;
+                                let (h, k) = (a * h1 + h0, a * k1 + k0);
+                                if h > u64::from(u32::MAX) || k > u64::from(u32::MAX) {
+                                    break;
+                                }
+                                (h0, h1, k0, k1) = (h1, h, k1, k);
+                                best = Some((h, k));
+                                if (h as f64 / k as f64 - r).abs() <= 1e-6 * r || rest == a as f64 {
+                                    break;
+                                }
+                                rest = 1.0 / (rest - a as f64);
+                            }
+                            let mut chars = ratio.chars().filter(|c| !c.is_control());
+                            let text: String = chars
+                                .by_ref()
+                                .scan(0, |len, c| {
+                                    *len += c.len_utf8();
+                                    (*len <= 255).then_some(c)
+                                })
+                                .collect();
+                            let claim =
+                                best.filter(|&(h, k)| h > 0 && k > 0).map(|(world, sheet)| {
+                                    ScaleClaim {
+                                        metres_per_source_unit: fx,
+                                        provenance: ScaleProvenance::PlanScale {
+                                            numerator: sheet as u32,
+                                            denominator: world as u32,
+                                            paper_metres_per_unit: paper,
+                                        },
+                                        uncertainty: None,
+                                        note: text,
+                                    }
+                                });
+                            match claim
+                                .filter(|c| Calibration::new(Some(c.clone()), None, None).is_ok())
+                            {
+                                Some(c) => scale = Some(c),
+                                None => note("rl-refused"),
+                            }
+                        }
+                    }
+                }
+                Some(PdfMeasure::Geo {
+                    local,
+                    geographic,
+                    gcs,
+                }) => {
+                    let wkt = |text: &str| CrsDefinition {
+                        format: DefinitionFormat::Wkt,
+                        text: text.to_owned(),
+                    };
+                    // A projected GCS has its GPTS in its geographic base, which only the WKT names:
+                    // the GEOGCS (WKT 1) or BASEGEOGCRS (WKT 2) node, brackets matched.
+                    let base = |text: &str| -> Option<String> {
+                        let start = ["GEOGCS[", "BASEGEOGCRS["]
+                            .iter()
+                            .find_map(|k| text.find(k))?;
+                        let mut depth = 0usize;
+                        for (i, c) in text[start..].char_indices() {
+                            match c {
+                                '[' => depth += 1,
+                                ']' => {
+                                    depth -= 1;
+                                    if depth == 0 {
+                                        return Some(text[start..=start + i].to_owned());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        None
+                    };
+                    let crs = if gcs.projected {
+                        match gcs.wkt.as_deref().and_then(base) {
+                            Some(b) => Some((None, Some(wkt(&b)))),
+                            None => {
+                                note("geo-projected-without-definition");
+                                None
+                            }
+                        }
+                    } else if gcs.epsg.is_none() && gcs.wkt.is_none() {
+                        note("geo-no-crs");
+                        None
+                    } else {
+                        Some((
+                            gcs.epsg.map(|e| format!("EPSG:{e}")),
+                            gcs.wkt.as_deref().map(wkt),
+                        ))
+                    };
+                    if let Some((crs_id, definition)) = crs {
+                        let control_points: Vec<ControlPoint> = local
+                            .iter()
+                            .zip(geographic)
+                            .map(|(s, g)| ControlPoint {
+                                source: *s,
+                                world: [g[1], g[0]],
+                            })
+                            .collect();
+                        let fitted = Georeference::fit(&control_points).ok().map(
+                            |(affine, residual_max)| Georeference {
+                                affine,
+                                crs_kind: CrsKind::Geographic,
+                                method: GeoreferenceMethod::Fitted,
+                                crs_id,
+                                definition,
+                                control_points,
+                                residual_max,
+                            },
+                        );
+                        match fitted
+                            .filter(|g| Calibration::new(None, Some(g.clone()), None).is_ok())
+                        {
+                            Some(g) => georeference = Some(g),
+                            None => note("geo-refused"),
+                        }
+                    }
+                }
+                Some(_) => note("measure-unread"),
+            }
+            let summary = PdfCalibrationSummary {
+                viewports: page.viewports.len() as u64,
+                viewport: chosen.map(|c| c.0 as u64),
+                scale: if scale.is_some() {
+                    "plan-scale"
+                } else {
+                    "declared-unit"
+                }
+                .to_owned(),
+                georeference: georeference
+                    .as_ref()
+                    .map(|g| g.crs_id.clone().unwrap_or_else(|| "definition".to_owned())),
+                notes,
+            };
+            let calibration = Calibration::new(Some(scale.unwrap_or(declared)), georeference, None)
+                .expect("a scale and a georeference that were each accepted make a calibration");
+            (calibration, summary)
+        }
+
         let tell = |event: EngineEvent| {
             if let Some(o) = &self.observer {
                 o.on_event(event);
@@ -191,6 +418,7 @@ impl<'a> PdfConversion<'a> {
         let page = extract_page_paths_from_bytes(&bytes, self.page, &self.limits)
             .map_err(PdfConvertError::Open)?;
         drop(bytes);
+        let (calibration, calibration_summary) = calibrate(&page);
         tell(EngineEvent::ConversionSourceOpened {
             provider: "pdf".to_owned(),
         });
@@ -313,6 +541,7 @@ impl<'a> PdfConversion<'a> {
                 .map(|f| (f.policy.reason.to_owned(), f.count))
                 .collect(),
             text_omitted: page.text.omitted(),
+            calibration: Some(calibration_summary),
         });
         let json = report.to_json_string().map_err(PdfConvertError::Report)?;
         publish(
@@ -335,6 +564,7 @@ impl<'a> PdfConversion<'a> {
             rasters,
             images: bake.report,
             fills,
+            calibration,
         })
     }
 }

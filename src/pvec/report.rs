@@ -209,6 +209,27 @@ pub struct PdfSummary {
     pub fills: BTreeMap<String, u64>,
     /// Text items omitted.
     pub text_omitted: u64,
+    /// What the page said about its scale and place (#1547). Optional and ignorable, like
+    /// [`ComponentsSummary`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration: Option<PdfCalibrationSummary>,
+}
+
+/// What a PDF conversion read about the page's scale and place (#1547), and what it made of it.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PdfCalibrationSummary {
+    /// The `/VP` viewports on the page.
+    pub viewports: u64,
+    /// The index in `/VP` of the viewport whose measure was used, absent when none was.
+    pub viewport: Option<u64>,
+    /// The scale's provenance: `declared-unit` (the point) or `plan-scale` (the viewport's `/RL`).
+    pub scale: String,
+    /// The georeference's CRS id, or `definition` when it is named by its definition only. Absent
+    /// when there is no georeference.
+    pub georeference: Option<String>,
+    /// Why something the page said was not used, by key (`rl-unit-unknown`,
+    /// `geo-projected-without-definition`), in the order met.
+    pub notes: Vec<String>,
 }
 
 /// What the component streams of a conversion did (#1525). Optional and ignorable: a reader that

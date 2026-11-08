@@ -246,6 +246,76 @@ pub struct PdfVectorPage {
     pub pattern_selections: u32,
     /// Images painted, in content-stream order, forms expanded in place (issue #1328).
     pub images: Vec<PdfImagePlacement>,
+    /// The page's `/VP` viewports, in array order (issue #1547).
+    pub viewports: Vec<PdfViewport>,
+    /// `/UserUnit`, the size of one user space unit in points: 1 unless the page says otherwise.
+    pub user_unit: f64,
+}
+
+/// One `/VP` viewport of a page (issue #1547): a box on the page that says what its contents
+/// measure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfViewport {
+    /// `/BBox` in page space (box origin removed and `/Rotate` applied, like the path
+    /// coordinates), as `[min x, min y, max x, max y]`.
+    pub bbox: [f64; 4],
+    /// `/Name`, when it is a text string.
+    pub name: Option<String>,
+    /// `/Measure`, when there is one.
+    pub measure: Option<PdfMeasure>,
+}
+
+/// A viewport's `/Measure` dictionary (ISO 32000-2, 12.9).
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum PdfMeasure {
+    /// `/Subtype /RL`: a rectilinear measure, which is how a sheet states its plan scale.
+    Rl {
+        /// `/R`, the ratio as the sheet prints it (`1 in = 10 ft`).
+        ratio: String,
+        /// The first number format of `/X`.
+        x: Option<PdfNumberFormat>,
+        /// The first number format of `/Y`, when the y axis has its own.
+        y: Option<PdfNumberFormat>,
+    },
+    /// `/Subtype /GEO`: a geospatial measure.
+    Geo {
+        /// `/LPTS` (else `/Bounds`, else the unit square's corners) mapped through `/BBox` into page
+        /// space, one per geographic point.
+        local: Vec<PdfPoint>,
+        /// `/GPTS` as written: (latitude, longitude) pairs, in degrees.
+        geographic: Vec<[f64; 2]>,
+        /// `/GCS`.
+        gcs: PdfGcs,
+    },
+    /// A measure this reader does not take: another subtype, or one it could not read.
+    Unread {
+        /// `/Subtype` as written, empty when there is none.
+        subtype: String,
+        /// Why it was not read.
+        detail: String,
+    },
+}
+
+/// The first `/NumberFormat` of an `/RL` axis: one user space unit is `factor` of `unit`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfNumberFormat {
+    /// `/U`, the unit's label as written (`ft`, `m`).
+    pub unit: String,
+    /// `/C`, the conversion factor from user space units.
+    pub factor: f64,
+}
+
+/// A GEO measure's `/GCS`. The CRS's identity, never interpreted here.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfGcs {
+    /// `/Type /PROJCS`. A projected GCS still has its `/GPTS` in latitude and longitude, of its
+    /// geographic base.
+    pub projected: bool,
+    /// `/EPSG`, when present.
+    pub epsg: Option<i64>,
+    /// `/WKT`, when present.
+    pub wkt: Option<String>,
 }
 
 /// One image painted by the page: an image XObject invoked with `Do`, or an inline image
@@ -677,7 +747,146 @@ pub fn extract_page_paths_from_bytes(
         shading_paints: run.shadings,
         pattern_selections: run.patterns,
         images: run.images,
+        viewports: read_viewports(&doc, page_id, &base),
+        user_unit: doc
+            .get_dictionary(page_id)
+            .ok()
+            .and_then(|d| d.get(b"UserUnit").ok())
+            .and_then(number)
+            .unwrap_or(1.0),
     })
+}
+
+/// The `/VP` array of a page (issue #1547), at most 64 viewports, each `/BBox` mapped by `base`
+/// into page space. A viewport with no usable `/BBox` is skipped; a measure that cannot be read is
+/// kept as [`PdfMeasure::Unread`], so the report can say so.
+fn read_viewports(doc: &Document, page_id: lopdf::ObjectId, base: &Matrix) -> Vec<PdfViewport> {
+    fn deref<'a>(doc: &'a Document, o: &'a Object) -> Option<&'a Object> {
+        doc.dereference(o).ok().map(|(_, o)| o)
+    }
+    let numbers = |o: &Object| -> Option<Vec<f64>> {
+        deref(doc, o)?
+            .as_array()
+            .ok()?
+            .iter()
+            .map(|v| deref(doc, v).and_then(number))
+            .collect()
+    };
+    let text = |d: &Dictionary, key: &[u8]| {
+        d.get(key)
+            .ok()
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| lopdf::decode_text_string(o).ok())
+    };
+    let Some(vps) = doc
+        .get_dictionary(page_id)
+        .ok()
+        .and_then(|d| d.get(b"VP").ok())
+        .and_then(|o| deref(doc, o))
+        .and_then(|o| o.as_array().ok())
+    else {
+        return Vec::new();
+    };
+    let format = |d: &Dictionary, key: &[u8]| -> Option<PdfNumberFormat> {
+        let first = deref(doc, d.get(key).ok()?)?.as_array().ok()?.first()?;
+        let f = deref(doc, first)?.as_dict().ok()?;
+        Some(PdfNumberFormat {
+            unit: text(f, b"U")?,
+            factor: number(deref(doc, f.get(b"C").ok()?)?)?,
+        })
+    };
+    let measure = |m: &Dictionary, [x0, y0, x1, y1]: [f64; 4]| -> PdfMeasure {
+        let subtype = m
+            .get(b"Subtype")
+            .ok()
+            .and_then(|o| o.as_name().ok())
+            .map(|n| String::from_utf8_lossy(n).into_owned())
+            .unwrap_or_default();
+        let unread = |detail: &str| PdfMeasure::Unread {
+            subtype: subtype.clone(),
+            detail: detail.to_owned(),
+        };
+        match subtype.as_str() {
+            "RL" => PdfMeasure::Rl {
+                ratio: text(m, b"R").unwrap_or_default(),
+                x: format(m, b"X"),
+                y: format(m, b"Y"),
+            },
+            "GEO" => {
+                let pairs = |key: &[u8]| m.get(key).ok().and_then(numbers);
+                let Some(gpts) = pairs(b"GPTS") else {
+                    return unread("no /GPTS array of numbers");
+                };
+                let unit = pairs(b"LPTS")
+                    .or_else(|| pairs(b"Bounds"))
+                    .unwrap_or_else(|| vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]);
+                if gpts.len() != unit.len() || gpts.len() % 2 != 0 || gpts.len() > 2 * 1024 {
+                    return unread("/GPTS and /LPTS are not the same number of pairs, up to 1024");
+                }
+                let Some(gcs) = m
+                    .get(b"GCS")
+                    .ok()
+                    .and_then(|o| deref(doc, o))
+                    .and_then(|o| o.as_dict().ok())
+                else {
+                    return unread("no /GCS dictionary");
+                };
+                PdfMeasure::Geo {
+                    local: unit
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|p| base.apply([x0 + p[0] * (x1 - x0), y0 + p[1] * (y1 - y0)]))
+                        .collect(),
+                    geographic: gpts.as_chunks::<2>().0.to_vec(),
+                    gcs: PdfGcs {
+                        projected: gcs.get(b"Type").ok().and_then(|o| o.as_name().ok())
+                            == Some(b"PROJCS".as_slice()),
+                        epsg: gcs
+                            .get(b"EPSG")
+                            .ok()
+                            .and_then(|o| deref(doc, o))
+                            .and_then(|o| o.as_i64().ok()),
+                        wkt: text(gcs, b"WKT"),
+                    },
+                }
+            }
+            _ => unread("a measure subtype this reader does not take"),
+        }
+    };
+    vps.iter()
+        .take(64)
+        .filter_map(|vp| {
+            let d = deref(doc, vp)?.as_dict().ok()?;
+            let b = numbers(d.get(b"BBox").ok()?)?;
+            let &[ax, ay, bx, by] = b.as_slice() else {
+                return None;
+            };
+            let user = [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)];
+            if !user.iter().all(|v| v.is_finite()) {
+                return None;
+            }
+            let (p, q) = (
+                base.apply([user[0], user[1]]),
+                base.apply([user[2], user[3]]),
+            );
+            Some(PdfViewport {
+                bbox: [
+                    p[0].min(q[0]),
+                    p[1].min(q[1]),
+                    p[0].max(q[0]),
+                    p[1].max(q[1]),
+                ],
+                name: text(d, b"Name"),
+                measure: d
+                    .get(b"Measure")
+                    .ok()
+                    .and_then(|o| deref(doc, o))
+                    .and_then(|o| o.as_dict().ok())
+                    .map(|m| measure(m, user)),
+            })
+        })
+        .collect()
 }
 
 /// `[a b c d e f]` in PDF's row-vector convention: `x' = a x + c y + e`,

@@ -13,8 +13,8 @@ use fixture::*;
 use libviprs::cad::CadSource;
 use libviprs::pvec::pdf_vector::{PdfMeasure, PdfViewport};
 use libviprs::pvec_convert::{
-    Calibration, CrsKind, DefinitionFormat, GeoreferenceMethod, PdfConversion,
-    PdfConversionOutput, ScaleProvenance,
+    Calibration, CrsKind, DefinitionFormat, GeoreferenceMethod, PdfConversion, PdfConversionOutput,
+    ScaleProvenance,
 };
 use lopdf::{Dictionary, Document, Object, dictionary};
 
@@ -39,7 +39,8 @@ fn fixture(entries: Vec<(&str, Object)>) -> Vec<u8> {
     out
 }
 
-/// PDF reals as `lopdf` writes them, `f32`, which is why the world points are compared to 1e-6.
+/// PDF reals as `lopdf` writes them, `f32`, which is why the world points are compared to 1e-5
+/// (51.1 as an `f32` is 51.0999985).
 fn nums(v: &[f64]) -> Object {
     Object::Array(v.iter().map(|&x| Object::Real(x as f32)).collect())
 }
@@ -111,13 +112,15 @@ fn a_viewport_is_read_in_page_space_with_its_measure() {
         Object::Array(vec![viewport([0.0, 0.0, 612.0, 792.0], geo(wgs84()))]),
     )]);
     let p = page(&bytes);
-    let [PdfViewport {
-        bbox,
-        name,
-        measure: Some(PdfMeasure::Geo {
-            local, geographic, ..
-        }),
-    }] = p.viewports.as_slice()
+    let [
+        PdfViewport {
+            bbox,
+            name,
+            measure: Some(PdfMeasure::Geo {
+                local, geographic, ..
+            }),
+        },
+    ] = p.viewports.as_slice()
     else {
         panic!("one GEO viewport expected, got {:?}", p.viewports);
     };
@@ -197,7 +200,10 @@ fn a_plan_scale_in_a_unit_nobody_knows_is_reported_and_the_point_stays() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn a_geopdf_viewport_gives_fitted_control_points_and_its_epsg_code() {
-    let bytes = fixture(vec![("VP", Object::Array(vec![viewport(PAGE, geo(wgs84()))]))]);
+    let bytes = fixture(vec![(
+        "VP",
+        Object::Array(vec![viewport(PAGE, geo(wgs84()))]),
+    )]);
     let done = convert(&bytes, "geo");
     assert_eq!(done.rasters, 1);
     assert!(done.written >= 2);
@@ -215,7 +221,7 @@ fn a_geopdf_viewport_gives_fitted_control_points_and_its_epsg_code() {
     let [a, b, c, d, tx, ty] = g.affine;
     for (p, (source, world)) in g.control_points.iter().zip(pinned) {
         assert_eq!(p.source, source);
-        assert!(near(p.world[0], world[0], 1e-6) && near(p.world[1], world[1], 1e-6));
+        assert!(near(p.world[0], world[0], 1e-5) && near(p.world[1], world[1], 1e-5));
         let x = a * source[0] + b * source[1] + tx;
         let y = c * source[0] + d * source[1] + ty;
         assert!(near(x, p.world[0], 1e-9) && near(y, p.world[1], 1e-9));
