@@ -1549,6 +1549,7 @@ impl<'a> PvecConversion<'a> {
                         scale: rect.is_some().then(|| scale_of(v)),
                         paper_box: rect,
                         entities: *n,
+                        border: None,
                     }
                 })
                 .chain(unreported.iter().map(|h| SheetViewport {
