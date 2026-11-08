@@ -14,7 +14,8 @@
 //! manifest says `metres_per_unit` 1.0, and the output's [`Calibration`] carries what a point is: a
 //! `declared_unit` scale of 0.0254 / 72 metres (times `/UserUnit`), or the plan scale a `/VP`
 //! viewport states (issue #1547). A GeoPDF viewport adds a georeference fitted to its control points,
-//! in the same page space as the geometry. The report's `pdf.calibration` says which viewport was
+//! in the same page space as the geometry, and without one an `/LGIDict` in UTM on WGS 84 gives a
+//! declared one (issue #1548). The report's `pdf.calibration` says which viewport was
 //! used and why anything the page said was not. The manifest box is the displayed page (after
 //! `/Rotate`) grown to take in any path that leaves it.
 //!
@@ -399,8 +400,46 @@ impl<'a> PdfConversion<'a> {
                 }
                 Some(_) => note("measure-unread"),
             }
+            // The older LGIDict form (issue #1548), only when no viewport gave a georeference, and
+            // only where its projection names an EPSG code with no table: UTM on WGS 84.
+            match (&georeference, page.lgidicts.first()) {
+                (_, None) => {}
+                (Some(_), Some(_)) => note("lgidict-ignored"),
+                (None, Some(l)) => {
+                    if page.lgidicts.len() > 1 {
+                        note("lgidict-first-of-several");
+                    }
+                    let code = match (
+                        l.projection_type.trim(),
+                        l.datum.as_deref().map(str::trim),
+                        l.zone,
+                        l.hemisphere.as_deref().map(str::trim),
+                    ) {
+                        ("UT", Some("WGE" | "WE"), Some(z @ 1..=60), Some("N")) => Some(32600 + z),
+                        ("UT", Some("WGE" | "WE"), Some(z @ 1..=60), Some("S")) => Some(32700 + z),
+                        _ => None,
+                    };
+                    let declared = code.map(|code| Georeference {
+                        affine: l.affine,
+                        crs_kind: CrsKind::Projected,
+                        method: GeoreferenceMethod::Declared,
+                        crs_id: Some(format!("EPSG:{code}")),
+                        definition: None,
+                        control_points: Vec::new(),
+                        residual_max: 0.0,
+                    });
+                    match declared {
+                        None => note("lgidict-not-mapped"),
+                        Some(g) if Calibration::new(None, Some(g.clone()), None).is_ok() => {
+                            georeference = Some(g);
+                        }
+                        Some(_) => note("lgidict-refused"),
+                    }
+                }
+            }
             let summary = PdfCalibrationSummary {
                 viewports: page.viewports.len() as u64,
+                lgidicts: page.lgidicts.len() as u64,
                 viewport: chosen.map(|c| c.0 as u64),
                 scale: if scale.is_some() {
                     "plan-scale"

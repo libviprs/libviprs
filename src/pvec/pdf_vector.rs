@@ -253,6 +253,26 @@ pub struct PdfVectorPage {
     pub viewports: Vec<PdfViewport>,
     /// `/UserUnit`, the size of one user space unit in points: 1 unless the page says otherwise.
     pub user_unit: f64,
+    /// The page's `/LGIDict` georeferences, the form GeoPDF had before ISO 32000-2 (issue #1548).
+    pub lgidicts: Vec<PdfLgiDict>,
+}
+
+/// One `/LGIDict` of a page (issue #1548): a map from the page into a projection, and the
+/// projection as the dictionary names it. Nothing here interprets the projection.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PdfLgiDict {
+    /// `/CTM` composed with the page's own map, so it takes page space (box origin removed and
+    /// `/Rotate` applied, like the paths) into the projection, in PVec's `[a b c d tx ty]` order:
+    /// `x' = a x + b y + tx`, `y' = c x + d y + ty`.
+    pub affine: [f64; 6],
+    /// `/Projection /ProjectionType`, such as `UT` for UTM. Empty when there is none.
+    pub projection_type: String,
+    /// `/Projection /Datum` when it is a code (`WGE`); absent when it is missing or a dictionary.
+    pub datum: Option<String>,
+    /// `/Projection /Zone`.
+    pub zone: Option<i64>,
+    /// `/Projection /Hemisphere`, `N` or `S`.
+    pub hemisphere: Option<String>,
 }
 
 /// One `/VP` viewport of a page (issue #1547): a box on the page that says what its contents
@@ -737,6 +757,85 @@ pub fn extract_page_paths_from_bytes(
     let resources = inherited_resources(&doc, page_id)?;
     run.stream(&ops, resources, base, 0)?;
 
+    /// The page's `/LGIDict` (a dictionary or an array of them, at most 64), each `/CTM` (numbers
+    /// or, as LGIDict writes them, numeric strings) composed after the inverse of `base` so it
+    /// takes page space. A dictionary with no usable `/CTM` is skipped.
+    fn read_lgidicts(doc: &Document, page_id: lopdf::ObjectId, base: &Matrix) -> Vec<PdfLgiDict> {
+        fn deref<'a>(doc: &'a Document, o: &'a Object) -> Option<&'a Object> {
+            doc.dereference(o).ok().map(|(_, o)| o)
+        }
+        let text = |d: &Dictionary, key: &[u8]| {
+            d.get(key)
+                .ok()
+                .and_then(|o| deref(doc, o))
+                .and_then(|o| lopdf::decode_text_string(o).ok())
+        };
+        let Some(entry) = doc
+            .get_dictionary(page_id)
+            .ok()
+            .and_then(|d| d.get(b"LGIDict").ok())
+            .and_then(|o| deref(doc, o))
+        else {
+            return Vec::new();
+        };
+        let dicts: Vec<&Object> = match entry {
+            Object::Array(a) => a.iter().take(64).collect(),
+            other => vec![other],
+        };
+        // The page map is a box shift and a quarter turn, so it always has an inverse.
+        let [a, b, c, d, e, f] = base.0;
+        let det = a * d - b * c;
+        let inverse = Matrix([
+            d / det,
+            -b / det,
+            -c / det,
+            a / det,
+            (c * f - d * e) / det,
+            (b * e - a * f) / det,
+        ]);
+        dicts
+            .into_iter()
+            .filter_map(|o| {
+                let l = deref(doc, o)?.as_dict().ok()?;
+                let ctm: Vec<f64> = deref(doc, l.get(b"CTM").ok()?)?
+                    .as_array()
+                    .ok()?
+                    .iter()
+                    .map(|v| {
+                        let v = deref(doc, v)?;
+                        number(v).or_else(|| lopdf::decode_text_string(v).ok()?.trim().parse().ok())
+                    })
+                    .collect::<Option<_>>()?;
+                let ctm: [f64; 6] = ctm.try_into().ok()?;
+                if !ctm.iter().all(|v| v.is_finite()) {
+                    return None;
+                }
+                let [ma, mb, mc, md, me, mf] = inverse.then(&Matrix(ctm)).0;
+                let p = l
+                    .get(b"Projection")
+                    .ok()
+                    .and_then(|o| deref(doc, o))
+                    .and_then(|o| o.as_dict().ok());
+                Some(PdfLgiDict {
+                    affine: [ma, mc, mb, md, me, mf],
+                    projection_type: p
+                        .and_then(|p| text(p, b"ProjectionType"))
+                        .unwrap_or_default(),
+                    datum: p.and_then(|p| text(p, b"Datum")),
+                    zone: p
+                        .and_then(|p| p.get(b"Zone").ok())
+                        .and_then(|o| deref(doc, o))
+                        .and_then(|o| {
+                            o.as_i64()
+                                .ok()
+                                .or_else(|| lopdf::decode_text_string(o).ok()?.trim().parse().ok())
+                        }),
+                    hemisphere: p.and_then(|p| text(p, b"Hemisphere")),
+                })
+            })
+            .collect()
+    }
+
     /// The `/VP` array of a page (issue #1547), at most 64 viewports, each `/BBox` mapped by `base`
     /// into page space. A viewport with no usable `/BBox` is skipped; a measure that cannot be read is
     /// kept as [`PdfMeasure::Unread`], so the report can say so.
@@ -885,6 +984,7 @@ pub fn extract_page_paths_from_bytes(
         pattern_selections: run.patterns,
         images: run.images,
         viewports: read_viewports(&doc, page_id, &base),
+        lgidicts: read_lgidicts(&doc, page_id, &base),
         user_unit: doc
             .get_dictionary(page_id)
             .ok()
