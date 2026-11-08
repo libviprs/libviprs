@@ -112,9 +112,9 @@ use crate::pvec::writer::{
 };
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
-    LayoutKind, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceFact,
-    SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError, ViewportClip,
-    ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
+    LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
+    SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError,
+    ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
@@ -957,6 +957,32 @@ impl<'a> PvecConversion<'a> {
         // classified, so nothing is copied per viewport up front.
         let paper_rank = if first { u32::MAX } else { 0 };
         let mut via: Vec<(u32, Option<usize>)> = vec![(paper_rank, None); items.len()];
+        // Each drawn viewport classifies every kept model leaf once more, so the conversion
+        // handles the sheet's own items, the model leaves times the drawn viewports, and the
+        // model's excluded and skipped rows once. The sheet and the model were each walked under
+        // their own guard, so the product is checked here, before anything is listed (#1580).
+        if let (Some(mv), Some(mf)) = (&model_view, &model_flat) {
+            let shown = mf
+                .entities
+                .iter()
+                .filter(|f| model_layers.contains_key(&flat_key(f)))
+                .count();
+            let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+            let observed = count(shown)
+                .saturating_mul(count(drawn.len()))
+                .saturating_add(count(items.len()))
+                .saturating_add(count(mv.excluded.len()))
+                .saturating_add(count(mf.skipped.len()));
+            let ceiling = view_profile.limits.max_entities;
+            if observed > ceiling {
+                return Err(PvecConvertError::Flatten(FlattenError::Limit {
+                    limit: Limit::Entities,
+                    observed,
+                    ceiling,
+                    block_path: crate::pvec::InstancePath::root(),
+                }));
+            }
+        }
         if let Some(mf) = &model_flat {
             for &k in &drawn {
                 for f in mf
