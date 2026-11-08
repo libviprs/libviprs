@@ -871,7 +871,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1548 adds 6: the `tests/pvec_1548_lgidict.rs` cells that convert an LGIDict fixture into a temp dir. It said 1052 before this line moved.
 /// #1552 adds 7: the `tests/pvec_1552_calibration_write.rs` cells that convert into a temp dir, read the calibration back and recalibrate it. Two `tests/pvec_1415_georef.rs` cells are renamed, not added. It said 1058 before this line moved.
 /// #1554 removes 8 and adds 6: `tests/pvec_1415_georef.rs` goes with the sidecar it tested, and the `tests/pvec_1554_sidecar_retired.rs` cells convert into a temp dir and import an old sidecar. It said 1065 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1063;
+/// #1556 adds 1: `tests/pvec_1416_diagnostics.rs::issue_1556_a_retired_code_is_listed_as_retired_and_is_gone_from_the_closed_set`, which reads the diagnostics document. It said 1063 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1064;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -332,6 +332,18 @@ impl<'a> PvecConversion<'a> {
 
     /// The drawing's calibration, written into the artifact's calibration block (issue #1552). A
     /// DWG gets none unless it is given here: its `$INSUNITS` is already the manifest's unit.
+    ///
+    /// Control points go in the calibration's [`Georeference`], with both their sides. The
+    /// source-only `control_points` builder is gone (issue #1556):
+    ///
+    /// ```compile_fail,E0599
+    /// use std::path::Path;
+    /// use libviprs::cad::CadSource;
+    /// use libviprs::pvec_convert::PvecConversion;
+    ///
+    /// let _ = PvecConversion::new(CadSource::Bytes(b""), Path::new("o.pvec"))
+    ///     .control_points([[0.0, 0.0]]);
+    /// ```
     #[must_use]
     pub fn calibration(mut self, calibration: Calibration) -> Self {
         self.calibration = Some(calibration);
