@@ -327,6 +327,7 @@ fn build(u: &mut Unstructured<'_>) -> AResult<Mock> {
                 off: u.arbitrary()?,
                 frozen: u.arbitrary()?,
                 locked: u.arbitrary()?,
+                plottable: u.arbitrary()?,
             });
         }
     }

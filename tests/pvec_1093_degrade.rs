@@ -83,6 +83,7 @@ fn issue_1093_a_layer_name_past_the_bound_drops_its_row_and_not_the_streams() {
         off: false,
         frozen: false,
         locked: false,
+        plottable: true,
     }];
     let out = build_streams(
         StreamSelection::ALL,

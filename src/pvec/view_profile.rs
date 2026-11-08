@@ -14,14 +14,17 @@
 //! | `viewport_clipping` | `viewport-clip-exact`, `viewport-clip-bounded` | unsupported |
 //! | `layers.off` | `layer-off` | exclude |
 //! | `layers.frozen` | `layer-frozen` | exclude |
+//! | `layers.no_plot` | `layer-no-plot` (print profile ADR) | ignore |
 //! | `layers.frozen_in_viewport` | `layer-frozen-in-viewport` | ignore and report |
 //! | `layers.insert_override` | `insert-layer-override` | layer "0" inherits the INSERT's layer |
 //! | `nested_inserts.max_depth` | `nested-insert` | 64, the decoder's own limit |
 //! | `xrefs` | `xref` | report as external |
 //!
 //! [`ViewProfile::knobs`] returns that table as data, and a test checks every row name against
-//! the spike document, so a knob without a row is a red test. Locked and no-plot layers are
-//! visible under V1-3 and have no knob.
+//! the spike document, so a knob without a row is a red test. Locked layers are visible under
+//! V1-3 and have no knob. No-plot layers are visible under V1-3 too; `layers.no_plot` is the
+//! knob [`ViewProfile::print_profile`] sets to exclude them (P-3 of
+//! `docs/adr/pvec-print-profile.md`).
 //!
 //! # Policy is applied here, not trusted
 //!
@@ -82,6 +85,8 @@ pub enum LayerStateRule {
 pub enum ViewportFreezeRule {
     /// Draw the layer and report that a freeze was ignored.
     IgnoreAndReport,
+    /// Drop the entity inside the viewport that froze its layer (P-3, print profile).
+    Apply,
 }
 
 /// Viewport clipping.
@@ -90,6 +95,8 @@ pub enum ViewportFreezeRule {
 pub enum ViewportClipping {
     /// Refuse.
     Unsupported,
+    /// Nothing is drawn outside its viewport or the sheet (P-7, print profile).
+    Exact,
 }
 
 /// Layer-0 inheritance inside an INSERT.
@@ -117,6 +124,8 @@ pub struct LayerVisibility {
     pub off: LayerStateRule,
     /// Frozen layers.
     pub frozen: LayerStateRule,
+    /// No-plot layers: drawn under V1-3, excluded under P-3.
+    pub no_plot: LayerStateRule,
     /// Viewport freezes.
     pub frozen_in_viewport: ViewportFreezeRule,
     /// Layer-0 inheritance.
@@ -250,6 +259,14 @@ pub enum ViewProfileError {
         /// The layout.
         layout: String,
     },
+    /// The profile asks for a print rule whose implementation has not landed yet.
+    #[error(
+        "profile field {field} asks for a print rule that is not enabled yet (VIEW_NOT_ENABLED, 508)"
+    )]
+    RuleNotEnabled {
+        /// The field, as [`Knob::field`] spells it.
+        field: &'static str,
+    },
     /// The provider failed, or cannot report something the profile needs.
     #[error("provider: {0}")]
     Provider(#[from] ProviderError),
@@ -271,7 +288,33 @@ impl ViewProfile {
             layers: LayerVisibility {
                 off: LayerStateRule::Exclude,
                 frozen: LayerStateRule::Exclude,
+                no_plot: LayerStateRule::Ignore,
                 frozen_in_viewport: ViewportFreezeRule::IgnoreAndReport,
+                insert_override: InsertLayerRule::InheritOnLayerZero,
+            },
+            nested_inserts: NestedInsertPolicy { max_depth: 64 },
+            xrefs: XrefPolicy::ReportExternal,
+            limits: SourceLimits::default(),
+        }
+    }
+
+    /// The print of one paper layout in monochrome, the rule of `docs/adr/pvec-print-profile.md`
+    /// (P-1 to P-9), spelled out field by field beside [`default_profile`](Self::default_profile).
+    ///
+    /// The layout's own entities and model space seen through its viewports, nothing drawn
+    /// outside a viewport or the sheet, no-plot layers excluded and viewport freezes applied. A
+    /// test pins every value. Until the sheet lands (#1562) [`apply`](Self::apply) refuses it with
+    /// [`ViewProfileError::PaperSpaceUnsupported`].
+    #[must_use]
+    pub fn print_profile(layout: impl Into<String>) -> Self {
+        Self {
+            space: SpaceSelection::PaperLayout(layout.into()),
+            viewport_clipping: ViewportClipping::Exact,
+            layers: LayerVisibility {
+                off: LayerStateRule::Exclude,
+                frozen: LayerStateRule::Exclude,
+                no_plot: LayerStateRule::Exclude,
+                frozen_in_viewport: ViewportFreezeRule::Apply,
                 insert_override: InsertLayerRule::InheritOnLayerZero,
             },
             nested_inserts: NestedInsertPolicy { max_depth: 64 },
@@ -308,6 +351,7 @@ impl ViewProfile {
                 field: "viewport_clipping",
                 value: match self.viewport_clipping {
                     ViewportClipping::Unsupported => "unsupported",
+                    ViewportClipping::Exact => "exact",
                 }
                 .into(),
                 row: "viewport-clip-exact",
@@ -323,9 +367,15 @@ impl ViewProfile {
                 row: "layer-frozen",
             },
             Knob {
+                field: "layers.no_plot",
+                value: rule(self.layers.no_plot).into(),
+                row: "layer-no-plot",
+            },
+            Knob {
                 field: "layers.frozen_in_viewport",
                 value: match self.layers.frozen_in_viewport {
                     ViewportFreezeRule::IgnoreAndReport => "ignore-and-report",
+                    ViewportFreezeRule::Apply => "apply",
                 }
                 .into(),
                 row: "layer-frozen-in-viewport",
@@ -382,8 +432,11 @@ impl ViewProfile {
     ///
     /// [`ViewProfileError::LayoutNotFound`] for a paper layout the drawing does not have,
     /// [`ViewProfileError::PaperSpaceUnsupported`] for one it does (v1 draws model space only),
-    /// [`ViewProfileError::NoModelSpace`], and [`ViewProfileError::Provider`] when the provider
-    /// fails or cannot report layer state while the profile acts on it.
+    /// [`ViewProfileError::NoModelSpace`], [`ViewProfileError::RuleNotEnabled`] for
+    /// `layers.no_plot = exclude`, `layers.frozen_in_viewport = apply` and
+    /// `viewport_clipping = exact` until the slices that apply them land, and
+    /// [`ViewProfileError::Provider`] when the provider fails or cannot report layer state while
+    /// the profile acts on it.
     pub fn apply<P: DwgProvider + ?Sized>(
         &self,
         provider: &P,
@@ -419,6 +472,28 @@ impl ViewProfile {
                 );
             }
         };
+
+        // The print rules (P-3, P-7) land with the sheet and the viewports (#1562, #1563); the
+        // no-plot one also needs the plottable flag from the provider (#1560). Until then each is
+        // refused rather than dropped, so a knob never says something the drawing did not get.
+        for (asked, field) in [
+            (
+                self.layers.no_plot == LayerStateRule::Exclude,
+                "layers.no_plot",
+            ),
+            (
+                self.layers.frozen_in_viewport == ViewportFreezeRule::Apply,
+                "layers.frozen_in_viewport",
+            ),
+            (
+                self.viewport_clipping == ViewportClipping::Exact,
+                "viewport_clipping",
+            ),
+        ] {
+            if asked {
+                return Err(ViewProfileError::RuleNotEnabled { field });
+            }
+        }
 
         let needs_layers = self.layers.off == LayerStateRule::Exclude
             || self.layers.frozen == LayerStateRule::Exclude;
