@@ -82,15 +82,13 @@ pub enum DiagnosticCode {
     ReportFailed,
     /// The artifact and report could not be published.
     PublishFailed,
-    /// A control point given to the deprecated `PvecConversion::control_points` is not finite.
-    GeoreferenceFailed,
     /// The caller cancelled the run.
     Cancelled,
 }
 
 impl DiagnosticCode {
     /// Every code, in the order `docs/pvec-diagnostics.md` lists them.
-    pub const ALL: [DiagnosticCode; 14] = [
+    pub const ALL: [DiagnosticCode; 13] = [
         DiagnosticCode::EntityRequiresCapability,
         DiagnosticCode::EntityUnsupported,
         DiagnosticCode::EntityIgnoredByPolicy,
@@ -103,7 +101,6 @@ impl DiagnosticCode {
         DiagnosticCode::WriteFailed,
         DiagnosticCode::ReportFailed,
         DiagnosticCode::PublishFailed,
-        DiagnosticCode::GeoreferenceFailed,
         DiagnosticCode::Cancelled,
     ];
 
@@ -123,7 +120,6 @@ impl DiagnosticCode {
             DiagnosticCode::WriteFailed => "WRITE_FAILED",
             DiagnosticCode::ReportFailed => "REPORT_FAILED",
             DiagnosticCode::PublishFailed => "PUBLISH_FAILED",
-            DiagnosticCode::GeoreferenceFailed => "GEOREFERENCE_FAILED",
             DiagnosticCode::Cancelled => "CANCELLED",
         }
     }
@@ -143,8 +139,7 @@ impl DiagnosticCode {
             | DiagnosticCode::CapabilityRejected
             | DiagnosticCode::WriteFailed
             | DiagnosticCode::ReportFailed
-            | DiagnosticCode::PublishFailed
-            | DiagnosticCode::GeoreferenceFailed => Severity::Error,
+            | DiagnosticCode::PublishFailed => Severity::Error,
         }
     }
 
@@ -162,7 +157,7 @@ impl DiagnosticCode {
             DiagnosticCode::ViewFailed => Stage::View,
             DiagnosticCode::BlocksFailed => Stage::Flatten,
             DiagnosticCode::WriteFailed => Stage::Write,
-            DiagnosticCode::ReportFailed | DiagnosticCode::GeoreferenceFailed => Stage::Report,
+            DiagnosticCode::ReportFailed => Stage::Report,
             DiagnosticCode::PublishFailed => Stage::Publish,
         }
     }

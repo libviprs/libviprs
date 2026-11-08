@@ -14,7 +14,7 @@ assert_eq!(out.report.totals.encountered, out.fidelity.encountered());
 ## Builder
 
 `view_profile`, `limits`, `unit`, `leaves` (spatial directory and Tier 0), `cancel`, `observer`, `queue_capacity`, `calibration` (a `Calibration`, written into the artifact's calibration block),
-`control_points` (deprecated, #1554), `profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
+`profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
 writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the trait carries no unit, so `unit` is required there.
 
 ## Profiles and the capability gate
