@@ -4,7 +4,8 @@
 //! dual-oracle tier of N2.2) is classified by the conversion's probe, and the count of entities in
 //! each of the six `FidelityClass` values is compared with
 //! `tests/fixtures/pvec-gate/classification.baseline`. An entity changing class changes its
-//! fixture's line, so the diff is one line, in the pull request that did it.
+//! fixture's line, so the diff is one line, in the pull request that did it. The DXF twins of
+//! `tests/fixtures/pvec-dxf` (#1561) have a line each too, next to the DWG they were written from.
 //!
 //! Needs `--features pvec-convert`.
 
@@ -25,16 +26,21 @@ use pvec_gold::{Corpus, EvidenceClass};
 fn classification() -> String {
     let corpus = Corpus::open();
     let mut out = String::new();
-    for fx in corpus
+    let sources = corpus
         .all()
         .iter()
         .filter(|f| f.class != EvidenceClass::Quarantined)
-    {
-        let dwg = fx.dwg();
-        let probe = PvecConversion::new(CadSource::Bytes(&dwg), Path::new("unused"))
+        .map(|fx| (fx.id.clone(), fx.dwg()))
+        .chain(
+            pvec_gate::dxf_twins()
+                .into_iter()
+                .map(|(row, _, b)| (row, b)),
+        );
+    for (id, drawing) in sources {
+        let probe = PvecConversion::new(CadSource::Bytes(&drawing), Path::new("unused"))
             .unit(SourceUnit::Meters)
             .probe();
-        out.push_str(&fx.id);
+        out.push_str(&id);
         match probe {
             Ok(r) => {
                 for c in FidelityClass::ALL {

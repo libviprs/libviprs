@@ -68,10 +68,11 @@ This is not the determinism baseline of #1060. That one hashes the artifact byte
 header field moves it and it cannot say what moved. This one hashes the geometry the reader returns,
 and when it moves, the report names the entity.
 
-The files are the x86_64 ones. Two fixtures come out in other bits on arm64 (`hypot`, see
-[the ADR](adr/pvec-artifact-reproducibility.md)), and their rows live in `drift.aarch64.baseline`
-and `accepted.aarch64.dump` next to the base files. The drift check calls both outputs the same
-drawing, because they agree far inside `Policy::V1`.
+The files are the x86_64 ones. A fixture that comes out in other bits on arm64 gets its row in
+`drift.aarch64.baseline` and `accepted.aarch64.dump` next to the base files, and the drift check
+calls both outputs the same drawing when they agree inside `Policy::V1`. Two fixtures had such rows
+(`hypot`, see [the ADR](adr/pvec-artifact-reproducibility.md)); since the pvec pin at afd2fe6 they
+agree on both architectures, so there are none now (#1573).
 
 These two digest tests are bit-exact, so they are Linux only (#1513): on macOS they are ignored, because the libm
 on a Mac rounds differently and the last bit of two fixtures moves (the ADR has the measured ulps).

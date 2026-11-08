@@ -836,6 +836,82 @@ fn issue_1562_a_decimal_plot_scale_is_reduced_to_coprime_integers() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// Decimal ratios that are not exact binary fractions (2.01, 4.02, 0.0079) still reduce: a side
+/// is integral at a power of ten when rounding it there and dividing back gives the stored value.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1562_a_decimal_ratio_that_is_not_a_binary_fraction_still_reduces() {
+    for (n, d, num, den) in [
+        (1.0, 2.01, 100, 201),
+        (1.0, 4.02, 50, 201),
+        (0.0079, 1.0, 79, 10_000),
+    ] {
+        let (out, dir) = convert(&format!("dec{num}-{den}"), scaled(n, d), |c| c);
+        let s = out.unwrap().report.sheet.unwrap();
+        assert_eq!(s.calibration, "plot-scale", "{n}:{d}");
+        assert_eq!(s.scale, Some(format!("{num}:{den}")), "{n}:{d}");
+        assert!(
+            !s.notes.iter().any(|x| x == "scale-not-reduced"),
+            "{n}:{d}: {:?}",
+            s.notes
+        );
+        let claim = stored_scale(&dir).unwrap();
+        assert_eq!(
+            claim.provenance,
+            Provenance::PlanScale {
+                numerator: num,
+                denominator: den,
+                paper_metres_per_unit: 0.001,
+            },
+            "{n}:{d}"
+        );
+        assert_eq!(claim.uncertainty, None, "{n}:{d}");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+/// A probe frames the sheet the way the conversion does. With plot paper units the drawing's unit
+/// has to stand in for and no unit given, `convert_with` refuses with `UnitRequired`, so
+/// `probe_with` does too instead of falling back to the extents.
+#[test]
+fn issue_1562_probe_with_needs_the_unit_where_the_sheet_frame_does() {
+    NEXT.with(|n| {
+        *n.borrow_mut() = Some(sheet(
+            plot(2, 100.0, 50.0),
+            vec![polyline(
+                1,
+                &[[10.0, 10.0], [10.0, 70.0], [20.0, 70.0], [20.0, 10.0]],
+                false,
+                &[],
+            )],
+        ))
+    });
+    let err = PvecConversion::new(CadSource::Bytes(b"mock"), std::path::Path::new("x.pvec"))
+        .view_profile(ViewProfile::print_profile("Sheet"))
+        .probe_with::<Mock>()
+        .expect_err("the frame needs the drawing's unit");
+    assert!(matches!(err, PvecConvertError::UnitRequired), "{err:?}");
+
+    // With the unit given, the probe cuts the zigzag into the two pieces the conversion makes.
+    NEXT.with(|n| {
+        *n.borrow_mut() = Some(sheet(
+            plot(2, 100.0, 50.0),
+            vec![polyline(
+                1,
+                &[[10.0, 10.0], [10.0, 70.0], [20.0, 70.0], [20.0, 10.0]],
+                false,
+                &[],
+            )],
+        ))
+    });
+    let probed = PvecConversion::new(CadSource::Bytes(b"mock"), std::path::Path::new("x.pvec"))
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("Sheet"))
+        .probe_with::<Mock>()
+        .unwrap();
+    assert_eq!(probed.encountered(), 2, "one row per piece");
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1562_a_plot_scale_that_does_not_reduce_is_written_with_its_uncertainty() {
