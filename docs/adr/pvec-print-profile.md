@@ -30,8 +30,9 @@ a red test and a new ADR.
 - **P-2 Effective layer.** V1-2, unchanged.
 - **P-3 Visibility.** V1-3, plus three print rules. Entities on a no-plot layer are excluded
   (`layers.no_plot = exclude`). Viewport freezes apply inside the viewport that froze the layer
-  (`layers.frozen_in_viewport = apply`). A viewport that is off, invisible, `hide_plot` or on a
-  no-plot layer contributes nothing.
+  (`layers.frozen_in_viewport = apply`). A viewport that is off, invisible or `hide_plot`
+  contributes nothing. A viewport on a no-plot layer still draws what it shows; only its border
+  is not printed, as AutoCAD prints it (amended by #1577, see below).
 - **P-4 Instances.** V1-4, once per viewport that shows them. A model entity seen through two
   viewports is two pvec entities with distinct provenance (`source_kind` 2, the source handle
   followed by the viewport handle).
@@ -96,6 +97,15 @@ itself, as AutoCAD writes it) is not a window onto the model.
 longer `Unsupported` as a whole. `VIEW_NOT_ENABLED` (508) stays, per viewport (a non-plan view
 direction, perspective, `view_height <= 0`, a polygon clip until slice 6, a twist until its sign is
 measured) and per entity (a curve crossing a clip until slice 6).
+
+Amendment to P-3 (#1577). As first written, P-3 also dropped a viewport on a no-plot layer. That is
+not what a print does: AutoCAD prints the content of such a viewport and leaves out only its border,
+and sheets often put their viewports on Defpoints for exactly that reason, so the old rule turned
+those sheets into a bare title block. The viewport now goes through the same checks as any other
+(drawn, or refused with 508 for the same reasons), its own VIEWPORT entity is excluded by
+`layer-no-plot` like anything else on that layer, and its `sheet.viewports` row says
+`border: no-plot-layer`. pvec draws no viewport border on any layer, so the row is the only place the
+difference shows.
 
 Rejected: amending V1-1 and V1-3 in place (every caller of the default profile would change
 behaviour); one profile with a `space` switch that flips the rules (the rules are the profile); a
