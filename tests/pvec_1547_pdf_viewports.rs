@@ -370,3 +370,33 @@ fn points_an_affine_cannot_meet_leave_a_residual() {
     assert!(g.residual_max > 1e-3, "{}", g.residual_max);
     assert!(Calibration::new(None, Some(g.clone()), None).is_ok());
 }
+
+/// A hostile `/C` below zero is refused as a plan scale, and the conversion finishes.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_negative_plan_scale_factor_is_refused_and_the_conversion_finishes() {
+    let mut m = rl();
+    m.set(
+        "X",
+        vec![Object::Dictionary(dictionary! {
+            "Type" => "NumberFormat", "U" => literal(b"ft"), "C" => Object::Real(-10.0 / 72.0),
+        })],
+    );
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let done = convert(
+            &fixture(vec![("VP", Object::Array(vec![viewport(PAGE, m)]))]),
+            "negative",
+        );
+        tx.send(done).unwrap();
+    });
+    let done = rx
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the conversion should finish");
+    assert_eq!(
+        done.calibration.scale().unwrap().provenance,
+        ScaleProvenance::DeclaredUnit
+    );
+    let summary = done.report.pdf.unwrap().calibration.unwrap();
+    assert!(summary.notes.contains(&"rl-refused".to_owned()));
+}
