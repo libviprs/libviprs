@@ -66,7 +66,7 @@ zero padded to the width of their count and at least two digits; the slug is the
 `-`, runs collapsed, `-` and `.` trimmed, at most 64 bytes, `layout` when nothing is left. The stem is the path's own stem, and `.stem(..)` is
 required for bytes. `.sheets(|c| ...)` takes `PvecConversion`'s builder; the profile's space is the layout whatever it sets.
 
-A layout with nothing to print (no entity but its viewports, and no viewport that is on, plotted, on a plotting layer and has a view) is
+A layout with nothing to print (no entity but its viewports, and no viewport that is on, plotted and has a view, one on a no-plot layer included, #1577) is
 `SheetSkip::Empty`; one whose content is all excluded is `EmptyAfterView` (so is a layout holding only its paper view, number 1 showing
 paper space 1:1 centred on itself, which is not converted at all, #1583); a file an earlier run left at either's path is removed. Any other failure of one sheet is `Failed`,
 its path is left as it was, and the rest go on. An index an earlier run left is removed before the first sheet.

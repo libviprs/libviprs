@@ -660,20 +660,16 @@ fn issue_1564_a_viewport_makes_a_sheet_only_when_it_would_print() {
             .unwrap()
             .outcome
     };
-    for name in [
-        "VP off",
-        "VP hide plot",
-        "VP no-plot layer",
-        "VP zero height",
-    ] {
+    for name in ["VP off", "VP hide plot", "VP zero height"] {
         assert!(
             matches!(outcome(name), Err(SheetSkip::Empty)),
             "{name}: {:?}",
             outcome(name)
         );
     }
-    // A viewport onto the model makes the layout a sheet, whatever its number.
-    for name in ["VP numbered 1", "VP model"] {
+    // A viewport onto the model makes the layout a sheet, whatever its number, and so does one on
+    // a no-plot layer: it prints what it shows, only its border is hidden (#1577).
+    for name in ["VP numbered 1", "VP model", "VP no-plot layer"] {
         assert!(outcome(name).is_ok(), "{name}: {:?}", outcome(name));
     }
     // A layout holding only its paper view is a blank sheet: listed, nothing written (#1583).

@@ -34,8 +34,8 @@ explicitly so a caller can see what they accepted, and a test pins every value
   excluded. Since #1562 it draws the layout's own block record as a sheet: the paper is the frame, lines and polylines
   are cut at its edge, no-plot layers are left out and counted per layer. Since #1563 model space shows through each
   plan-view, untwisted, rectangular viewport by a similarity, cut to the viewport's rectangle, with the layers it freezes
-  dropped inside it; a viewport that is off, hidden when plotting or on a no-plot layer draws nothing, and one this
-  profile cannot map is refused with `view-not-enabled`.
+  dropped inside it; a viewport that is off or hidden when plotting draws nothing, one on a no-plot layer draws what
+  it shows with only its border left out (#1577), and one this profile cannot map is refused with `view-not-enabled`.
 - **Xrefs.** An external reference is reported, not resolved and not flattened.
 - **Limits.** The walk charges the profile's source limits as it goes, so a drawing that fans out is refused with the
   limit named instead of being expanded until memory runs out (#1439).
