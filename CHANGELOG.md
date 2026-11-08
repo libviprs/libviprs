@@ -75,9 +75,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   write so the counts still add up. `probe` cannot predict this (the rule is PVec's and is not copied),
   so a probe can count as supported what the conversion then refuses.
 
+### Deprecated
+
+- **`GeoreferenceHandoff`, `HandoffV1` and `PvecConversion::control_points` are deprecated** (issue #1554). For one minor release `pvec_convert::import_sidecar(artifact, sidecar, resolve)` brings an old sidecar in: the application's resolver turns its `calibration_id` into a calibration, which is written into the artifact with that id as its `external_id`, and nothing is written when there is no id or nothing resolves (`SidecarImport`). `control_points` only ever fed the sidecar, so its points are checked and dropped; a `Georeference` carries both sides of a control point. All of them go in the next minor release. `docs/pvec-georeference.md` describes the calibration block and the importer.
+
+### Removed
+
+- **Breaking: the georeference sidecar is retired** (issue #1554, slice 5 of #1543). A conversion no longer writes `<dest>.georef.json`; the calibration lives in the artifact's calibration block (#1552), and the report's `georeference` is always absent now. `GeoreferenceHandoff::write_to`, `GeoreferenceHandoff::recalibrate` and `UnitRecord::new` are gone with it.
+
 ### Changed
 
-- **`PvecConversion::calibration` takes a `Calibration`** (issue #1552). It used to take the sidecar's opaque id, which is now the calibration's `external_id`, so an id needs a record beside it. Two calibrations no longer give identical artifact bytes: they differ in the calibration block, and nothing else. `DefinitionFormat::Wkt` is now `Wkt1`, with `Wkt2` beside it, as in pvec. libviprs links pvec at `07b7a82f`, the first revision with the calibration block.
+- **Breaking: `PvecConversion::calibration` takes a `Calibration`** (issue #1552). It used to take the sidecar's opaque id, which is now the calibration's `external_id`, so an id needs a record beside it. Two calibrations no longer give identical artifact bytes: they differ in the calibration block, and nothing else. `DefinitionFormat::Wkt` is now `Wkt1`, with `Wkt2` beside it, as in pvec. libviprs links pvec at `07b7a82f`, the first revision with the calibration block.
 - **The memory criterion of the conversion is restated** (issue #1481). The conversion's memory is linear in the entities, and the original ceilings (1.5 GiB RSS, 1.0 GiB tracked, under 10% growth on doubling) were not met and are withdrawn. After #1518, #1519 and #1520 `large_industrial` (1,025,000 entities) peaks at 1,323 MiB tracked (2,015 MiB before) and 1,706 MiB RSS on arm64 (1,687 MiB on x64), about 1,353 bytes an entity, and the benchmark now checks 1.4 GiB tracked, 1.75 GiB RSS and 1,450 bytes an entity instead. `docs/pvec-benchmarks.md` says what is not done and what a drawing needs. No code changes.
 - **Breaking, public structs and one enum (issue #1525).** `regions::semantic_stream` returns `ComponentsError` where it returned `String`.
   `LineStyleComponent` gains `name`, `DwgStyleInput` gains `linetype_name`, `ConversionReport` gains `components` and `BuiltStreams` gains

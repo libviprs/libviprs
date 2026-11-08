@@ -1,37 +1,47 @@
-# Georeference handoff
+# Placing a drawing: the calibration block
 
-PVec coordinates are always source space, and no transform is ever applied to them. Since #1552 a drawing's calibration (a scale, a
-georeference or both, `pvec_convert::Calibration`) lives inside the artifact, in PVec's calibration block (capability 22, block kind 11,
-pvec ADR 0019). A DWG gets one only when the caller passes it to `PvecConversion::calibration`; a PDF gets what its page says
-(`docs/pvec-conversion-report.md`, `pdf.calibration`). `pvec_convert::recalibrate` adds, replaces or removes it later.
+PVec coordinates are always source space, and no transform is ever applied to them. What places a drawing in the world is
+its calibration, `pvec_convert::Calibration`, which lives inside the artifact in PVec's calibration block (capability 22,
+block kind 11, pvec ADR 0019). It holds a scale, a georeference or both, and the application's own id for it:
 
-The `<dest>.georef.json` sidecar below is still written, with the calibration's `external_id` as its `calibration_id`, until it is
-retired (the last slice of #1543).
-
-## The sidecar
-
-Versioned like the other manifests: `schema_version` is the tag, and a file with another version is refused (`UnknownVersion`), never
-parsed leniently.
-
-| field | meaning |
+| record | what it says |
 |---|---|
-| `bounds` | the exact drawing box in source units, the one the artifact's manifest declares; absent for a drawing with no geometry |
-| `unit.source` | the unit the drawing's header declares, `Unknown` when it declares none, never defaulted |
-| `unit.insunits` | the header's `$INSUNITS` code, when there is one |
-| `unit.physical` | whether the source unit is a real length unit |
-| `unit.evidence` | what the source unit was read from, in words |
-| `unit.applied` | the unit the artifact declares; differs from `source` only when the caller overrode it |
-| `calibration_id` | an opaque identifier of a calibration record the application holds |
-| `control_points` | source-space points, drawing coordinates only, with no world coordinate attached |
+| scale (`ScaleClaim`) | what one source unit stands for in the world, in metres, and where that came from: a unit the manifest cannot name (a PDF's point), a plan scale stated on the sheet, two points and a measured distance, the georeference, or typed in by hand |
+| georeference (`Georeference`) | an affine from source space into a CRS (`[a b c d tx ty]`), the CRS's kind, its authority code or its definition (WKT1, WKT2 or PROJJSON, never parsed here), how the affine was arrived at, the control points behind it and the fit's largest residual |
+| `external_id` | the application's id for the calibration |
+
+The manifest's unit says what one coordinate unit is; the scale says what it stands for. They differ on any drawn-to-scale
+sheet, and neither overwrites the other. `Calibration::new` refuses what the block would refuse, and a projective
+transform is refused with `CalibrationError::Projective`, since the block holds an affine only.
+
+## Where a calibration comes from
+
+- **A DWG** gets one only when the caller passes it to `PvecConversion::calibration`. Its `$INSUNITS` is already the
+  manifest's unit (`docs/pvec-units.md`).
+- **A PDF** always gets a scale: 0.0254 / 72 m per point (times `/UserUnit`), or the plan scale a `/VP` viewport's `/RL`
+  measure states. A GeoPDF viewport (`/Measure /Subtype /GEO`) adds a georeference fitted to its control points, and
+  without one an `/LGIDict` in UTM on WGS 84 adds a declared one. The report's `pdf.calibration` says what was used and
+  why anything was not (`docs/pvec-conversion-report.md`).
 
 ## Re-calibrating
 
-`pvec_convert::recalibrate(path, Some(&calibration))` replaces the calibration block through PVec's rewrite, and `None` removes it. Every
-other block keeps its bytes and its checksum; the file's SHA-256 is recomputed, and the new file is renamed over the old one, so a reader
-sees one or the other. Putting back the calibration a conversion wrote gives back the bytes it wrote. `GeoreferenceHandoff::recalibrate`
-still rewrites the sidecar alone.
+`pvec_convert::recalibrate(path, Some(&calibration))` adds or replaces the block through PVec's rewrite, and `None` removes
+it. Every other block keeps its bytes and its checksum; the file's SHA-256 is recomputed, and the new file is renamed over
+the old one, so a reader sees one or the other. Putting back the calibration a conversion wrote gives back the bytes it
+wrote.
 
-## Units
+## The retired sidecar
 
-A unit PVec cannot declare is refused by the writer, not rescaled (rescaling would change every coordinate). A drawing with no unit needs
-one from the caller (`PvecConversion::unit`). See `docs/pvec-units.md`.
+Until #1554 a conversion wrote `<dest>.georef.json` beside the artifact: the drawing box, the unit, an opaque
+`calibration_id` and source-space control points with no world side. No conversion writes it now. For one minor release
+an old one can still be brought in:
+
+```rust
+let done = import_sidecar(&artifact, &georef_path(&artifact), |id| my_store.calibration(id))?;
+```
+
+The resolver turns the sidecar's `calibration_id` into a calibration, which is written into the artifact with that id as
+its `external_id`. A sidecar with no id gives `SidecarImport::NoCalibrationId`, an id nothing resolves gives
+`SidecarImport::Unresolved`, and in both cases nothing is written. `GeoreferenceHandoff` (the reader) and
+`PvecConversion::control_points` (whose points only ever reached the sidecar) are deprecated, and go with `import_sidecar`
+in the next minor release.

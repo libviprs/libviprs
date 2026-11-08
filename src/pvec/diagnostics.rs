@@ -82,7 +82,7 @@ pub enum DiagnosticCode {
     ReportFailed,
     /// The artifact and report could not be published.
     PublishFailed,
-    /// The georeference sidecar could not be built or written.
+    /// A control point given to the deprecated `PvecConversion::control_points` is not finite.
     GeoreferenceFailed,
     /// The caller cancelled the run.
     Cancelled,

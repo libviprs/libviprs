@@ -221,6 +221,9 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// Every fixture: the name `docs/pvec-diagnostics.md` gives it, and the diagnostics it makes.
+// `control_points` is deprecated with the sidecar (#1554), and still what makes
+// `GEOREFERENCE_FAILED` until both go.
+#[allow(deprecated)]
 fn fixtures() -> Vec<(&'static str, Vec<Diagnostic>)> {
     let dir = scratch("fixtures");
     let dest = dir.join("o.pvec");

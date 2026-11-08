@@ -33,7 +33,7 @@ nothing emits and on one that is emitted and not written down.
 | `WRITE_FAILED` | PVec's writer refused the artifact. | error | `write` | `a_unit_pvec_cannot_declare` |
 | `REPORT_FAILED` | The report could not be built, or its counts disagree with the entities met. | error | `report` | `a_report_that_does_not_add_up` |
 | `PUBLISH_FAILED` | The artifact and report could not be published. | error | `publish` | `a_destination_that_is_a_directory` |
-| `GEOREFERENCE_FAILED` | The georeference sidecar could not be built or written. | error | `georeference` | `a_control_point_that_is_not_finite` |
+| `GEOREFERENCE_FAILED` | A control point given to the deprecated `PvecConversion::control_points` is not finite. It goes with that builder in the next minor release (#1554). | error | `georeference` | `a_control_point_that_is_not_finite` |
 | `CANCELLED` | The caller cancelled the run. | info | `cancelled` | `a_precancelled_run` |
 
 ## Fields
