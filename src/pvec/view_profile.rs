@@ -82,6 +82,8 @@ pub enum LayerStateRule {
 pub enum ViewportFreezeRule {
     /// Draw the layer and report that a freeze was ignored.
     IgnoreAndReport,
+    /// Drop the entity inside the viewport that froze its layer (P-3, print profile).
+    Apply,
 }
 
 /// Viewport clipping.
@@ -90,6 +92,8 @@ pub enum ViewportFreezeRule {
 pub enum ViewportClipping {
     /// Refuse.
     Unsupported,
+    /// Nothing is drawn outside its viewport or the sheet (P-7, print profile).
+    Exact,
 }
 
 /// Layer-0 inheritance inside an INSERT.
@@ -117,6 +121,8 @@ pub struct LayerVisibility {
     pub off: LayerStateRule,
     /// Frozen layers.
     pub frozen: LayerStateRule,
+    /// No-plot layers: drawn under V1-3, excluded under P-3.
+    pub no_plot: LayerStateRule,
     /// Viewport freezes.
     pub frozen_in_viewport: ViewportFreezeRule,
     /// Layer-0 inheritance.
@@ -250,6 +256,14 @@ pub enum ViewProfileError {
         /// The layout.
         layout: String,
     },
+    /// The profile asks for a print rule whose implementation has not landed yet.
+    #[error(
+        "profile field {field} asks for a print rule that is not enabled yet (VIEW_NOT_ENABLED, 508)"
+    )]
+    RuleNotEnabled {
+        /// The field, as [`Knob::field`] spells it.
+        field: &'static str,
+    },
     /// The provider failed, or cannot report something the profile needs.
     #[error("provider: {0}")]
     Provider(#[from] ProviderError),
@@ -271,6 +285,7 @@ impl ViewProfile {
             layers: LayerVisibility {
                 off: LayerStateRule::Exclude,
                 frozen: LayerStateRule::Exclude,
+                no_plot: LayerStateRule::Ignore,
                 frozen_in_viewport: ViewportFreezeRule::IgnoreAndReport,
                 insert_override: InsertLayerRule::InheritOnLayerZero,
             },
@@ -278,6 +293,14 @@ impl ViewProfile {
             xrefs: XrefPolicy::ReportExternal,
             limits: SourceLimits::default(),
         }
+    }
+
+    /// The print of one paper layout, `docs/adr/pvec-print-profile.md` (P-1 to P-9).
+    #[must_use]
+    pub fn print_profile(layout: impl Into<String>) -> Self {
+        let mut p = Self::default_profile();
+        p.space = SpaceSelection::PaperLayout(layout.into());
+        p
     }
 
     /// This profile with `limits` as its resource ceilings.
@@ -308,6 +331,7 @@ impl ViewProfile {
                 field: "viewport_clipping",
                 value: match self.viewport_clipping {
                     ViewportClipping::Unsupported => "unsupported",
+                    ViewportClipping::Exact => "exact",
                 }
                 .into(),
                 row: "viewport-clip-exact",
@@ -326,6 +350,7 @@ impl ViewProfile {
                 field: "layers.frozen_in_viewport",
                 value: match self.layers.frozen_in_viewport {
                     ViewportFreezeRule::IgnoreAndReport => "ignore-and-report",
+                    ViewportFreezeRule::Apply => "apply",
                 }
                 .into(),
                 row: "layer-frozen-in-viewport",
