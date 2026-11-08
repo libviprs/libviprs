@@ -58,10 +58,15 @@ use thiserror::Error;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod calibration;
 mod capability;
 mod georef;
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+pub use calibration::{
+    Calibration, CalibrationError, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat,
+    Georeference, GeoreferenceMethod, ScaleClaim, ScaleProvenance,
+};
 pub use capability::{CapabilityPolicy, ConversionProfile};
 pub use georef::{
     GeoreferenceError, GeoreferenceHandoff, HandoffV1, SourceBox, UnitRecord, georef_path,
