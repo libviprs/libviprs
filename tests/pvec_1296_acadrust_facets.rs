@@ -14,7 +14,7 @@ use libviprs::cad::CadSource;
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
 use libviprs::pvec::{
     Availability, DwgProvider, EntityScope, EntityStates, Facet, FacetSource, LayoutKind,
-    PolicyReason, SourceFact, ViewProfile, ViewportFreezeMode, VisibilityFilter,
+    PolicyReason, SourceFact, ViewProfile, ViewportClip, ViewportFreezeMode, VisibilityFilter,
 };
 
 struct Drawing {
@@ -153,9 +153,14 @@ fn pvec_1296_viewport_entities_carry_visibility_clip_and_frozen_layer_names() {
     assert!(vp.visible);
     assert_eq!(vp.frozen_layers, vec!["ColdInSheet".to_string()]);
     // 80 wide, 40 high, centred on (100, 100).
-    let xs: Vec<f64> = vp.clip.iter().map(|c| c[0]).collect();
-    let ys: Vec<f64> = vp.clip.iter().map(|c| c[1]).collect();
-    assert_eq!(vp.clip.len(), 4);
+    let ViewportClip::Rectangle(corners) = vp.clip else {
+        panic!(
+            "no boundary entity, so the viewport's own rectangle: {:?}",
+            vp.clip
+        );
+    };
+    let xs: Vec<f64> = corners.iter().map(|c| c[0]).collect();
+    let ys: Vec<f64> = corners.iter().map(|c| c[1]).collect();
     assert!((xs.iter().cloned().fold(f64::MAX, f64::min) - 60.0).abs() < 1e-9);
     assert!((xs.iter().cloned().fold(f64::MIN, f64::max) - 140.0).abs() < 1e-9);
     assert!((ys.iter().cloned().fold(f64::MAX, f64::min) - 80.0).abs() < 1e-9);

@@ -242,6 +242,7 @@ impl MockDwgProvider {
                     off: false,
                     frozen: false,
                     locked: false,
+                    plottable: true,
                 },
                 LayerState {
                     name: "VC_ON".into(),
@@ -249,6 +250,7 @@ impl MockDwgProvider {
                     off: false,
                     frozen: false,
                     locked: true,
+                    plottable: true,
                 },
             ],
         }

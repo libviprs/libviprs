@@ -79,6 +79,7 @@ fn layers() -> Vec<LayerState> {
         off,
         frozen,
         locked: false,
+        plottable: true,
     };
     vec![
         l("0", false, false),

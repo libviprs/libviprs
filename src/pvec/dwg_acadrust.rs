@@ -49,7 +49,7 @@ use crate::pvec::provider::{
     EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
     SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextStyleRef,
-    ViewportEntity, XrefAttachment,
+    ViewportClip, ViewportEntity, XrefAttachment,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -574,6 +574,7 @@ impl DwgProvider for AcadrustProvider {
                 off: l.is_off(),
                 frozen: l.is_frozen(),
                 locked: l.is_locked(),
+                plottable: true,
             })
             .collect())
     }
@@ -633,8 +634,21 @@ impl DwgProvider for AcadrustProvider {
                 out.push(ViewportEntity {
                     handle: key,
                     layout: layout.id,
+                    id: v.id,
                     visible: v.status.is_on && !v.common.invisible,
                     clip: self.viewport_clip(v),
+                    layer: String::new(),
+                    center: [0.0, 0.0],
+                    width: 0.0,
+                    height: 0.0,
+                    view_center: [0.0, 0.0],
+                    view_height: 0.0,
+                    view_target: [0.0, 0.0, 0.0],
+                    view_direction: [0.0, 0.0, 0.0],
+                    twist: 0.0,
+                    perspective: false,
+                    hide_plot: false,
+                    non_rectangular_clipping: false,
                     frozen_layers: v
                         .frozen_layers
                         .iter()
@@ -746,34 +760,43 @@ impl AcadrustProvider {
 
     /// The viewport's clip boundary: the polyline it is clipped to when it has one, else
     /// the rectangle its centre, width and height describe.
-    fn viewport_clip(&self, v: &acr::entities::Viewport) -> Vec<[f64; 2]> {
+    fn viewport_clip(&self, v: &acr::entities::Viewport) -> ViewportClip {
+        let flat = |xy: Vec<[f64; 2]>| {
+            ViewportClip::Polygon(
+                xy.into_iter()
+                    .map(|[x, y]| RawVertex { x, y, bulge: 0.0 })
+                    .collect(),
+            )
+        };
         if !v.clip_boundary_handle.is_null() {
             match self.doc.get_entity(v.clip_boundary_handle) {
                 Some(EntityType::LwPolyline(p)) => {
-                    return p
-                        .vertices
-                        .iter()
-                        .map(|q| [q.location.x, q.location.y])
-                        .collect();
+                    return flat(
+                        p.vertices
+                            .iter()
+                            .map(|q| [q.location.x, q.location.y])
+                            .collect(),
+                    );
                 }
                 Some(EntityType::Polyline2D(p)) => {
-                    return p
-                        .vertices
-                        .iter()
-                        .map(|q| [q.location.x, q.location.y])
-                        .collect();
+                    return flat(
+                        p.vertices
+                            .iter()
+                            .map(|q| [q.location.x, q.location.y])
+                            .collect(),
+                    );
                 }
                 _ => {}
             }
         }
         let (cx, cy) = (v.center.x, v.center.y);
         let (hw, hh) = (v.width / 2.0, v.height / 2.0);
-        vec![
+        ViewportClip::Rectangle([
             [cx - hw, cy - hh],
             [cx + hw, cy - hh],
             [cx + hw, cy + hh],
             [cx - hw, cy + hh],
-        ]
+        ])
     }
 }
 
