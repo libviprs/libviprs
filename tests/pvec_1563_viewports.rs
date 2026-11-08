@@ -23,13 +23,15 @@ use std::path::{Path, PathBuf};
 
 use libviprs::cad::{CadSource, ItemHandle};
 use libviprs::pvec::components::StreamSelection;
+use libviprs::pvec::diagnostics::DiagnosticCode;
+use libviprs::pvec::flatten::FlattenError;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::{ConversionReport, EntityRow, SheetViewport};
 use libviprs::pvec::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet,
-    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot, LayoutState,
+    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot, LayoutState, Limit,
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
-    SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
+    SourceLimits, SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
 };
 use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput, PvecConvertError};
 use pvec_facade::Curve;
@@ -44,12 +46,16 @@ struct Mock {
     paper: Vec<RawEntity>,
     model: Vec<RawEntity>,
     viewports: Vec<ViewportEntity>,
-    /// The one block definition, `BLK`.
+    /// The block definition `BLK`.
     block: Vec<RawEntity>,
+    /// The block definition `INNER`, which `BLK` may insert (#1581).
+    inner: Vec<RawEntity>,
 }
 
 thread_local! {
     static NEXT: RefCell<Option<Mock>> = const { RefCell::new(None) };
+    /// How many times `BLK`'s definition was read on this thread (#1581).
+    static BLOCK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 struct VecCursor(std::vec::IntoIter<RawEntity>);
@@ -131,8 +137,19 @@ impl DwgProvider for Mock {
         let list = match scope {
             EntityScope::Layout(LayoutId(0)) => self.model.clone(),
             EntityScope::Layout(LayoutId(1)) => self.paper.clone(),
-            EntityScope::BlockDefinition { name, reached_via } if name == "BLK" => self
-                .block
+            EntityScope::BlockDefinition { name, reached_via } if name == "BLK" => {
+                BLOCK_READS.with(|n| n.set(n.get() + 1));
+                self.block
+                    .iter()
+                    .cloned()
+                    .map(|mut e| {
+                        e.provenance.block_path = reached_via.clone();
+                        e
+                    })
+                    .collect()
+            }
+            EntityScope::BlockDefinition { name, reached_via } if name == "INNER" => self
+                .inner
                 .iter()
                 .cloned()
                 .map(|mut e| {
@@ -380,6 +397,7 @@ fn drawing(draw_viewports_first: bool) -> Mock {
         ],
         viewports: viewports(),
         block: vec![line(IN_BLOCK, "WALLS", [3.0, 6.0], [4.0, 6.0])],
+        inner: Vec::new(),
     }
 }
 
@@ -632,6 +650,120 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     );
     // A viewport that is drawn is not refused any more.
     assert_ne!(row(&report, VP_A, None).fidelity, "Unsupported");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_is_inserted() {
+    // BLK inserted five more times on layer 0, beside the INSERT on COLD, and BLK inserting
+    // INNER, so a leaf of INNER is reached through an INSERT that sits in BLK's definition.
+    let inserted = || {
+        let mut mock = drawing(false);
+        mock.block.push(ent(
+            0x60,
+            "INSERT",
+            "0",
+            RawGeometry::Insert(BlockRef {
+                block_name: "INNER".into(),
+                transform: SourceTransform::IDENTITY,
+                normal: [0.0, 0.0, 1.0],
+                grid: ArrayGrid::SINGLE,
+            }),
+        ));
+        mock.inner = vec![line(0x61, "0", [4.0, 4.0], [6.0, 4.0])];
+        for h in 0x50..0x55 {
+            mock.model.push(ent(
+                h,
+                "INSERT",
+                "0",
+                RawGeometry::Insert(BlockRef {
+                    block_name: "BLK".into(),
+                    transform: SourceTransform::IDENTITY,
+                    normal: [0.0, 0.0, 1.0],
+                    grid: ArrayGrid::SINGLE,
+                }),
+            ));
+        }
+        mock
+    };
+    let reads = |mock: Mock| {
+        BLOCK_READS.with(|n| n.set(0));
+        let (out, dir) = convert("reads", mock, |c| c);
+        out.expect("the sheet converts");
+        let _ = fs::remove_dir_all(dir);
+        BLOCK_READS.with(std::cell::Cell::get)
+    };
+    // Without a viewport freeze the INSERTs' own layers are never looked up, so the difference is
+    // what that lookup reads.
+    let mut thawed = inserted();
+    for v in &mut thawed.viewports {
+        v.frozen_layers.clear();
+    }
+    let without = reads(thawed);
+    let with = reads(inserted());
+    assert_eq!(
+        with - without,
+        1,
+        "{with} reads with the freeze, {without} without"
+    );
+}
+
+// ---- limits ------------------------------------------------------------------------------
+
+/// The sheet with only the two viewports onto the model: its own items are the title line and two
+/// VIEWPORT entities, and the model has seven kept leaves and one no-plot line. What the
+/// conversion classifies is 3 + 7 * 2 + 1 = 18, while the sheet and the model each walk far fewer.
+fn two_viewports() -> Mock {
+    let mut mock = drawing(false);
+    let keep = |h: u64| h == VP_A || h == VP_B;
+    mock.viewports.retain(|v| keep(v.handle.get()));
+    mock.paper.retain(|e| {
+        e.provenance.class_name != "VIEWPORT" || e.provenance.handle.is_some_and(|h| keep(h.get()))
+    });
+    mock
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1580_viewports_times_model_entities_count_against_the_entity_limit() {
+    let mut tight = SourceLimits::default();
+    tight.max_entities = 17;
+    let (out, dir) = convert("limit", two_viewports(), |c| c.limits(tight));
+    let err = out.expect_err("18 entities to classify, the ceiling is 17");
+    match &err {
+        PvecConvertError::Flatten(FlattenError::Limit {
+            limit,
+            observed,
+            ceiling,
+            ..
+        }) => assert_eq!((*limit, *observed, *ceiling), (Limit::Entities, 18, 17)),
+        other => panic!("the entity limit, not {other:?}"),
+    }
+    let d = err.diagnostic();
+    assert_eq!(d.code, DiagnosticCode::BlocksFailed);
+    assert_eq!(d.message_id, "limit");
+    let source = std::error::Error::source(&err).map(ToString::to_string);
+    assert!(
+        source
+            .as_deref()
+            .is_some_and(|m| m.contains("max_entities")),
+        "{source:?}"
+    );
+    // Refused before anything is written.
+    assert!(!dir.join("sheet.pvec").exists());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1580_a_sheet_at_the_entity_limit_still_converts() {
+    let mut exact = SourceLimits::default();
+    exact.max_entities = 18;
+    let (out, dir) = convert("at-limit", two_viewports(), |c| c.limits(exact));
+    let report = out.expect("18 entities fit a ceiling of 18").report;
+    assert_eq!(rows(&report, SHORT, Some(VP_A)).len(), 1);
+    assert_eq!(rows(&report, SHORT, Some(VP_B)).len(), 1);
     let _ = fs::remove_dir_all(dir);
 }
 

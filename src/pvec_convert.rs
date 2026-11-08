@@ -113,9 +113,9 @@ use crate::pvec::writer::{
 };
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
-    LayoutKind, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceFact,
-    SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError, ViewportClip,
-    ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
+    LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
+    SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError,
+    ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
@@ -949,21 +949,23 @@ impl<'a> PvecConversion<'a> {
                 .any(|&k| !windows[k].0.frozen_layers.is_empty())
                 && let Some(mf) = &model_flat
             {
-                // Each scope an INSERT of some leaf's path sits in is read once.
-                let mut read: BTreeSet<String> = BTreeSet::new();
+                // Each scope an INSERT of some leaf's path sits in is read once: model space, and
+                // each block definition by name, whichever instance reached it first. An INSERT's
+                // handle and layer inside a definition are the same in every instance (#1581).
+                let mut read: BTreeSet<Option<&str>> = BTreeSet::new();
                 for f in &mf.entities {
                     let steps = f.entity.provenance.block_path.steps();
                     let mut via_path = crate::pvec::InstancePath::root();
                     for (i, step) in steps.iter().enumerate() {
-                        let scope = if i == 0 {
-                            EntityScope::Layout(model.id)
-                        } else {
-                            EntityScope::BlockDefinition {
-                                name: steps[i - 1].block_name.clone(),
-                                reached_via: via_path.clone(),
-                            }
-                        };
-                        if read.insert(via_path.to_string()) {
+                        let container = i.checked_sub(1).map(|j| steps[j].block_name.as_str());
+                        if read.insert(container) {
+                            let scope = match container {
+                                None => EntityScope::Layout(model.id),
+                                Some(name) => EntityScope::BlockDefinition {
+                                    name: name.to_owned(),
+                                    reached_via: via_path.clone(),
+                                },
+                            };
                             let entities = provider
                                 .entities(&scope)
                                 .and_then(|mut c| c.collect_all())
@@ -997,6 +999,32 @@ impl<'a> PvecConversion<'a> {
         // classified, so nothing is copied per viewport up front.
         let paper_rank = if first { u32::MAX } else { 0 };
         let mut via: Vec<(u32, Option<usize>)> = vec![(paper_rank, None); items.len()];
+        // Each drawn viewport classifies every kept model leaf once more, so the conversion
+        // handles the sheet's own items, the model leaves times the drawn viewports, and the
+        // model's excluded and skipped rows once. The sheet and the model were each walked under
+        // their own guard, so the product is checked here, before anything is listed (#1580).
+        if let (Some(mv), Some(mf)) = (&model_view, &model_flat) {
+            let shown = mf
+                .entities
+                .iter()
+                .filter(|f| model_layers.contains_key(&flat_key(f)))
+                .count();
+            let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+            let observed = count(shown)
+                .saturating_mul(count(drawn.len()))
+                .saturating_add(count(items.len()))
+                .saturating_add(count(mv.excluded.len()))
+                .saturating_add(count(mf.skipped.len()));
+            let ceiling = view_profile.limits.max_entities;
+            if observed > ceiling {
+                return Err(PvecConvertError::Flatten(FlattenError::Limit {
+                    limit: Limit::Entities,
+                    observed,
+                    ceiling,
+                    block_path: crate::pvec::InstancePath::root(),
+                }));
+            }
+        }
         if let Some(mf) = &model_flat {
             for &k in &drawn {
                 for f in mf

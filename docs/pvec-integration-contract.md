@@ -33,7 +33,7 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 | `xrefs` | report-external |
 
 **4. The accepted fixture corpus revision.** `r3-open` of `libviprs/pvec-gold-fixtures`, gold commit
-`133b55108297eec2168b805588d69a3f24a0bcab`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
+`a185ad489967d76432990c8bc1688d5b6fafeb9c`, vendored under `tests/fixtures/pvec-gold/` and held to its own index by
 `tests/common/pvec_gold.rs`.
 
 **5. The provider compatibility range.** The default provider is `acadrust`, at revision
@@ -49,7 +49,7 @@ page and the pin moving with it.
 |---|---|
 | `tests/fixtures/pvec_bench_corpus.json` | `97eca65c287aaea1c014489cd5cc02e685e17b7f26b3961837414317e18bc5e5` |
 | `tests/fixtures/pvec_bench_baseline.json` | `84afe74abb0efebab67c58797e699dd2e77d10616019d2bcde08c291cafb5022` |
-| `tests/fixtures/pvec_corpus_baseline.json` | `2619fb5cf2baf5d98f3695555fd23c39d2a714adb608f3e3fa2619b511f17bad` |
+| `tests/fixtures/pvec_corpus_baseline.json` | `6bd4c944688bc202c886ac31bf5d18a009d53e7e9f3f56e34c81c25fcb5c509e` |
 
 ## The EPIC L decision
 

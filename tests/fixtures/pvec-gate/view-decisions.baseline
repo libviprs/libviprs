@@ -20,6 +20,8 @@ huge-extent-001 included=1 excluded=0
 large-coords-001 included=1 excluded=0
 layer-state-001 included=1 excluded=2 LAYER_HIDDEN=2
 layer-state-001.dxf included=1 excluded=2 LAYER_HIDDEN=2
+layout-plot-settings-inch-001 included=1 excluded=0
+layout-plot-settings-mm-001 included=1 excluded=0
 line-001 included=1 excluded=0
 line-001.dxf included=1 excluded=0
 lwpolyline-closed-001 included=1 excluded=0
@@ -30,6 +32,7 @@ mixed-entity-001.dxf included=8 excluded=0
 near-singular-001 included=1 excluded=0
 nested-blocks-001 included=1 excluded=0
 nested-blocks-001.dxf included=1 excluded=0
+no-plot-layer-001 included=2 excluded=0
 nonuniform-scale-circle-001 included=1 excluded=0
 nonuniform-scale-rotated-001 included=1 excluded=0
 nonunit-weight-001 included=1 excluded=0
@@ -51,3 +54,7 @@ uniform-scale-001 included=1 excluded=0
 viewport-clipped-001 included=1 excluded=0
 viewport-clipped-001.dxf included=1 excluded=0
 viewport-clipped-bounded-001 included=1 excluded=0
+viewport-frozen-layer-001 included=2 excluded=0
+viewport-hide-plot-001 included=1 excluded=0
+viewport-non-plan-001 included=1 excluded=0
+viewport-twisted-001 included=1 excluded=0

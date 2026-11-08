@@ -1,0 +1,305 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "viewport-hide-plot-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params-r3/viewport-hide-plot-001.json",
+    "parameter_file_sha256": "9293f2d6fb8901440aa73d96735cc686ff40d11638d877ba0fc974c7cf1e3c10",
+    "parameters": {
+      "id": "viewport-hide-plot-001",
+      "kind": "viewport_print",
+      "description": "Three viewports onto the same model line: one hidden when plotting, one whose VIEWPORT entity sits on the no-plot layer VPNOPLOT, and one that plots. Only the third prints.",
+      "layout": "Layout1",
+      "layers": [
+        {
+          "name": "VPNOPLOT",
+          "plottable": false
+        }
+      ],
+      "model_curves": [
+        {
+          "layer": "0",
+          "start": [
+            "0",
+            "0",
+            "0"
+          ],
+          "end": [
+            "12",
+            "9",
+            "0"
+          ]
+        }
+      ],
+      "paper_curves": [],
+      "viewports": [
+        {
+          "id": "vp01",
+          "center": [
+            "60",
+            "60"
+          ],
+          "width": "100",
+          "height": "80",
+          "view_center": [
+            "6",
+            "4.5"
+          ],
+          "view_height": "12",
+          "hide_plot": true
+        },
+        {
+          "id": "vp02",
+          "center": [
+            "180",
+            "60"
+          ],
+          "width": "100",
+          "height": "80",
+          "view_center": [
+            "6",
+            "4.5"
+          ],
+          "view_height": "12",
+          "layer": "VPNOPLOT"
+        },
+        {
+          "id": "vp03",
+          "center": [
+            "300",
+            "60"
+          ],
+          "width": "100",
+          "height": "80",
+          "view_center": [
+            "6",
+            "4.5"
+          ],
+          "view_height": "12"
+        }
+      ]
+    }
+  },
+  "entities": [
+    {
+      "id": "viewport-hide-plot-001-model-1",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "12.0",
+            "f64_hex": "0x4028000000000000"
+          },
+          {
+            "decimal": "9.0",
+            "f64_hex": "0x4022000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "0",
+        "on": true,
+        "frozen": false
+      }
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "viewport-hide-plot-001-model-1",
+      "claim": "VIEWPORT_COUNT_PRESERVED",
+      "statement": "The layout Layout1 keeps exactly 3 viewport(s); none is dropped or merged."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "vp01",
+      "claim": "VIEWPORT_PLOT_STATE_PRESERVED",
+      "statement": "hide_plot and the layer of the VIEWPORT entity are kept, so whether it prints is unchanged."
+    },
+    {
+      "id": "a3",
+      "kind": "STRUCTURAL",
+      "entity": "vp02",
+      "claim": "VIEWPORT_PLOT_STATE_PRESERVED",
+      "statement": "hide_plot and the layer of the VIEWPORT entity are kept, so whether it prints is unchanged."
+    }
+  ],
+  "viewports": [
+    {
+      "id": "vp01",
+      "layout": "Layout1",
+      "paper": {
+        "center": [
+          {
+            "decimal": "60.0",
+            "f64_hex": "0x404e000000000000"
+          },
+          {
+            "decimal": "60.0",
+            "f64_hex": "0x404e000000000000"
+          }
+        ],
+        "width": {
+          "decimal": "100.0",
+          "f64_hex": "0x4059000000000000"
+        },
+        "height": {
+          "decimal": "80.0",
+          "f64_hex": "0x4054000000000000"
+        }
+      },
+      "view": {
+        "center": [
+          {
+            "decimal": "6.0",
+            "f64_hex": "0x4018000000000000"
+          },
+          {
+            "decimal": "4.5",
+            "f64_hex": "0x4012000000000000"
+          }
+        ],
+        "height": {
+          "decimal": "12.0",
+          "f64_hex": "0x4028000000000000"
+        }
+      },
+      "hide_plot": true
+    },
+    {
+      "id": "vp02",
+      "layout": "Layout1",
+      "paper": {
+        "center": [
+          {
+            "decimal": "180.0",
+            "f64_hex": "0x4066800000000000"
+          },
+          {
+            "decimal": "60.0",
+            "f64_hex": "0x404e000000000000"
+          }
+        ],
+        "width": {
+          "decimal": "100.0",
+          "f64_hex": "0x4059000000000000"
+        },
+        "height": {
+          "decimal": "80.0",
+          "f64_hex": "0x4054000000000000"
+        }
+      },
+      "view": {
+        "center": [
+          {
+            "decimal": "6.0",
+            "f64_hex": "0x4018000000000000"
+          },
+          {
+            "decimal": "4.5",
+            "f64_hex": "0x4012000000000000"
+          }
+        ],
+        "height": {
+          "decimal": "12.0",
+          "f64_hex": "0x4028000000000000"
+        }
+      },
+      "entity_layer": "VPNOPLOT"
+    },
+    {
+      "id": "vp03",
+      "layout": "Layout1",
+      "paper": {
+        "center": [
+          {
+            "decimal": "300.0",
+            "f64_hex": "0x4072c00000000000"
+          },
+          {
+            "decimal": "60.0",
+            "f64_hex": "0x404e000000000000"
+          }
+        ],
+        "width": {
+          "decimal": "100.0",
+          "f64_hex": "0x4059000000000000"
+        },
+        "height": {
+          "decimal": "80.0",
+          "f64_hex": "0x4054000000000000"
+        }
+      },
+      "view": {
+        "center": [
+          {
+            "decimal": "6.0",
+            "f64_hex": "0x4018000000000000"
+          },
+          {
+            "decimal": "4.5",
+            "f64_hex": "0x4012000000000000"
+          }
+        ],
+        "height": {
+          "decimal": "12.0",
+          "f64_hex": "0x4028000000000000"
+        }
+      }
+    }
+  ],
+  "layers": [
+    {
+      "name": "VPNOPLOT",
+      "on": true,
+      "frozen": false,
+      "plottable": false
+    }
+  ]
+}

@@ -1444,6 +1444,139 @@
    "id": "paper-space-multi-viewport-001",
    "status": "ACCEPTED",
    "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 4363,
+     "sha256": "89ce8518483711450157e7290648d54d340b5f77b4748374eb69b393a97333ac"
+    },
+    "source.dwg": {
+     "bytes": 20818,
+     "sha256": "71904a48042618aa5a0f612a1c26af3ec5d0adf132a3ae2cd83e7d894d34e511"
+    }
+   },
+   "group": "viewports",
+   "id": "viewport-twisted-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 7299,
+     "sha256": "0d70239d39362632b286bb30fa98be8ce91b4d7e1fd94f96051b9d4838d1ea80"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "329755d29eb15e348e56ecaf035177daedbbbe9284feaa1d5f90d060157055e8"
+    }
+   },
+   "group": "viewports",
+   "id": "viewport-frozen-layer-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 4590,
+     "sha256": "f22b1dd25e37947d3042799abc9b6cd1c11cd8d59414f2cd965284ed5cb1b5d3"
+    },
+    "source.dwg": {
+     "bytes": 20818,
+     "sha256": "912cf75be9b6d9d5cb673db53647d46fe45ec4c4138f1f36939a78a7976e1b1e"
+    }
+   },
+   "group": "viewports",
+   "id": "viewport-non-plan-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 7040,
+     "sha256": "34fc1562d4b77b9c93a882d7db14b16356d0658441ec4b01b7cef5c8e3f21c58"
+    },
+    "source.dwg": {
+     "bytes": 20915,
+     "sha256": "b4475b573e764fe9c2ef758f1cdbf32ab2ea0f4c00b5f6db2c67b825ca4b8042"
+    }
+   },
+   "group": "viewports",
+   "id": "viewport-hide-plot-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 9140,
+     "sha256": "ae632657dfa8e33388096706d1a094780a09a663274a2346f3604665af0722cc"
+    },
+    "source.dwg": {
+     "bytes": 20883,
+     "sha256": "5d2f9569d15c75a362a0c8da72c4d8dadf93b2036a387e5e9c51b62fd2461581"
+    }
+   },
+   "group": "viewports",
+   "id": "no-plot-layer-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 7551,
+     "sha256": "70894b714506449108f53922e947dcb06cd89b3b12ac2ceaf3286e66a796db36"
+    },
+    "source.dwg": {
+     "bytes": 20947,
+     "sha256": "bd59ba571683f24c2da418238f7e9bed13a26c4e8895a8b698759939b5d27981"
+    }
+   },
+   "group": "viewports",
+   "id": "layout-plot-settings-mm-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
+  },
+  {
+   "evidence_class": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "expects_rejection": false,
+   "files": {
+    "expected.math.json": {
+     "bytes": 7627,
+     "sha256": "adc6a2468ded4df7101cb2b9236d7bb442a59375352c984711f8a5fffc5c3fe1"
+    },
+    "source.dwg": {
+     "bytes": 20947,
+     "sha256": "d99c556516e429fb765c89b858a969eb2a43583bfbc15844d05427e4da35816e"
+    }
+   },
+   "group": "viewports",
+   "id": "layout-plot-settings-inch-001",
+   "status": "ACCEPTED",
+   "step_verdict": null
   }
  ],
  "oracle_scope": "OPEN_CONVERTERS"

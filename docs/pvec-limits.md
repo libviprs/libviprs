@@ -28,6 +28,9 @@ Raise one with `SourceLimits` when a legitimate input trips it, or use `SourceLi
 - `ViewProfile::apply` charges every entity it visits and the expanded instance total, so a block that fans out is refused before it
   is expanded (#1439).
 - `BlockResolver::flatten` enforces depth, cycles, the grid, the expanded total and the allocation estimate, and a per-block entity ceiling.
+- A sheet under the print profile checks `max_entities` against what it will classify: its own items, plus the kept model leaves
+  times the viewports drawing them, plus the model's excluded and skipped rows once. The sheet and model space are each walked under
+  their own guard, so the product is checked before any of it is listed, and a breach is the flattener's `limit` failure (#1580).
 - The spline extractor refuses over PVec's own counts (`MAX_DEGREE`, `MAX_CONTROL_POINTS`, `MAX_KNOTS`).
 - A recursion bomb is refused by the depth limit under both the fuzz target and a direct test.
 

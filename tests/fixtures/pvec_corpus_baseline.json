@@ -734,6 +734,66 @@
    },
    "what_the_class_means": "independently authored expectation"
   },
+  "layout-plot-settings-inch-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "layout-plot-settings-inch-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "layout-plot-settings-mm-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "layout-plot-settings-mm-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
   "line-001": {
    "evidence": "KNOWN_TRUTH_EXACT",
    "evidence_scope": "STEP_ORACLE",
@@ -932,6 +992,36 @@
    "view": {
     "excluded_by_field": {},
     "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "no-plot-layer-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "no-plot-layer-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 2,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 352,
+    "entities": 2,
+    "written": 2
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 2,
     "space": "Model",
     "xrefs_unresolved": 0
    },
@@ -1656,6 +1746,126 @@
    "evidence": "KNOWN_TRUTH_EXACT",
    "evidence_scope": "READER_MAPPING_ONLY",
    "fixture": "viewport-clipped-bounded-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "viewport-frozen-layer-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "viewport-frozen-layer-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 2,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 352,
+    "entities": 2,
+    "written": 2
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 2,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "viewport-hide-plot-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "viewport-hide-plot-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "viewport-non-plan-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "viewport-non-plan-001",
+   "group": "viewports",
+   "mathematical": {
+    "by_fidelity": {
+     "IgnoredByPolicy": 0,
+     "RequiresExtension": 0,
+     "RequiresPVecCapability": 0,
+     "SupportedEquivalent": 1,
+     "SupportedExact": 0,
+     "Unsupported": 0
+    },
+    "conformance": "SupportedEquivalent"
+   },
+   "outcome": "converted",
+   "size": {
+    "artifact_bytes": 344,
+    "entities": 1,
+    "written": 1
+   },
+   "view": {
+    "excluded_by_field": {},
+    "included": 1,
+    "space": "Model",
+    "xrefs_unresolved": 0
+   },
+   "what_the_class_means": "independently authored expectation"
+  },
+  "viewport-twisted-001": {
+   "evidence": "KNOWN_TRUTH_EXACT",
+   "evidence_scope": "READER_MAPPING_ONLY",
+   "fixture": "viewport-twisted-001",
    "group": "viewports",
    "mathematical": {
     "by_fidelity": {
