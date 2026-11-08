@@ -260,6 +260,7 @@ fn no_foreign_type_appears_in_any_public_signature_of_the_provider_module() {
                 "dwg_acadrust".to_string(),
                 "units".to_string(),
                 "pdf_vector".to_string(),
+                "pdf_to_pvec".to_string(),
                 "dwg_spline".to_string(),
                 "normalized".to_string(),
                 "view_profile".to_string(),
