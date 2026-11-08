@@ -754,9 +754,6 @@ pub fn extract_page_paths_from_bytes(
     let resources = inherited_resources(&doc, page_id)?;
     run.stream(&ops, resources, base, 0)?;
 
-    /// The `/VP` array of a page (issue #1547), at most 64 viewports, each `/BBox` mapped by `base`
-    /// into page space. A viewport with no usable `/BBox` is skipped; a measure that cannot be read is
-    /// kept as [`PdfMeasure::Unread`], so the report can say so.
     /// The page's `/LGIDict` (a dictionary or an array of them, at most 64), each `/CTM` (numbers
     /// or, as LGIDict writes them, numeric strings) composed after the inverse of `base` so it
     /// takes page space. A dictionary with no usable `/CTM` is skipped.
@@ -836,6 +833,9 @@ pub fn extract_page_paths_from_bytes(
             .collect()
     }
 
+    /// The `/VP` array of a page (issue #1547), at most 64 viewports, each `/BBox` mapped by `base`
+    /// into page space. A viewport with no usable `/BBox` is skipped; a measure that cannot be read is
+    /// kept as [`PdfMeasure::Unread`], so the report can say so.
     fn read_viewports(doc: &Document, page_id: lopdf::ObjectId, base: &Matrix) -> Vec<PdfViewport> {
         fn deref<'a>(doc: &'a Document, o: &'a Object) -> Option<&'a Object> {
             doc.dereference(o).ok().map(|(_, o)| o)
@@ -986,7 +986,8 @@ pub fn extract_page_paths_from_bytes(
             .get_dictionary(page_id)
             .ok()
             .and_then(|d| d.get(b"UserUnit").ok())
-            .and_then(number)
+            .and_then(|o| doc.dereference(o).ok())
+            .and_then(|(_, o)| number(o))
             .unwrap_or(1.0),
     })
 }

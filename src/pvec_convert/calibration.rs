@@ -17,7 +17,7 @@
 //! | CAL-06 one source point with two world points, a measured pair closer than NP-06's degenerate length | [`CalibrationError::Contradictory`], [`CalibrationError::Degenerate`] |
 //! | CAL-07 a control character (a definition may hold LF and TAB), U+2028 or U+2029, a bidi override, or a CRS id outside `[A-Za-z0-9:_.+-]` | [`CalibrationError::Text`] |
 //! | CAL-09 neither a scale nor a georeference | [`CalibrationError::Empty`] |
-//! | CAL-10 evidence a provenance does not use or lacks; a residual on anything but a fit of three points or more | [`CalibrationError::Evidence`] |
+//! | CAL-10 evidence a provenance does not use or lacks; a `Georeference` scale with no georeference; a fit from fewer than two points; a residual on anything but a fit of three points or more | [`CalibrationError::Evidence`] |
 //! | a georeference with neither a CRS id nor a definition | [`CalibrationError::NoCrs`] |
 //!
 //! A projective transform (a 3x3 with a perspective row) has no representation in the block, so
@@ -106,6 +106,7 @@ pub struct Georeference {
 
 /// What kind of CRS a georeference lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum CrsKind {
     /// A projected CRS: eastings and northings.
     Projected,
@@ -117,6 +118,7 @@ pub enum CrsKind {
 
 /// How a georeference's affine was arrived at.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum GeoreferenceMethod {
     /// The source states the affine.
     Declared,
@@ -137,6 +139,7 @@ pub struct CrsDefinition {
 
 /// The format of a [`CrsDefinition`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DefinitionFormat {
     /// Well-known text, as a GeoPDF's `/GCS /WKT` carries it.
     Wkt,
@@ -313,6 +316,9 @@ impl Calibration {
             {
                 return Err(CalibrationError::Evidence);
             }
+            if g.method == GeoreferenceMethod::Fitted && points.len() < 2 {
+                return Err(CalibrationError::Evidence);
+            }
             Ok(())
         }
 
@@ -327,6 +333,42 @@ impl Calibration {
         }
         if let Some(id) = &external_id {
             check_text(id, 255, false, "external_id")?;
+        }
+        if scale
+            .as_ref()
+            .is_some_and(|s| s.provenance == ScaleProvenance::Georeference)
+            && georeference.is_none()
+        {
+            return Err(CalibrationError::Evidence);
+        }
+        // NP-03: the block stores -0.0 as +0.0, and adding +0.0 is what turns one into the other.
+        let mut scale = scale;
+        let mut georeference = georeference;
+        if let Some(s) = &mut scale {
+            s.metres_per_source_unit += 0.0;
+            match &mut s.provenance {
+                ScaleProvenance::PlanScale {
+                    paper_metres_per_unit,
+                    ..
+                } => *paper_metres_per_unit += 0.0,
+                ScaleProvenance::Measured { p0, p1, metres } => {
+                    for v in p0.iter_mut().chain(p1.iter_mut()) {
+                        *v += 0.0;
+                    }
+                    *metres += 0.0;
+                }
+                _ => {}
+            }
+        }
+        if let Some(g) = &mut georeference {
+            for v in g.affine.iter_mut().chain(
+                g.control_points
+                    .iter_mut()
+                    .flat_map(|p| p.source.iter_mut().chain(p.world.iter_mut())),
+            ) {
+                *v += 0.0;
+            }
+            g.residual_max += 0.0;
         }
         Ok(Self {
             scale,

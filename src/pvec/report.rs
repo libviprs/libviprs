@@ -223,7 +223,8 @@ pub struct PdfCalibrationSummary {
     /// The `/LGIDict` georeferences on the page (#1548).
     #[serde(default)]
     pub lgidicts: u64,
-    /// The index in `/VP` of the viewport whose measure was used, absent when none was.
+    /// The index in `/VP` of the viewport chosen for its measure (even one that could not be used,
+    /// which `notes` then says), absent when no viewport has a measure.
     pub viewport: Option<u64>,
     /// The scale's provenance: `declared-unit` (the point) or `plan-scale` (the viewport's `/RL`).
     pub scale: String,

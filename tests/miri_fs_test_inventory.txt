@@ -660,6 +660,7 @@ annotated   fs-detected  tests/pvec_1526_regions.rs::issue_1526_the_regions_summ
 annotated   fs-detected  tests/pvec_1526_regions.rs::issue_1526_the_report_counts_the_rooms_the_corridor_and_the_closed_gap
 annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::a_gcs_given_only_as_wkt_is_kept_as_its_definition
 annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::a_geopdf_viewport_gives_fitted_control_points_and_its_epsg_code
+annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::a_negative_plan_scale_factor_is_refused_and_the_conversion_finishes
 annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::a_plan_scale_in_a_unit_nobody_knows_is_reported_and_the_point_stays
 annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::a_plan_scale_replaces_the_point_and_keeps_its_ratio
 annotated   fs-detected  tests/pvec_1547_pdf_viewports.rs::a_projected_gcs_is_named_by_its_geographic_base
