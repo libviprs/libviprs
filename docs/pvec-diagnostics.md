@@ -33,7 +33,6 @@ nothing emits and on one that is emitted and not written down.
 | `WRITE_FAILED` | PVec's writer refused the artifact. | error | `write` | `a_unit_pvec_cannot_declare` |
 | `REPORT_FAILED` | The report could not be built, or its counts disagree with the entities met. | error | `report` | `a_report_that_does_not_add_up` |
 | `PUBLISH_FAILED` | The artifact and report could not be published. | error | `publish` | `a_destination_that_is_a_directory` |
-| `GEOREFERENCE_FAILED` | A control point given to the deprecated `PvecConversion::control_points` is not finite. It goes with that builder in the next minor release (#1554). | error | `georeference` | `a_control_point_that_is_not_finite` |
 | `CANCELLED` | The caller cancelled the run. | info | `cancelled` | `a_precancelled_run` |
 
 ## Fields
@@ -51,3 +50,13 @@ nothing emits and on one that is emitted and not written down.
 | `class` | The drawing's class name for the entity. |
 | `block_path` | The INSERT chain the entity was reached through, spelled `block@HANDLE/...`. |
 | `layer` | The entity's own layer. |
+
+## Retired codes
+
+A code that nothing can emit any more leaves the table above and is listed here, so a report that
+still names it is recognisably old. It no longer parses as a `DiagnosticCode`, and the test checks
+that it is in neither the table nor `DiagnosticCode::ALL`.
+
+| code | retired by | why |
+|---|---|---|
+| `GEOREFERENCE_FAILED` | #1556 | Only `PvecConversion::control_points` fired it, for a point that was not finite, and that builder is gone. Control points go in a `Georeference` passed to `calibration`. |

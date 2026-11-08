@@ -601,6 +601,7 @@ annotated   fs-detected  tests/pvec_1416_diagnostics.rs::issue_1416_a_failure_ca
 annotated   fs-detected  tests/pvec_1416_diagnostics.rs::issue_1416_diagnostics_round_trip_through_json_with_stable_field_names
 annotated   fs-detected  tests/pvec_1416_diagnostics.rs::issue_1416_every_code_in_the_table_has_a_fixture_and_every_emitted_code_is_in_the_table
 annotated   fs-detected  tests/pvec_1416_diagnostics.rs::issue_1416_the_observer_hears_each_diagnostic_and_the_failure
+annotated   fs-detected  tests/pvec_1416_diagnostics.rs::issue_1556_a_retired_code_is_listed_as_retired_and_is_gone_from_the_closed_set
 annotated   fs-detected  tests/pvec_1417_convert_spool.rs::issue_1417_a_cancel_after_the_spilled_write_leaves_no_spool_file_and_no_artifact
 annotated   fs-detected  tests/pvec_1417_convert_spool.rs::issue_1417_a_precancelled_spilled_run_leaves_no_file_and_no_spool
 annotated   fs-detected  tests/pvec_1417_convert_spool.rs::issue_1417_a_spill_root_that_cannot_hold_files_is_refused_not_ignored

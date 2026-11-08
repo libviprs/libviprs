@@ -42,11 +42,8 @@ fn depth(e: &dyn Error) -> usize {
     n
 }
 
-// `control_points` is deprecated with the sidecar (#1554), and still the one way to reach
-// `PvecConvertError::Georeference` until both go.
 #[test]
 #[cfg_attr(miri, ignore)]
-#[allow(deprecated)]
 fn issue_1048_every_wrapping_variant_a_drawing_can_reach_keeps_its_source() {
     let dir = scratch("chain");
     let dest = dir.join("o.pvec");
@@ -80,16 +77,7 @@ fn issue_1048_every_wrapping_variant_a_drawing_can_reach_keeps_its_source() {
         "{publish:?}"
     );
 
-    let georef = layers(&src, &dest)
-        .control_points([[f64::NAN, 0.0]])
-        .convert()
-        .unwrap_err();
-    assert!(
-        matches!(georef, PvecConvertError::Georeference(_)),
-        "{georef:?}"
-    );
-
-    for e in [&view, &flatten, &publish, &georef] {
+    for e in [&view, &flatten, &publish] {
         assert!(depth(e) >= 2, "{e:?} lost its source");
     }
     let _ = fs::remove_dir_all(&dir);

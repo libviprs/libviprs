@@ -162,9 +162,6 @@ pub enum PvecConvertError {
     /// The artifact and report could not be published.
     #[error("the artifact could not be published")]
     Publish(#[source] PublishError),
-    /// A control point given to the deprecated [`PvecConversion::control_points`] is not finite.
-    #[error("a control point is not finite")]
-    Georeference(#[source] GeoreferenceError),
     /// An entity needs a PVec capability the run did not allow, and the policy is
     /// [`CapabilityPolicy::RejectInput`].
     #[error(
@@ -217,7 +214,6 @@ pub struct PvecConversion<'a> {
     cancel: CancelToken,
     gate: Gate,
     calibration: Option<Calibration>,
-    control_points: Vec<[f64; 2]>,
     observer: Option<Arc<dyn EngineObserver>>,
     queue_capacity: usize,
     components: StreamSelection,
@@ -238,7 +234,6 @@ impl<'a> PvecConversion<'a> {
             cancel: CancelToken::new(),
             gate: Gate::of(ConversionProfile::Default),
             calibration: None,
-            control_points: Vec::new(),
             observer: None,
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             components: StreamSelection::NONE,
@@ -332,21 +327,21 @@ impl<'a> PvecConversion<'a> {
 
     /// The drawing's calibration, written into the artifact's calibration block (issue #1552). A
     /// DWG gets none unless it is given here: its `$INSUNITS` is already the manifest's unit.
+    ///
+    /// Control points go in the calibration's [`Georeference`], with both their sides. The
+    /// source-only `control_points` builder is gone (issue #1556):
+    ///
+    /// ```compile_fail,E0599
+    /// use std::path::Path;
+    /// use libviprs::cad::CadSource;
+    /// use libviprs::pvec_convert::PvecConversion;
+    ///
+    /// let _ = PvecConversion::new(CadSource::Bytes(b""), Path::new("o.pvec"))
+    ///     .control_points([[0.0, 0.0]]);
+    /// ```
     #[must_use]
     pub fn calibration(mut self, calibration: Calibration) -> Self {
         self.calibration = Some(calibration);
-        self
-    }
-
-    /// Control points in source space with no world side, which only the georeference sidecar
-    /// carried. The sidecar is no longer written (#1554), so they are checked for finite values and
-    /// then dropped; a [`Georeference`]'s control points carry both sides.
-    #[deprecated(
-        note = "the georeference sidecar is retired; put control points in a Georeference passed to `calibration`"
-    )]
-    #[must_use]
-    pub fn control_points(mut self, points: impl IntoIterator<Item = [f64; 2]>) -> Self {
-        self.control_points = points.into_iter().collect();
         self
     }
 
@@ -718,7 +713,6 @@ impl<'a> PvecConversion<'a> {
         provider: &P,
         unit: SourceUnit,
     ) -> Result<PvecConversionOutput, PvecConvertError> {
-        georef::check_finite(&self.control_points).map_err(PvecConvertError::Georeference)?;
         let Classified {
             geometries,
             stored,
@@ -1475,9 +1469,6 @@ impl PvecConvertError {
                 d(DiagnosticCode::ReportFailed, "report")
             }
             PvecConvertError::Publish(_) => d(DiagnosticCode::PublishFailed, "publish"),
-            PvecConvertError::Georeference(_) => {
-                d(DiagnosticCode::GeoreferenceFailed, "georeference")
-            }
             PvecConvertError::CapabilityNotAllowed {
                 source_class,
                 handle,

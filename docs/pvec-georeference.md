@@ -42,6 +42,6 @@ let done = import_sidecar(&artifact, &georef_path(&artifact), |id| my_store.cali
 
 The resolver turns the sidecar's `calibration_id` into a calibration, which is written into the artifact with that id as
 its `external_id`. A sidecar with no id gives `SidecarImport::NoCalibrationId`, an id nothing resolves gives
-`SidecarImport::Unresolved`, and in both cases nothing is written. `GeoreferenceHandoff` (the reader) and
-`PvecConversion::control_points` (whose points only ever reached the sidecar) are deprecated, and go with `import_sidecar`
-in the next minor release.
+`SidecarImport::Unresolved`, and in both cases nothing is written. `GeoreferenceHandoff` (the reader) is deprecated, and
+goes with `import_sidecar` in the next minor release. `PvecConversion::control_points`, whose points only ever reached
+the sidecar, is already gone (#1556): control points go in a `Georeference` passed to `calibration`.

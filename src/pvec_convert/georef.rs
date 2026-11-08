@@ -109,12 +109,6 @@ pub enum GeoreferenceError {
     /// The file names a schema version this reader does not know.
     #[error("the georeference sidecar has the unknown schema_version {0:?}")]
     UnknownVersion(String),
-    /// A control point has a coordinate that is not finite.
-    #[error("control point {index} has a coordinate that is not finite")]
-    NonFinite {
-        /// The point's index.
-        index: usize,
-    },
     /// The resolved calibration, with the sidecar's id as its `external_id`, was refused.
     #[error("the resolved calibration was refused")]
     Calibration(#[source] CalibrationError),
@@ -212,16 +206,5 @@ impl GeoreferenceHandoff {
     /// [`GeoreferenceError`].
     pub fn read_from(path: &Path) -> Result<Self, GeoreferenceError> {
         Self::from_json_slice(&fs::read(path).map_err(GeoreferenceError::Io)?)
-    }
-}
-
-/// The control points a handoff may carry: finite, as P1.2 requires of every source coordinate.
-pub(super) fn check_finite(points: &[[f64; 2]]) -> Result<(), GeoreferenceError> {
-    match points
-        .iter()
-        .position(|p| !p[0].is_finite() || !p[1].is_finite())
-    {
-        Some(index) => Err(GeoreferenceError::NonFinite { index }),
-        None => Ok(()),
     }
 }

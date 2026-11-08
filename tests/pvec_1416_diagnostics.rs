@@ -221,9 +221,6 @@ fn fixture(name: &str) -> PathBuf {
 }
 
 /// Every fixture: the name `docs/pvec-diagnostics.md` gives it, and the diagnostics it makes.
-// `control_points` is deprecated with the sidecar (#1554), and still what makes
-// `GEOREFERENCE_FAILED` until both go.
-#[allow(deprecated)]
 fn fixtures() -> Vec<(&'static str, Vec<Diagnostic>)> {
     let dir = scratch("fixtures");
     let dest = dir.join("o.pvec");
@@ -328,15 +325,6 @@ fn fixtures() -> Vec<(&'static str, Vec<Diagnostic>)> {
         "a_destination_that_is_a_directory",
         fail(
             mock(b"MOCK-plain", &as_dir)
-                .convert_with::<Mock>()
-                .unwrap_err(),
-        ),
-    ));
-    out.push((
-        "a_control_point_that_is_not_finite",
-        fail(
-            mock(b"MOCK-plain", &dest)
-                .control_points([[f64::INFINITY, 0.0]])
                 .convert_with::<Mock>()
                 .unwrap_err(),
         ),
@@ -624,4 +612,55 @@ fn issue_1416_the_diagnostic_enums_are_non_exhaustive() {
         }
     }
     assert!(code(DiagnosticCode::Cancelled) && sev(Severity::Info));
+}
+
+/// Issue #1556: `GEOREFERENCE_FAILED` went with the deprecated `PvecConversion::control_points`,
+/// the only thing that fired it. A retired code is listed under "Retired codes" in the document,
+/// is in neither `DiagnosticCode::ALL` nor the code table, and an old report naming it no longer
+/// parses as a code.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1556_a_retired_code_is_listed_as_retired_and_is_gone_from_the_closed_set() {
+    let doc = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/docs/pvec-diagnostics.md"
+    ))
+    .unwrap();
+    let retired: Vec<String> = doc
+        .split("## Retired codes")
+        .nth(1)
+        .expect("docs/pvec-diagnostics.md has no Retired codes section")
+        .split("\n## ")
+        .next()
+        .unwrap()
+        .lines()
+        .filter(|l| l.starts_with("| `"))
+        .map(|l| {
+            l.split('|')
+                .nth(1)
+                .unwrap()
+                .trim()
+                .trim_matches('`')
+                .to_owned()
+        })
+        .collect();
+    assert!(
+        retired.iter().any(|c| c == "GEOREFERENCE_FAILED"),
+        "{retired:?}"
+    );
+    let table: BTreeSet<String> = documented().into_iter().map(|(c, _)| c).collect();
+    for code in &retired {
+        assert!(
+            DiagnosticCode::ALL.iter().all(|c| c.name() != code),
+            "{code} is retired and still in DiagnosticCode::ALL"
+        );
+        assert!(
+            !table.contains(code),
+            "{code} is retired and still in the code table"
+        );
+        assert!(
+            serde_json::from_str::<DiagnosticCode>(&format!("\"{code}\"")).is_err(),
+            "{code} is retired and still parses"
+        );
+    }
 }

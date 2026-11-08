@@ -77,10 +77,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Deprecated
 
-- **`GeoreferenceHandoff`, `HandoffV1` and `PvecConversion::control_points` are deprecated** (issue #1554). For one minor release `pvec_convert::import_sidecar(artifact, sidecar, resolve)` brings an old sidecar in: the application's resolver turns its `calibration_id` into a calibration, which is written into the artifact with that id as its `external_id`, and nothing is written when there is no id or nothing resolves (`SidecarImport`). `control_points` only ever fed the sidecar, so its points are checked and dropped; a `Georeference` carries both sides of a control point. All of them go in the next minor release. `docs/pvec-georeference.md` describes the calibration block and the importer.
+- **`GeoreferenceHandoff` and `HandoffV1` are deprecated** (issue #1554). For one minor release `pvec_convert::import_sidecar(artifact, sidecar, resolve)` brings an old sidecar in: the application's resolver turns its `calibration_id` into a calibration, which is written into the artifact with that id as its `external_id`, and nothing is written when there is no id or nothing resolves (`SidecarImport`). Both go in the next minor release. `docs/pvec-georeference.md` describes the calibration block and the importer.
 
 ### Removed
 
+- **Breaking: `PvecConversion::control_points` and the `GEOREFERENCE_FAILED` diagnostic are gone** (issue #1556). The builder was deprecated in #1554 and its points only ever fed the sidecar, so all it still did was fire `GEOREFERENCE_FAILED` for a point that wasn't finite. Control points go in a `Georeference` passed to `calibration`, with both sides. `DiagnosticCode::GeoreferenceFailed`, `PvecConvertError::Georeference` and `GeoreferenceError::NonFinite` go with it, `DiagnosticCode::ALL` has 13 codes, and `docs/pvec-diagnostics.md` lists the code under "Retired codes", so an old report naming it no longer parses.
 - **Breaking: the georeference sidecar is retired** (issue #1554, slice 5 of #1543). A conversion no longer writes `<dest>.georef.json`; the calibration lives in the artifact's calibration block (#1552), and the report's `georeference` is always absent now. `GeoreferenceHandoff::write_to`, `GeoreferenceHandoff::recalibrate` and `UnitRecord::new` are gone with it.
 
 ### Changed
