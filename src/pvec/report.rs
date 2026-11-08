@@ -337,7 +337,8 @@ pub struct SheetViewport {
     /// the entity.
     pub id: i16,
     /// `drawn` (model space shows through it), `paper-view` (the sheet's own view, not a window
-    /// onto the model), `off`, `hide-plot`, `no-plot-layer`, or `refused`.
+    /// onto the model), `off`, `hide-plot`, or `refused`. A viewport on a no-plot layer is not a
+    /// status of its own: it is drawn or refused like any other, and says so in `border`.
     pub status: String,
     /// Why a refused viewport is refused: `non-plan`, `perspective`, `view-height`, `twist`,
     /// `target`, `clip-polygon`, `clip-circle`, `clip-ellipse`, `clip-spline`, `clip-other` or
