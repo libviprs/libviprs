@@ -683,6 +683,10 @@ annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::a_sidecar_with_no_i
 annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::an_id_nothing_resolves_writes_nothing
 annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::an_old_sidecar_imports_through_the_resolver_with_its_id_kept
 annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::without_a_calibration_no_transform_or_crs_reaches_the_artifact
+annotated   fs-detected  tests/pvec_1561_dxf.rs::the_twin_rows_of_the_classification_and_view_baselines_equal_their_dwg_rows
+annotated   fs-detected  tests/pvec_1561_dxf.rs::the_twins_are_the_listed_gold_drawings_written_by_the_pinned_dxf_writer
+annotated   not-detected tests/pvec_1561_dxf.rs::every_twin_probes_and_opens_from_bytes_and_from_a_path_alike
+annotated   not-detected tests/pvec_1561_dxf.rs::every_twin_shows_the_same_layers_layouts_and_model_space_as_its_dwg
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs

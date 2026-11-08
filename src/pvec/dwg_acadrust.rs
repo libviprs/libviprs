@@ -34,6 +34,16 @@
 //! [`probe`](DwgProvider::probe) accepts the six byte stamps the existing decoder
 //! accepts, [`SUPPORTED_DWG_VERSIONS`] (AC1014 through AC1032), because those are the
 //! versions the corpus of `docs/spikes/acadrust-gate0.md` was run over.
+//!
+//! # DXF
+//!
+//! A DXF opens too (#1561). acadrust's DXF reader yields the same `CadDocument` its
+//! DWG reader does, so everything after the open is the DWG path unchanged. The sniff
+//! looks at the first kilobyte: the binary form's 22 byte sentinel, or the text form's
+//! first group pair being `0` and `SECTION`, after an optional UTF-8 byte order mark,
+//! blank lines and `999` comment pairs. No DXF version is gated here: the version sits
+//! in the header section, not at a fixed offset, and the reader refuses what it cannot
+//! read with an [`Open`](ProviderError::Open) error.
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
@@ -41,7 +51,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use acadrust as acr;
 use acr::objects::ObjectType;
-use acr::{DwgReader, EntityType};
+use acr::{DwgReader, DxfReader, EntityType};
 
 use crate::cad::{CadSource, Fill, ItemHandle};
 use crate::pvec::provider::{
@@ -65,16 +75,40 @@ fn stamp_supported(head: &[u8]) -> bool {
     head.len() >= 6 && SUPPORTED_DWG_VERSIONS.iter().any(|v| head[..6] == v[..])
 }
 
+/// Whether `head` starts a DXF, binary or text (see the module's DXF section).
+fn dxf_sniffed(head: &[u8]) -> bool {
+    if head.starts_with(b"AutoCAD Binary DXF\r\n\x1a\x00") {
+        return true;
+    }
+    let text = head.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(head);
+    // A pair needs the line after its value to have begun, so a value cut off at the end
+    // of the head (`SECT`) is never taken for a whole one.
+    let mut lines = text
+        .split(|b| *b == b'\n')
+        .map(<[u8]>::trim_ascii)
+        .peekable();
+    while lines.next_if(|l| l.is_empty()).is_some() {}
+    loop {
+        match (lines.next(), lines.next(), lines.peek()) {
+            (Some(b"999"), Some(_), Some(_)) => {}
+            (Some(b"0"), Some(b"SECTION"), Some(_)) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// The first kilobyte: six bytes are the DWG stamp, and the rest leaves a DXF's
+/// leading comments room before its first `SECTION`.
 fn read_head(source: CadSource<'_>) -> Result<Vec<u8>, ProviderError> {
     match source {
-        CadSource::Bytes(b) => Ok(b[..b.len().min(6)].to_vec()),
+        CadSource::Bytes(b) => Ok(b[..b.len().min(1024)].to_vec()),
         CadSource::Path(p) => {
-            let mut head = Vec::with_capacity(6);
+            let mut head = Vec::with_capacity(1024);
             let file = std::fs::File::open(p).map_err(|e| ProviderError::Open {
                 provider: NAME,
                 detail: format!("{}: {e}", p.display()),
             })?;
-            file.take(6)
+            file.take(1024)
                 .read_to_end(&mut head)
                 .map_err(|e| ProviderError::Open {
                     provider: NAME,
@@ -513,20 +547,30 @@ impl AcadrustProvider {
 
 impl DwgProvider for AcadrustProvider {
     fn probe(source: CadSource<'_>) -> Result<bool, ProviderError> {
-        Ok(stamp_supported(&read_head(source)?))
+        let head = read_head(source)?;
+        Ok(stamp_supported(&head) || dxf_sniffed(&head))
     }
 
     fn open(source: CadSource<'_>) -> Result<Self, ProviderError> {
         let head = read_head(source)?;
-        if !stamp_supported(&head) {
+        let dxf = !stamp_supported(&head);
+        if dxf && !dxf_sniffed(&head) {
             return Err(ProviderError::Unrecognised {
                 provider: NAME,
-                detail: format!("version stamp {:?}", String::from_utf8_lossy(&head)),
+                detail: format!(
+                    "neither a supported DWG version stamp nor a DXF header: {:?}",
+                    String::from_utf8_lossy(&head[..head.len().min(6)])
+                ),
             });
         }
-        let result = catch_unwind(AssertUnwindSafe(|| match source {
-            CadSource::Path(p) => DwgReader::from_file(p).and_then(|mut r| r.read()),
-            CadSource::Bytes(b) => DwgReader::from_stream(Cursor::new(b)).read(),
+        let result = catch_unwind(AssertUnwindSafe(|| match (source, dxf) {
+            (CadSource::Path(p), false) => DwgReader::from_file(p).and_then(|mut r| r.read()),
+            (CadSource::Bytes(b), false) => DwgReader::from_stream(Cursor::new(b)).read(),
+            (CadSource::Path(p), true) => DxfReader::from_file(p).and_then(DxfReader::read),
+            // The DXF reader wants an owned stream, so the bytes are copied once here.
+            (CadSource::Bytes(b), true) => {
+                DxfReader::from_reader(Cursor::new(b.to_vec())).and_then(DxfReader::read)
+            }
         }));
         let doc = match result {
             Ok(Ok(doc)) => doc,
