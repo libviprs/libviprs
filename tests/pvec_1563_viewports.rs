@@ -5,9 +5,10 @@
 //! centre + s * (model - target - view centre)` with `s = height / view height`, composed onto
 //! each leaf's flatten map. What it shows is cut to its rectangle by the sheet's clipper, the
 //! layers it freezes are dropped inside it, and a model entity seen through two viewports is two
-//! entities with provenance kind 2 (source handle then viewport handle). A viewport that is off,
-//! hidden when plotting or on a no-plot layer contributes nothing; a non-plan, perspective,
-//! zero-height, twisted or non-rectangular one is refused with 508. The paper view itself (id 1,
+//! entities with provenance kind 2 (source handle then viewport handle). A viewport that is off or
+//! hidden when plotting contributes nothing, and one on a no-plot layer draws what it shows with
+//! only its border hidden (#1577); a non-plan, perspective, zero-height, twisted or
+//! non-rectangular one is refused with 508. The paper view itself (id 1,
 //! showing paper space 1:1 centred on itself, as AutoCAD writes it) is not a window onto the model.
 //!
 //! Most of it runs on a hand-built provider so the maps and the cuts are pinned exactly; the rest
@@ -23,13 +24,15 @@ use std::path::{Path, PathBuf};
 use libviprs::cad::{CadSource, ItemHandle};
 use libviprs::pvec::PolicyReason;
 use libviprs::pvec::components::StreamSelection;
+use libviprs::pvec::diagnostics::DiagnosticCode;
+use libviprs::pvec::flatten::FlattenError;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::{ConversionReport, EntityRow, SheetViewport};
 use libviprs::pvec::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet,
-    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot, LayoutState,
+    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot, LayoutState, Limit,
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
-    SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
+    SourceLimits, SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
 };
 use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput, PvecConvertError};
 use pvec_facade::Curve;
@@ -44,12 +47,16 @@ struct Mock {
     paper: Vec<RawEntity>,
     model: Vec<RawEntity>,
     viewports: Vec<ViewportEntity>,
-    /// The one block definition, `BLK`.
+    /// The block definition `BLK`.
     block: Vec<RawEntity>,
+    /// The block definition `INNER`, which `BLK` may insert (#1581).
+    inner: Vec<RawEntity>,
 }
 
 thread_local! {
     static NEXT: RefCell<Option<Mock>> = const { RefCell::new(None) };
+    /// How many times `BLK`'s definition was read on this thread (#1581).
+    static BLOCK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 struct VecCursor(std::vec::IntoIter<RawEntity>);
@@ -131,8 +138,19 @@ impl DwgProvider for Mock {
         let list = match scope {
             EntityScope::Layout(LayoutId(0)) => self.model.clone(),
             EntityScope::Layout(LayoutId(1)) => self.paper.clone(),
-            EntityScope::BlockDefinition { name, reached_via } if name == "BLK" => self
-                .block
+            EntityScope::BlockDefinition { name, reached_via } if name == "BLK" => {
+                BLOCK_READS.with(|n| n.set(n.get() + 1));
+                self.block
+                    .iter()
+                    .cloned()
+                    .map(|mut e| {
+                        e.provenance.block_path = reached_via.clone();
+                        e
+                    })
+                    .collect()
+            }
+            EntityScope::BlockDefinition { name, reached_via } if name == "INNER" => self
+                .inner
                 .iter()
                 .cloned()
                 .map(|mut e| {
@@ -313,7 +331,16 @@ fn viewports() -> Vec<ViewportEntity> {
     let mut round = elsewhere(ROUND, 11);
     round.clip = ViewportClip::Circle(ItemHandle::new(0x99));
     round.non_rectangular_clipping = true;
-    let mut no_plot = elsewhere(NO_PLOT_VP, 12);
+    // On Defpoints, as sheets often put them: it shows model x 3..7, y 3.5..6.5 at 10 paper
+    // units per model unit (#1577).
+    let mut no_plot = vp(
+        NO_PLOT_VP,
+        12,
+        [210.0, 250.0],
+        [40.0, 30.0],
+        [5.0, 5.0],
+        3.0,
+    );
     no_plot.layer = "Defpoints".into();
     let mut targeted = elsewhere(TARGETED, 13);
     targeted.view_target = [1.0, 1.0, 0.0];
@@ -371,6 +398,7 @@ fn drawing(draw_viewports_first: bool) -> Mock {
         ],
         viewports: viewports(),
         block: vec![line(IN_BLOCK, "WALLS", [3.0, 6.0], [4.0, 6.0])],
+        inner: Vec::new(),
     }
 }
 
@@ -597,7 +625,8 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     assert_eq!(status(VP_B), ("drawn", None));
     assert_eq!(status(HIDDEN), ("hide-plot", None));
     assert_eq!(status(OFF), ("off", None));
-    assert_eq!(status(NO_PLOT_VP), ("no-plot-layer", None));
+    // A no-plot layer hides only the viewport's border (#1577).
+    assert_eq!(status(NO_PLOT_VP), ("drawn", None));
     assert_eq!(status(TWISTED), ("refused", Some("twist")));
     assert_eq!(status(PERSPECTIVE), ("refused", Some("perspective")));
     assert_eq!(status(SIDE_VIEW), ("refused", Some("non-plan")));
@@ -644,6 +673,149 @@ fn issue_1582_the_paper_view_is_a_policy_reason_of_its_own() {
             .iter()
             .any(|w| w.starts_with(&format!("{}: ", paper_view.code()))),
         "{row:?}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_is_inserted() {
+    // BLK inserted five more times on layer 0, beside the INSERT on COLD, and BLK inserting
+    // INNER, so a leaf of INNER is reached through an INSERT that sits in BLK's definition.
+    let inserted = || {
+        let mut mock = drawing(false);
+        mock.block.push(ent(
+            0x60,
+            "INSERT",
+            "0",
+            RawGeometry::Insert(BlockRef {
+                block_name: "INNER".into(),
+                transform: SourceTransform::IDENTITY,
+                normal: [0.0, 0.0, 1.0],
+                grid: ArrayGrid::SINGLE,
+            }),
+        ));
+        mock.inner = vec![line(0x61, "0", [4.0, 4.0], [6.0, 4.0])];
+        for h in 0x50..0x55 {
+            mock.model.push(ent(
+                h,
+                "INSERT",
+                "0",
+                RawGeometry::Insert(BlockRef {
+                    block_name: "BLK".into(),
+                    transform: SourceTransform::IDENTITY,
+                    normal: [0.0, 0.0, 1.0],
+                    grid: ArrayGrid::SINGLE,
+                }),
+            ));
+        }
+        mock
+    };
+    let reads = |mock: Mock| {
+        BLOCK_READS.with(|n| n.set(0));
+        let (out, dir) = convert("reads", mock, |c| c);
+        out.expect("the sheet converts");
+        let _ = fs::remove_dir_all(dir);
+        BLOCK_READS.with(std::cell::Cell::get)
+    };
+    // Without a viewport freeze the INSERTs' own layers are never looked up, so the difference is
+    // what that lookup reads.
+    let mut thawed = inserted();
+    for v in &mut thawed.viewports {
+        v.frozen_layers.clear();
+    }
+    let without = reads(thawed);
+    let with = reads(inserted());
+    assert_eq!(
+        with - without,
+        1,
+        "{with} reads with the freeze, {without} without"
+    );
+}
+
+// ---- limits ------------------------------------------------------------------------------
+
+/// The sheet with only the two viewports onto the model: its own items are the title line and two
+/// VIEWPORT entities, and the model has seven kept leaves and one no-plot line. What the
+/// conversion classifies is 3 + 7 * 2 + 1 = 18, while the sheet and the model each walk far fewer.
+fn two_viewports() -> Mock {
+    let mut mock = drawing(false);
+    let keep = |h: u64| h == VP_A || h == VP_B;
+    mock.viewports.retain(|v| keep(v.handle.get()));
+    mock.paper.retain(|e| {
+        e.provenance.class_name != "VIEWPORT" || e.provenance.handle.is_some_and(|h| keep(h.get()))
+    });
+    mock
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1580_viewports_times_model_entities_count_against_the_entity_limit() {
+    let mut tight = SourceLimits::default();
+    tight.max_entities = 17;
+    let (out, dir) = convert("limit", two_viewports(), |c| c.limits(tight));
+    let err = out.expect_err("18 entities to classify, the ceiling is 17");
+    match &err {
+        PvecConvertError::Flatten(FlattenError::Limit {
+            limit,
+            observed,
+            ceiling,
+            ..
+        }) => assert_eq!((*limit, *observed, *ceiling), (Limit::Entities, 18, 17)),
+        other => panic!("the entity limit, not {other:?}"),
+    }
+    let d = err.diagnostic();
+    assert_eq!(d.code, DiagnosticCode::BlocksFailed);
+    assert_eq!(d.message_id, "limit");
+    let source = std::error::Error::source(&err).map(ToString::to_string);
+    assert!(
+        source
+            .as_deref()
+            .is_some_and(|m| m.contains("max_entities")),
+        "{source:?}"
+    );
+    // Refused before anything is written.
+    assert!(!dir.join("sheet.pvec").exists());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1580_a_sheet_at_the_entity_limit_still_converts() {
+    let mut exact = SourceLimits::default();
+    exact.max_entities = 18;
+    let (out, dir) = convert("at-limit", two_viewports(), |c| c.limits(exact));
+    let report = out.expect("18 entities fit a ceiling of 18").report;
+    assert_eq!(rows(&report, SHORT, Some(VP_A)).len(), 1);
+    assert_eq!(rows(&report, SHORT, Some(VP_B)).len(), 1);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1577_a_viewport_on_a_no_plot_layer_draws_what_it_shows_and_hides_its_border() {
+    let (out, dir) = convert("noplot", drawing(false), |c| c);
+    let report = out.expect("the sheet converts").report;
+    let r = sheet_row(&report, NO_PLOT_VP);
+    assert_eq!(r.status, "drawn", "{r:?}");
+    assert_eq!(r.border.as_deref(), Some("no-plot-layer"), "{r:?}");
+    assert_eq!(r.scale.as_deref(), Some("1:0.1"));
+    assert!(r.entities > 0, "{r:?}");
+    // A viewport on a plottable layer says nothing about its border.
+    assert_eq!(sheet_row(&report, VP_A).border, None);
+    // SHORT, x 2..8 at y 5, is cut at x 3 and 7: 210 + 10 * (x - 5), 250 + 10 * (y - 5).
+    assert!(near(
+        ends(&curve_of(&report, &dir, SHORT, NO_PLOT_VP)),
+        [[190.0, 250.0], [230.0, 250.0]]
+    ));
+    // The VIEWPORT entity itself is on Defpoints, so the no-plot rule takes it like any other
+    // entity there: no border is drawn.
+    let border = row(&report, NO_PLOT_VP, None);
+    assert_eq!(border.semantic_type, None, "{border:?}");
+    assert_eq!(
+        border.policy_field.as_deref(),
+        Some("layers.no_plot"),
+        "{border:?}"
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -709,9 +881,10 @@ fn issue_1563_draw_viewports_first_puts_what_they_show_under_the_sheet() {
 #[cfg_attr(miri, ignore)]
 fn issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note() {
     let mut mock = drawing(false);
-    mock.viewports.retain(|v| v.handle.get() != VP_B);
+    let gone = |h: u64| h == VP_B || h == NO_PLOT_VP;
+    mock.viewports.retain(|v| !gone(v.handle.get()));
     mock.paper
-        .retain(|e| e.provenance.handle != Some(ItemHandle::new(VP_B)));
+        .retain(|e| !e.provenance.handle.is_some_and(|h| gone(h.get())));
     let (out, dir) = convert("note", mock, |c| c);
     out.expect("the sheet converts");
     let claim = open_published(&dir.join("sheet.pvec"))

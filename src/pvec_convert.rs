@@ -112,9 +112,9 @@ use crate::pvec::writer::{
 };
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
-    LayoutKind, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceFact,
-    SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError, ViewportClip,
-    ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
+    LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
+    SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError,
+    ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
@@ -505,24 +505,27 @@ impl<'a> PvecConversion<'a> {
         // nothing (P-3), one refused with 508 for a view this slice cannot map, or one drawn
         // through its similarity onto the sheet and its rectangle.
         let mut windows: Vec<(ViewportEntity, Window)> = Vec::new();
+        // The layers that do not plot. A viewport on one still draws what it shows; only its
+        // border is hidden, as AutoCAD prints it (P-3, #1577).
+        let no_plot: BTreeSet<String> = if layout.kind == LayoutKind::Paper
+            && view_profile.layers.no_plot == LayerStateRule::Exclude
+        {
+            provider
+                .layers()
+                .map_err(|e| PvecConvertError::View(e.into()))?
+                .into_iter()
+                .filter(|l| !l.plottable)
+                .map(|l| l.name.to_ascii_lowercase())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
         if layout.kind == LayoutKind::Paper {
             let listed = match provider.viewports() {
                 Ok(v) => v,
                 Err(ProviderError::CannotReport(_)) => Vec::new(),
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
-            let no_plot: BTreeSet<String> =
-                if view_profile.layers.no_plot == LayerStateRule::Exclude {
-                    provider
-                        .layers()
-                        .map_err(|e| PvecConvertError::View(e.into()))?
-                        .into_iter()
-                        .filter(|l| !l.plottable)
-                        .map(|l| l.name.to_ascii_lowercase())
-                        .collect()
-                } else {
-                    BTreeSet::new()
-                };
             for v in listed.into_iter().filter(|v| v.layout == layout.id) {
                 let finite = [v.width, v.height, v.view_height, v.center[0], v.center[1]]
                     .into_iter()
@@ -539,8 +542,6 @@ impl<'a> PvecConversion<'a> {
                     Window::Dropped("off")
                 } else if v.hide_plot {
                     Window::Dropped("hide-plot")
-                } else if no_plot.contains(&v.layer.to_ascii_lowercase()) {
-                    Window::Dropped("no-plot-layer")
                 } else if !(v.view_direction[0] == 0.0
                     && v.view_direction[1] == 0.0
                     && v.view_direction[2] > 0.0)
@@ -909,21 +910,23 @@ impl<'a> PvecConversion<'a> {
                 .any(|&k| !windows[k].0.frozen_layers.is_empty())
                 && let Some(mf) = &model_flat
             {
-                // Each scope an INSERT of some leaf's path sits in is read once.
-                let mut read: BTreeSet<String> = BTreeSet::new();
+                // Each scope an INSERT of some leaf's path sits in is read once: model space, and
+                // each block definition by name, whichever instance reached it first. An INSERT's
+                // handle and layer inside a definition are the same in every instance (#1581).
+                let mut read: BTreeSet<Option<&str>> = BTreeSet::new();
                 for f in &mf.entities {
                     let steps = f.entity.provenance.block_path.steps();
                     let mut via_path = crate::pvec::InstancePath::root();
                     for (i, step) in steps.iter().enumerate() {
-                        let scope = if i == 0 {
-                            EntityScope::Layout(model.id)
-                        } else {
-                            EntityScope::BlockDefinition {
-                                name: steps[i - 1].block_name.clone(),
-                                reached_via: via_path.clone(),
-                            }
-                        };
-                        if read.insert(via_path.to_string()) {
+                        let container = i.checked_sub(1).map(|j| steps[j].block_name.as_str());
+                        if read.insert(container) {
+                            let scope = match container {
+                                None => EntityScope::Layout(model.id),
+                                Some(name) => EntityScope::BlockDefinition {
+                                    name: name.to_owned(),
+                                    reached_via: via_path.clone(),
+                                },
+                            };
                             let entities = provider
                                 .entities(&scope)
                                 .and_then(|mut c| c.collect_all())
@@ -957,6 +960,32 @@ impl<'a> PvecConversion<'a> {
         // classified, so nothing is copied per viewport up front.
         let paper_rank = if first { u32::MAX } else { 0 };
         let mut via: Vec<(u32, Option<usize>)> = vec![(paper_rank, None); items.len()];
+        // Each drawn viewport classifies every kept model leaf once more, so the conversion
+        // handles the sheet's own items, the model leaves times the drawn viewports, and the
+        // model's excluded and skipped rows once. The sheet and the model were each walked under
+        // their own guard, so the product is checked here, before anything is listed (#1580).
+        if let (Some(mv), Some(mf)) = (&model_view, &model_flat) {
+            let shown = mf
+                .entities
+                .iter()
+                .filter(|f| model_layers.contains_key(&flat_key(f)))
+                .count();
+            let count = |n: usize| u64::try_from(n).unwrap_or(u64::MAX);
+            let observed = count(shown)
+                .saturating_mul(count(drawn.len()))
+                .saturating_add(count(items.len()))
+                .saturating_add(count(mv.excluded.len()))
+                .saturating_add(count(mf.skipped.len()));
+            let ceiling = view_profile.limits.max_entities;
+            if observed > ceiling {
+                return Err(PvecConvertError::Flatten(FlattenError::Limit {
+                    limit: Limit::Entities,
+                    observed,
+                    ceiling,
+                    block_path: crate::pvec::InstancePath::root(),
+                }));
+            }
+        }
         if let Some(mf) = &model_flat {
             for &k in &drawn {
                 for f in mf
@@ -1552,6 +1581,9 @@ impl<'a> PvecConversion<'a> {
                         scale: rect.is_some().then(|| scale_of(v)),
                         paper_box: rect,
                         entities: *n,
+                        border: no_plot
+                            .contains(&v.layer.to_ascii_lowercase())
+                            .then(|| "no-plot-layer".to_owned()),
                     }
                 })
                 .chain(unreported.iter().map(|h| SheetViewport {
@@ -1953,7 +1985,7 @@ struct Side {
 enum Window {
     /// The sheet's own paper view, not a window onto the model.
     Paper,
-    /// Contributes nothing to a print: `off`, `hide-plot` or `no-plot-layer` (P-3).
+    /// Contributes nothing to a print: `off` or `hide-plot` (P-3).
     Dropped(&'static str),
     /// A view this slice cannot map, refused with 508, and why.
     Refused(&'static str),
