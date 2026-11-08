@@ -546,7 +546,7 @@ fn issue_1563_what_a_viewport_shows_is_cut_exactly_at_its_rectangle() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1563_a_circle_is_scaled_exactly_and_one_crossing_the_edge_is_refused() {
+fn issue_1563_a_circle_is_scaled_exactly_through_each_viewport() {
     let (out, dir) = convert("ring", drawing(false), |c| c);
     let report = out.expect("the sheet converts").report;
     let Curve::Circle(a) = curve_of(&report, &dir, SMALL_RING, VP_A) else {
@@ -559,9 +559,7 @@ fn issue_1563_a_circle_is_scaled_exactly_and_one_crossing_the_edge_is_refused() 
     };
     let o = b.placement().origin();
     assert_eq!(([o.x, o.y], b.radius()), ([300.0, 100.0], 5.0));
-    // Model x 8..12 crosses A's right edge at x 10; B shows all of it.
-    let crossing = row(&report, EDGE_RING, Some(VP_A));
-    assert_eq!(crossing.reason.as_deref(), Some("view-not-enabled"));
+    // Model x 8..12 crosses A's right edge at x 10, which is cut since #1565; B shows all of it.
     assert_eq!(
         row(&report, EDGE_RING, Some(VP_B)).fidelity,
         "SupportedExact"
@@ -630,7 +628,8 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     assert_eq!(status(PERSPECTIVE), ("refused", Some("perspective")));
     assert_eq!(status(SIDE_VIEW), ("refused", Some("non-plan")));
     assert_eq!(status(FLAT), ("refused", Some("view-height")));
-    assert_eq!(status(POLYGON), ("refused", Some("clip-polygon")));
+    // A straight-edged polygon clip is drawn since #1565.
+    assert_eq!(status(POLYGON), ("drawn", None));
     assert_eq!(status(ROUND), ("refused", Some("clip-circle")));
     // A target off the origin moves the view in a way no reference print has measured.
     assert_eq!(status(TARGETED), ("refused", Some("target")));
@@ -858,7 +857,8 @@ fn issue_1563_draw_viewports_first_puts_what_they_show_under_the_sheet() {
 #[cfg_attr(miri, ignore)]
 fn issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note() {
     let mut mock = drawing(false);
-    let gone = |h: u64| h == VP_B || h == NO_PLOT_VP;
+    // B and the no-plot one, and the polygon viewport, which is drawn since #1565.
+    let gone = |h: u64| h == VP_B || h == NO_PLOT_VP || h == POLYGON;
     mock.viewports.retain(|v| !gone(v.handle.get()));
     mock.paper
         .retain(|e| !e.provenance.handle.is_some_and(|h| gone(h.get())));

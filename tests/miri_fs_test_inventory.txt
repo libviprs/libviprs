@@ -697,7 +697,7 @@ annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_plot_scale
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_real_layout_converts_to_its_sheet
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_viewport_and_a_no_plot_line_never_vanish
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_a_zero_plot_scale_writes_no_record
-annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_refused_with_508
+annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_cut
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_inches_and_a_quarter_turn_swap_the_sheet
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_lines_and_polylines_are_cut_exactly_at_the_sheet_edge
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_model_space_has_no_sheet_section
@@ -997,7 +997,7 @@ annotated   not-detected tests/pvec_1559_print_profile.rs::issue_1559_excluding_
 annotated   not-detected tests/pvec_1559_print_profile.rs::issue_1559_the_print_profile_is_applied_now_the_sheet_has_landed
 annotated   not-detected tests/pvec_1562_paper_sheet.rs::issue_1562_every_viewport_of_the_gold_probe_is_reported_not_dropped
 annotated   not-detected tests/pvec_1562_paper_sheet.rs::issue_1562_the_sample_drawings_paper_layouts_are_walked_not_refused
-annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_a_circle_is_scaled_exactly_and_one_crossing_the_edge_is_refused
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_a_circle_is_scaled_exactly_through_each_viewport
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_a_layer_frozen_in_a_viewport_is_dropped_there_and_drawn_elsewhere
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_a_model_line_lands_on_the_sheet_through_each_viewport_that_shows_it
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_an_insert_on_a_layer_frozen_in_a_viewport_takes_its_whole_block_with_it
@@ -1013,6 +1013,15 @@ annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1580_viewports_time
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_is_inserted
 annotated   fs-detected  tests/pvec_1579_probe_viewports.rs::issue_1579_the_dxf_twin_of_the_probe_draws_the_same
 annotated   fs-detected  tests/pvec_1579_probe_viewports.rs::issue_1579_the_gold_probe_draws_its_line_through_every_viewport_where_the_record_puts_it
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_circle_over_a_viewport_edge_is_cut_into_an_arc_of_itself
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_circle_over_the_sheet_edge_is_cut_too
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_polygon_keeps_what_is_inside_it_and_drops_what_is_only_inside_its_box
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_rational_spline_over_an_edge_is_still_refused_with_508
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_rational_spline_whose_box_holds_the_polygon_is_refused_not_dropped
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_spline_over_a_viewport_edge_is_cut_as_a_sub_range_and_says_its_tolerance
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_a_viewport_clipped_to_a_polygon_draws_inside_the_polygon
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_bulged_and_curved_clips_and_a_twist_stay_refused
+annotated   fs-detected  tests/pvec_1565_viewport_curves.rs::issue_1565_viewport_clipped_001_draws_its_line_cut_at_the_clip_polygon
 annotated   fs-detected  tests/pvec_1584_print_probes.rs::issue_1584_a_hide_plot_viewport_draws_nothing_and_one_on_a_no_plot_layer_hides_only_its_border
 annotated   fs-detected  tests/pvec_1584_print_probes.rs::issue_1584_a_layer_frozen_in_one_viewport_is_dropped_there_and_drawn_in_the_other
 annotated   fs-detected  tests/pvec_1584_print_probes.rs::issue_1584_a_no_plot_layer_is_left_out_in_model_and_in_paper_space
