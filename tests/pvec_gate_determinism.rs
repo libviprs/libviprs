@@ -4,7 +4,8 @@
 //! and of the report are compared with `tests/fixtures/pvec-gate/determinism.baseline`. A fixture
 //! the writer refuses is recorded with the refusal, so fixing it is a visible baseline change. The
 //! two-conversions-are-byte-identical check of the end-to-end path (`pvec_end_to_end`) runs in this
-//! gate too, which is what catches hash-map iteration order in the emit path on a rerun.
+//! gate too, which is what catches hash-map iteration order in the emit path on a rerun. The DXF
+//! twins of `tests/fixtures/pvec-dxf` (#1561) have a line each too.
 //!
 //! Needs `--features pvec-convert`.
 
@@ -25,15 +26,20 @@ fn digests() -> String {
     let corpus = Corpus::open();
     let dir = tempfile::tempdir().unwrap();
     let mut out = String::new();
-    for fx in corpus
+    let sources = corpus
         .all()
         .iter()
         .filter(|f| f.class != EvidenceClass::Quarantined)
-    {
-        let dwg = fx.dwg();
-        let dest = dir.path().join(format!("{}.pvec", fx.id));
-        out.push_str(&fx.id);
-        match PvecConversion::new(CadSource::Bytes(&dwg), &dest)
+        .map(|fx| (fx.id.clone(), fx.dwg()))
+        .chain(
+            pvec_gate::dxf_twins()
+                .into_iter()
+                .map(|(row, _, b)| (row, b)),
+        );
+    for (id, drawing) in sources {
+        let dest = dir.path().join(format!("{id}.pvec"));
+        out.push_str(&id);
+        match PvecConversion::new(CadSource::Bytes(&drawing), &dest)
             .unit(SourceUnit::Meters)
             .convert()
         {

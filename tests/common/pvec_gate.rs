@@ -35,6 +35,25 @@ pub fn arch_override_path(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// The DXF twins of gold fixtures (#1561) in `tests/fixtures/pvec-dxf/`, as `(row, fixture,
+/// bytes)` sorted by row. The row is the file name (`circle-001.dxf`, `circle-001.binary.dxf`) so a
+/// twin's baseline line sits next to its DWG's, and the fixture is the gold id it was written from.
+pub fn dxf_twins() -> Vec<(String, String, Vec<u8>)> {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/pvec-dxf");
+    let mut twins: Vec<(String, String, Vec<u8>)> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot list {}: {e}", dir.display()))
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|x| x == "dxf"))
+        .map(|p| {
+            let row = p.file_name().unwrap().to_string_lossy().into_owned();
+            let fixture = row.split('.').next().unwrap().to_owned();
+            (row, fixture, fs::read(&p).unwrap())
+        })
+        .collect();
+    twins.sort_by(|a, b| a.0.cmp(&b.0));
+    twins
+}
+
 fn first_word(l: &str) -> &str {
     l.split_whitespace().next().unwrap_or("")
 }

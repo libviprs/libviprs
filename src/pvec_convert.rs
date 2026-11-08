@@ -398,7 +398,9 @@ impl<'a> PvecConversion<'a> {
     ///
     /// # Errors
     ///
-    /// As [`probe`](Self::probe).
+    /// As [`probe`](Self::probe), and [`PvecConvertError::UnitRequired`] when no unit was given and
+    /// a paper sheet's plot paper units leave its frame to the drawing's unit, as
+    /// [`convert_with`](Self::convert_with) would.
     pub fn probe_with<P: DwgProvider>(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
         let c = self.classify(&provider, self.unit)?;
@@ -549,9 +551,11 @@ impl<'a> PvecConversion<'a> {
                         let sheet_unit = match p.paper_units {
                             0 => Some(SourceUnit::Inches),
                             1 => Some(SourceUnit::Millimeters),
+                            // The drawing's unit stands in. `convert_with` refuses without one, so
+                            // the probes do too rather than frame the sheet differently.
                             _ => {
                                 summary.notes.push("paper-units-fallback".into());
-                                unit
+                                Some(unit.ok_or(PvecConvertError::UnitRequired)?)
                             }
                         };
                         // Millimetres of paper in the sheet unit: exact for millimetres, one
@@ -611,13 +615,18 @@ impl<'a> PvecConversion<'a> {
                         } else {
                             // Both sides integral after scaling by one power of ten up to 10^6
                             // reduce exactly; anything else is rounded at 10^6 and the record
-                            // carries the rounding as its uncertainty.
-                            let integral = |v: f64| {
-                                (v.fract() == 0.0 && (1.0..9.0e15).contains(&v)).then_some(v as u64)
+                            // carries the rounding as its uncertainty. A side is integral at `k`
+                            // when its rounded multiple divided back by `k` is the stored value:
+                            // a decimal such as 2.01 is no binary fraction, so `2.01 * 100` is not
+                            // 201 in f64, but `201 / 100` is the f64 nearest 2.01, which is it.
+                            let integral = |v: f64| (1.0..9.0e15).contains(&v).then_some(v as u64);
+                            let at = |v: f64, k: f64| {
+                                let r = (v * k).round();
+                                if r / k == v { integral(r) } else { None }
                             };
                             let exact = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6]
                                 .into_iter()
-                                .find_map(|k| Some((integral(n * k)?, integral(d * k)?)));
+                                .find_map(|k| Some((at(n, k)?, at(d, k)?)));
                             let uncertain = exact.is_none();
                             let ratio = exact.or_else(|| {
                                 Some((integral((n * 1e6).round())?, integral((d * 1e6).round())?))
