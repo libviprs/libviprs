@@ -84,7 +84,14 @@ fn a_measured_pair_on_one_point_is_refused() {
 
 #[test]
 fn a_scale_outside_two_to_the_forty_either_way_is_refused() {
-    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 2f64.powi(41), 2f64.powi(-41)] {
+    for bad in [
+        0.0,
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        2f64.powi(41),
+        2f64.powi(-41),
+    ] {
         let s = ScaleClaim {
             metres_per_source_unit: bad,
             ..plan_scale()
@@ -170,10 +177,7 @@ fn a_georeference_names_its_crs_by_id_or_definition() {
         definition: None,
         ..georeference()
     };
-    assert!(matches!(
-        refused(None, Some(none)),
-        CalibrationError::NoCrs
-    ));
+    assert!(matches!(refused(None, Some(none)), CalibrationError::NoCrs));
     let wkt = Georeference {
         crs_id: None,
         definition: Some(CrsDefinition {
@@ -204,7 +208,11 @@ fn a_definition_over_16_kib_or_with_a_bidi_override_is_refused() {
 
 #[test]
 fn a_note_with_a_control_character_or_over_255_bytes_is_refused() {
-    for note in ["a\u{7}b".to_owned(), "n".repeat(256), "a\u{2028}b".to_owned()] {
+    for note in [
+        "a\u{7}b".to_owned(),
+        "n".repeat(256),
+        "a\u{2028}b".to_owned(),
+    ] {
         let s = ScaleClaim {
             note,
             ..plan_scale()
