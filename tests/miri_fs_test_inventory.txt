@@ -683,6 +683,9 @@ annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::a_sidecar_with_no_i
 annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::an_id_nothing_resolves_writes_nothing
 annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::an_old_sidecar_imports_through_the_resolver_with_its_id_kept
 annotated   fs-detected  tests/pvec_1554_sidecar_retired.rs::without_a_calibration_no_transform_or_crs_reaches_the_artifact
+annotated   fs-detected  tests/pvec_1559_print_profile.rs::issue_1559_every_print_knob_names_a_row_of_a_decision_table
+annotated   fs-detected  tests/pvec_1559_print_profile.rs::issue_1559_the_adr_holds_p1_to_p9_and_what_is_still_unmeasured
+annotated   fs-detected  tests/pvec_1559_print_profile.rs::issue_1559_the_unsupported_policy_no_longer_refuses_paper_space_as_a_whole
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs
@@ -1246,6 +1249,10 @@ annotated   not-detected tests/pvec_1436_normalization_mix.rs::a_zero_mix_hides_
 annotated   not-detected tests/pvec_1439_view_limits.rs::a_drawing_inside_the_limits_is_walked_as_before
 annotated   not-detected tests/pvec_1439_view_limits.rs::a_fan_out_past_the_instance_limit_is_refused_naming_it
 annotated   not-detected tests/pvec_1439_view_limits.rs::the_default_limits_still_admit_an_ordinary_drawing
+annotated   not-detected tests/pvec_1559_print_profile.rs::issue_1559_applying_viewport_freezes_is_refused_not_ignored
+annotated   not-detected tests/pvec_1559_print_profile.rs::issue_1559_excluding_no_plot_layers_is_refused_not_ignored
+annotated   not-detected tests/pvec_1559_print_profile.rs::issue_1559_exact_viewport_clipping_is_refused_not_ignored
+annotated   not-detected tests/pvec_1559_print_profile.rs::issue_1559_the_print_profile_is_refused_until_the_sheet_lands
 annotated   not-detected tests/pvec_end_to_end.rs::n2_3_1050_an_ordering_perturbation_turns_the_determinism_check_red
 annotated   not-detected tests/pvec_gate_classification.rs::n2_8_1060_reclassifying_one_entity_is_a_one_line_baseline_diff
 annotated   not-detected tests/pvec_gate_classification.rs::n2_8_1060_the_classification_of_every_fixture_matches_the_checked_in_baseline

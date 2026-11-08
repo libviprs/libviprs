@@ -203,6 +203,7 @@ fn n3_3_1097_default_profile_is_pinned_field_by_field() {
         layers: LayerVisibility {
             off: LayerStateRule::Exclude,
             frozen: LayerStateRule::Exclude,
+            no_plot: LayerStateRule::Ignore,
             frozen_in_viewport: ViewportFreezeRule::IgnoreAndReport,
             insert_override: InsertLayerRule::InheritOnLayerZero,
         },
@@ -220,6 +221,7 @@ fn n3_3_1097_default_profile_prints_every_knob_with_its_n1_4_row() {
         "space = model",
         "layers.off = exclude",
         "layers.frozen = exclude",
+        "layers.no_plot = ignore",
         "layers.frozen_in_viewport = ignore-and-report",
         "layers.insert_override = inherit-on-layer-zero",
         "nested_inserts.max_depth = 64",
@@ -233,20 +235,21 @@ fn n3_3_1097_default_profile_prints_every_knob_with_its_n1_4_row() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn n3_3_1097_every_knob_names_a_row_of_the_n1_4_decision_table() {
-    let doc = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/spikes/view-context.md"),
-    )
-    .expect("spike doc");
+    // N1.4's table is in the spike; the one row the print profile added (`layer-no-plot`, #1559)
+    // is in its ADR.
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let doc = std::fs::read_to_string(root.join("docs/spikes/view-context.md")).expect("spike doc")
+        + &std::fs::read_to_string(root.join("docs/adr/pvec-print-profile.md")).expect("print ADR");
     let knobs = ViewProfile::default_profile().knobs();
     assert_eq!(
         knobs.len(),
-        8,
-        "a knob was added or removed: justify it against N1.4"
+        9,
+        "a knob was added or removed: justify it against N1.4 or the print profile ADR"
     );
     let mut fields: Vec<_> = knobs.iter().map(|k| k.field).collect();
     fields.sort_unstable();
     fields.dedup();
-    assert_eq!(fields.len(), 8, "duplicate field path");
+    assert_eq!(fields.len(), 9, "duplicate field path");
     for k in knobs {
         assert!(
             doc.contains(&format!("| `{}` |", k.row)),
