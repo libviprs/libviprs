@@ -3,7 +3,8 @@
 //! The include and exclude decision of the default view profile for every non-quarantined fixture
 //! of the pinned corpus, with the reason code of each exclusion, is compared with
 //! `tests/fixtures/pvec-gate/view-decisions.baseline`. Flipping a policy default (frozen layers
-//! drawn, off layers drawn) changes a line here and turns this gate red. The promoted semantic
+//! drawn, off layers drawn) changes a line here and turns this gate red. The DXF twins of
+//! `tests/fixtures/pvec-dxf` (#1561) have a line each too. The promoted semantic
 //! types are the named cases of `pvec_view_transform`, which this gate also runs.
 //!
 //! Needs `--features dwg-acadrust`.
@@ -25,14 +26,19 @@ use pvec_gold::{Corpus, EvidenceClass};
 fn decisions(profile: &ViewProfile) -> String {
     let corpus = Corpus::open();
     let mut out = String::new();
-    for fx in corpus
+    let sources = corpus
         .all()
         .iter()
         .filter(|f| f.class != EvidenceClass::Quarantined)
-    {
-        let dwg = fx.dwg();
-        out.push_str(&fx.id);
-        let provider = match AcadrustProvider::open(CadSource::Bytes(&dwg)) {
+        .map(|fx| (fx.id.clone(), fx.dwg()))
+        .chain(
+            pvec_gate::dxf_twins()
+                .into_iter()
+                .map(|(row, _, b)| (row, b)),
+        );
+    for (id, drawing) in sources {
+        out.push_str(&id);
+        let provider = match AcadrustProvider::open(CadSource::Bytes(&drawing)) {
             Ok(p) => p,
             Err(_) => {
                 out.push_str(" not-opened\n");
