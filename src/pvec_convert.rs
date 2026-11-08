@@ -556,9 +556,9 @@ impl<'a> PvecConversion<'a> {
                 } else if v.view_target[0] != 0.0 || v.view_target[1] != 0.0 {
                     // The view centre is in display coordinates, whose origin is the target (DXF,
                     // and acadrust's own docs), so a target off the origin moves the view. No
-                    // reference print measures that, and the gold probes are written reading the
-                    // centre as a world point with the target on it, so it is refused rather than
-                    // drawn somewhere that may be wrong.
+                    // reference print measures that, so it is refused rather than drawn somewhere
+                    // that may be wrong. The gold probes keep their targets at the origin
+                    // (pvec-gold-fixtures#102), as AutoCAD's plan views do.
                     Window::Refused("target")
                 } else {
                     match &v.clip {
