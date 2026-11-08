@@ -181,7 +181,7 @@ fn a_georeference_names_its_crs_by_id_or_definition() {
     let wkt = Georeference {
         crs_id: None,
         definition: Some(CrsDefinition {
-            format: DefinitionFormat::Wkt,
+            format: DefinitionFormat::Wkt1,
             text: "GEOGCS[\"WGS 84\",\n\tDATUM[\"WGS_1984\"]]".to_owned(),
         }),
         ..georeference()

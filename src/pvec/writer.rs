@@ -55,6 +55,12 @@ use super::normalized::Normalized2DGeometry;
 use super::ordering::EntityId;
 use super::units::SourceUnit;
 use crate::cancel::CancelToken;
+#[cfg(feature = "pvec-convert")]
+use crate::pvec_convert::{
+    Calibration, CrsKind, DefinitionFormat, GeoreferenceMethod, ScaleProvenance,
+};
+#[cfg(feature = "pvec-convert")]
+use pvec_facade::unstable as stored;
 
 /// The writer rule for a curve PVec's container cannot store exactly and deterministically.
 const REFUSED_UNSTORABLE: &str = "WRT-08";
@@ -355,6 +361,18 @@ impl OpenArtifact {
         Ok(())
     }
 
+    /// Adds the calibration block (issue #1552). PVec puts it last, after every other block.
+    ///
+    /// # Errors
+    ///
+    /// [`WriteError::Pvec`] when PVec refuses the calibration.
+    #[cfg(feature = "pvec-convert")]
+    pub(crate) fn calibration(&mut self, calibration: &Calibration) -> Result<(), WriteError> {
+        self.writer
+            .calibration(&calibration.into())
+            .map_err(WriteError::Pvec)
+    }
+
     /// Seals the artifact.
     ///
     /// # Errors
@@ -496,4 +514,88 @@ pub fn write_geometry_to<'a>(
 ) -> Result<StreamedArtifact, WriteError> {
     open_geometry(config, items, streams, None, Some(spill), cancel, on_chunk)?
         .seal_into(cancel, on_chunk, out)
+}
+
+/// Adds, replaces (`Some`) or removes (`None`) the calibration of the artifact at `path` (issue
+/// #1552), through PVec's rewrite: every other block keeps its bytes and checksum, the file's digest
+/// is recomputed, and the new file replaces the old one atomically, so a reader sees one or the
+/// other. A file that already holds this calibration comes out as the bytes a conversion with it
+/// would have written.
+///
+/// # Errors
+///
+/// [`WriteError::Pvec`] when the file cannot be read or rewritten or PVec refuses the calibration.
+/// Nothing is written then.
+#[cfg(feature = "pvec-convert")]
+pub fn recalibrate(
+    path: &std::path::Path,
+    calibration: Option<&Calibration>,
+) -> Result<(), WriteError> {
+    stored::recalibrate_file(path, calibration.map(Into::into).as_ref()).map_err(WriteError::Pvec)
+}
+
+#[cfg(feature = "pvec-convert")]
+impl From<&Calibration> for stored::Calibration {
+    fn from(c: &Calibration) -> Self {
+        let scale = c.scale().map(|s| stored::ScaleClaim {
+            metres_per_source_unit: s.metres_per_source_unit,
+            provenance: match s.provenance {
+                ScaleProvenance::DeclaredUnit => stored::Provenance::DeclaredUnit,
+                ScaleProvenance::PlanScale {
+                    numerator,
+                    denominator,
+                    paper_metres_per_unit,
+                } => stored::Provenance::PlanScale {
+                    numerator,
+                    denominator,
+                    paper_metres_per_unit,
+                },
+                ScaleProvenance::Measured { p0, p1, metres } => stored::Provenance::Measured {
+                    p0,
+                    p1,
+                    distance_metres: metres,
+                },
+                ScaleProvenance::Georeference => stored::Provenance::Georeference,
+                ScaleProvenance::Manual => stored::Provenance::Manual,
+            },
+            uncertainty: s.uncertainty,
+            note: s.note.clone(),
+        });
+        let georeference = c.georeference().map(|g| stored::Georeference {
+            source_to_crs: g.affine,
+            crs_kind: match g.crs_kind {
+                CrsKind::Projected => stored::CrsKind::Projected,
+                CrsKind::Geographic => stored::CrsKind::Geographic,
+                CrsKind::Engineering => stored::CrsKind::Engineering,
+            },
+            method: match g.method {
+                GeoreferenceMethod::Declared => stored::FitMethod::Declared,
+                GeoreferenceMethod::Fitted => stored::FitMethod::Fitted,
+                GeoreferenceMethod::Manual => stored::FitMethod::Manual,
+            },
+            crs_id: g.crs_id.clone().unwrap_or_default(),
+            definition: g.definition.as_ref().map(|d| stored::CrsDefinition {
+                format: match d.format {
+                    DefinitionFormat::Wkt1 => stored::DefinitionFormat::Wkt1,
+                    DefinitionFormat::Wkt2 => stored::DefinitionFormat::Wkt2,
+                    DefinitionFormat::Projjson => stored::DefinitionFormat::Projjson,
+                },
+                text: d.text.clone(),
+            }),
+            control_points: g
+                .control_points
+                .iter()
+                .map(|p| stored::ControlPoint {
+                    source: p.source,
+                    world: p.world,
+                })
+                .collect(),
+            residual_max: g.residual_max,
+        });
+        stored::Calibration {
+            scale,
+            georeference,
+            external_id: c.external_id().unwrap_or_default().to_owned(),
+        }
+    }
 }

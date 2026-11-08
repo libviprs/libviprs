@@ -329,7 +329,7 @@ impl<'a> PdfConversion<'a> {
                     gcs,
                 }) => {
                     let wkt = |text: &str| CrsDefinition {
-                        format: DefinitionFormat::Wkt,
+                        format: DefinitionFormat::Wkt1,
                         text: text.to_owned(),
                     };
                     // A projected GCS has its GPTS in its geographic base, which only the WKT names:
@@ -524,6 +524,8 @@ impl<'a> PdfConversion<'a> {
         let rasters = open
             .rasters(bake.written.iter().map(|b| &b.pyramid))
             .map_err(PdfConvertError::Rasters)? as u64;
+        open.calibration(&calibration)
+            .map_err(PdfConvertError::Write)?;
         let artifact = open.finish().map_err(PdfConvertError::Write)?;
         tell(EngineEvent::ConversionArtifactWritten {
             entities: artifact.written,

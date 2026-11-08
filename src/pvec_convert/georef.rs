@@ -8,12 +8,11 @@
 //!
 //! # The rule
 //!
-//! PVec coordinates are always source space. libviprs never writes a `GeoTransform`, a CRS string
-//! or a projected coordinate into the artifact, and the sidecar carries none either: its control
-//! points are drawing coordinates with no world coordinate attached, and the calibration is an
-//! opaque identifier naming a record the application holds. Re-calibrating a converted drawing
-//! rewrites the sidecar ([`GeoreferenceHandoff::recalibrate`]) and touches nothing else, so the
-//! artifact's bytes, and its checksum, do not move.
+//! PVec coordinates are always source space. Since #1552 the calibration itself (a scale, a
+//! georeference or both) is written into the artifact's calibration block, and
+//! [`recalibrate`](super::recalibrate) rewrites that block. The sidecar carries no world coordinate:
+//! its control points are drawing coordinates, and its `calibration_id` is the calibration's
+//! `external_id`. [`GeoreferenceHandoff::recalibrate`] rewrites the sidecar alone.
 //!
 //! # The sidecar
 //!

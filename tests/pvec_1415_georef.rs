@@ -1,7 +1,9 @@
 //! Issue #1415 (slice of #1048, N7.3): the georeference handoff. A calibration changes the sidecar
 //! and nothing else, the sidecar round-trips and refuses a version it does not know, its bounds are
 //! the artifact's bit for bit, an undeclared unit stays `Unknown`, and no GIS transform reaches the
-//! artifact. Needs `--features pvec-convert`.
+//! artifact unless a calibration is given. Since #1552 a calibration is written into the artifact's
+//! calibration block, and its `external_id` is the sidecar's `calibration_id`. Needs
+//! `--features pvec-convert`.
 
 #![cfg(feature = "pvec-convert")]
 
@@ -17,7 +19,8 @@ use libviprs::pvec::{
     ProviderError, RawEntity, RawGeometry, SourceUnit,
 };
 use libviprs::pvec_convert::{
-    GeoreferenceError, GeoreferenceHandoff, PvecConversion, PvecConvertError, georef_path,
+    Calibration, GeoreferenceError, GeoreferenceHandoff, PvecConversion, PvecConvertError,
+    ScaleClaim, ScaleProvenance, georef_path, recalibrate,
 };
 
 /// Two circles, centres (5, 5) and (20, 5), radii 2 and 1: the drawing box is exactly
@@ -109,20 +112,35 @@ fn mock<'a>(dest: &'a Path) -> PvecConversion<'a> {
     PvecConversion::new(CadSource::Bytes(b"x"), dest).unit(SourceUnit::Meters)
 }
 
+/// A calibration that carries `id`: a scale typed in by hand, one metre a unit.
+fn tagged(id: &str) -> Calibration {
+    let scale = ScaleClaim {
+        metres_per_source_unit: 1.0,
+        provenance: ScaleProvenance::Manual,
+        uncertainty: None,
+        note: String::new(),
+    };
+    Calibration::new(Some(scale), None, Some(id.to_owned())).unwrap()
+}
+
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1415_two_calibrations_give_identical_artifact_bytes_and_different_sidecars() {
+fn issue_1415_two_calibrations_differ_only_in_the_calibration_block_and_the_sidecar() {
     let dir = scratch("twice");
     let (a, b) = (dir.join("a.pvec"), dir.join("b.pvec"));
     mock(&a)
-        .calibration("site-survey-1")
+        .calibration(tagged("site-survey-1"))
         .control_points([[3.0, 3.0], [21.0, 7.0]])
         .convert_with::<Mock>()
         .unwrap();
     mock(&b)
-        .calibration("site-survey-2")
+        .calibration(tagged("site-survey-2"))
         .convert_with::<Mock>()
         .unwrap();
+    assert_ne!(fs::read(&a).unwrap(), fs::read(&b).unwrap());
+    // Without the calibration block the two are the same bytes.
+    recalibrate(&a, None).unwrap();
+    recalibrate(&b, None).unwrap();
     assert_eq!(fs::read(&a).unwrap(), fs::read(&b).unwrap());
     assert_ne!(
         fs::read(georef_path(&a)).unwrap(),
@@ -140,7 +158,7 @@ fn issue_1415_recalibrating_rewrites_the_sidecar_and_nothing_else() {
     let dir = scratch("recal");
     let dest = dir.join("o.pvec");
     mock(&dest)
-        .calibration("old")
+        .calibration(tagged("old"))
         .convert_with::<Mock>()
         .unwrap();
     let (artifact, report) = (
@@ -233,22 +251,15 @@ fn issue_1415_an_undeclared_unit_stays_unknown_and_no_default_is_substituted() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1415_no_transform_crs_or_calibration_reaches_the_artifact() {
+fn issue_1415_without_a_calibration_no_transform_or_crs_reaches_the_artifact() {
     let dir = scratch("scan");
     let dest = dir.join("o.pvec");
     mock(&dest)
-        .calibration("calibration-id-that-must-not-leak")
         .control_points([[3.0, 3.0]])
         .convert_with::<Mock>()
         .unwrap();
     let bytes = fs::read(&dest).unwrap();
-    for needle in [
-        &b"calibration-id-that-must-not-leak"[..],
-        b"EPSG",
-        b"GeoTransform",
-        b"crs",
-        b"PROJCS",
-    ] {
+    for needle in [&b"EPSG"[..], b"GeoTransform", b"crs", b"PROJCS"] {
         assert!(
             !bytes.windows(needle.len()).any(|w| w == needle),
             "{:?} found in the artifact",
@@ -291,14 +302,14 @@ fn issue_1415_a_failed_run_leaves_the_previous_sidecar_as_it_was() {
     let dir = scratch("atomic");
     let dest = dir.join("o.pvec");
     mock(&dest)
-        .calibration("first")
+        .calibration(tagged("first"))
         .convert_with::<Mock>()
         .unwrap();
     let before = fs::read(georef_path(&dest)).unwrap();
     let token = libviprs::CancelToken::new();
     token.cancel();
     let err = mock(&dest)
-        .calibration("second")
+        .calibration(tagged("second"))
         .cancel(token)
         .convert_with::<Mock>()
         .unwrap_err();

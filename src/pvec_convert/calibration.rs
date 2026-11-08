@@ -141,8 +141,10 @@ pub struct CrsDefinition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DefinitionFormat {
-    /// Well-known text, as a GeoPDF's `/GCS /WKT` carries it.
-    Wkt,
+    /// OGC WKT1, as a GeoPDF's `/GCS /WKT` carries it.
+    Wkt1,
+    /// OGC WKT2.
+    Wkt2,
     /// PROJJSON.
     Projjson,
 }

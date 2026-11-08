@@ -869,7 +869,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1038 adds 1 more: `tests/vector_1038_release_gate.rs::conformance_is_met_with_web_android_and_ios_evidence`, which reads the gate record. It said 1038 before this line moved.
 /// #1547 adds 13: the `tests/pvec_1547_pdf_viewports.rs` cells that convert a viewport fixture into a temp dir. It said 1039 before this line moved.
 /// #1548 adds 6: the `tests/pvec_1548_lgidict.rs` cells that convert an LGIDict fixture into a temp dir. It said 1052 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1058;
+/// #1552 adds 7: the `tests/pvec_1552_calibration_write.rs` cells that convert into a temp dir, read the calibration back and recalibrate it. Two `tests/pvec_1415_georef.rs` cells are renamed, not added. It said 1058 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1065;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

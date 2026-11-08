@@ -247,7 +247,7 @@ fn a_gcs_given_only_as_wkt_is_kept_as_its_definition() {
     let g = done.calibration.georeference().unwrap();
     assert_eq!(g.crs_id, None);
     let def = g.definition.as_ref().unwrap();
-    assert_eq!(def.format, DefinitionFormat::Wkt);
+    assert_eq!(def.format, DefinitionFormat::Wkt1);
     assert_eq!(def.text, WGS84_WKT);
 }
 
