@@ -96,7 +96,7 @@ pub enum GeoreferenceHandoff {
     V1(HandoffV1),
 }
 
-/// Why a sidecar was not written, read or built.
+/// Why a sidecar could not be read or imported.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum GeoreferenceError {
@@ -125,6 +125,7 @@ pub enum GeoreferenceError {
 
 /// What [`import_sidecar`] did.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SidecarImport {
     /// The resolved calibration is in the artifact, with the sidecar's id as its `external_id`.
     Imported,

@@ -13,7 +13,7 @@ a DWG, or a vector PDF page
   -> ordering                      dense file-local ids, deterministic
   -> the writer funnel             the artifact, written by PVec's own writer
   -> the conversion report         one row per entity met, checked against the count met
-  -> atomic publish                artifact, report and georeference sidecar, all or none
+  -> atomic publish                artifact and report, both or neither
 ```
 
 ## What libviprs is, and is not
@@ -26,8 +26,8 @@ public types (`docs/adr/pvec-semantic-boundary.md`). A mapping that needs mathem
 
 ## Decisions that shape everything else
 
-- **Source space, always.** PVec coordinates are the drawing's own units, never a projection. Placement on a map is a
-  sidecar (`docs/pvec-georeference.md`).
+- **Source space, always.** PVec coordinates are the drawing's own units, never a projection. Placement on a map is the
+  artifact's calibration block, never applied to a coordinate (`docs/pvec-georeference.md`).
 - **Nothing is tessellated and nothing is repaired.** An entity PVec cannot carry is counted with a reason code and left
   out. A display-only result is never called exact.
 - **Every entity is counted once.** The report's rows equal the entities met, and the class counts add up to the same

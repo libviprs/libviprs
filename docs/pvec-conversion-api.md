@@ -13,8 +13,8 @@ assert_eq!(out.report.totals.encountered, out.fidelity.encountered());
 
 ## Builder
 
-`view_profile`, `limits`, `unit`, `leaves` (spatial directory and Tier 0), `cancel`, `observer`, `queue_capacity`, `calibration`,
-`control_points`, `profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
+`view_profile`, `limits`, `unit`, `leaves` (spatial directory and Tier 0), `cancel`, `observer`, `queue_capacity`, `calibration` (a `Calibration`, written into the artifact's calibration block),
+`control_points` (deprecated, #1554), `profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
 writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the trait carries no unit, so `unit` is required there.
 
 ## Profiles and the capability gate
@@ -34,8 +34,9 @@ tessellation), so today it records `downgrade-unavailable` and omits the entity.
 ## Output and errors
 
 `PvecConversionOutput` has the published artifact path, the report, the independent per-class counts, the entities written and the peak queue
-depth. `PvecConvertError` keeps every lower error as `source()`: open, view, flatten, unit required, write, tally, report, publish, georeference,
-capability not allowed, cancelled. After any error the destination, its report and its sidecar are as they were.
+depth. `PvecConvertError` keeps every lower error as `source()`: open, view, flatten, unit required, write, tally, report, publish, georeference
+(a deprecated control point that is not finite), capability not allowed, cancelled. After any error the destination and its report are as they
+were.
 
 ## Progress, cancellation, backpressure
 
@@ -44,5 +45,5 @@ cancel token is polled once per batch of 256 entities and during the write. A ca
 
 ## What it writes
 
-The artifact, `<dest>.report.json` (`docs/pvec-conversion-report.md`) and the sidecar (`docs/pvec-georeference.md`), published together or not
-at all. Diagnostics have stable codes (`docs/pvec-diagnostics.md`).
+The artifact (with its calibration block when there is a calibration, `docs/pvec-georeference.md`) and `<dest>.report.json`
+(`docs/pvec-conversion-report.md`), published together or not at all. No georeference sidecar is written since #1554. Diagnostics have stable codes (`docs/pvec-diagnostics.md`).
