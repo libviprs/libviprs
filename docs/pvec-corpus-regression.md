@@ -1,7 +1,7 @@
 # Corpus regression report
 
 This is the conversion equivalent of `docs/pmtiles-benchmarks.md`: every fixture of the pinned
-`pvec-gold-fixtures` revision (`r3-open`, vendored under `tests/fixtures/pvec-gold/`, 60 fixtures) goes through
+`pvec-gold-fixtures` revision (`r3-open`, vendored under `tests/fixtures/pvec-gold/`, 67 fixtures) goes through
 `PvecConversion`, and three sections are recorded for each one. The deterministic columns are the
 committed baseline, `tests/fixtures/pvec_corpus_baseline.json`, and the diff against it runs in the ordinary
 suite (`tests/pvec_corpus_regression.rs`, `the_corpus_does_not_regress`). Nothing in it runs a converter.
@@ -37,9 +37,9 @@ LIBVIPRS_BENCH_HOST=mars LIBVIPRS_CORPUS_BASELINE_OUT=tests/fixtures/pvec_corpus
 
 ## The current report
 
-60 fixtures: 41 `KNOWN_TRUTH_EXACT`, 18 `QUARANTINED`, 1 `DUAL_ORACLE_EQUIVALENT`, 0 `REAL_WORLD_DIFFERENTIAL`.
-38 convert; the other 22 are refused, and every refusal is in the baseline with its error chain. Total `.pvec`
-bytes over the corpus: 20,440. Timings and RSS below were taken on MARS (native x86_64), release build, one run each, and are
+67 fixtures: 48 `KNOWN_TRUTH_EXACT`, 18 `QUARANTINED`, 1 `DUAL_ORACLE_EQUIVALENT`, 0 `REAL_WORLD_DIFFERENTIAL`.
+45 convert; the other 22 are refused, and every refusal is in the baseline with its error chain. Total `.pvec`
+bytes over the corpus: 22,864. Timings and RSS below were taken on MARS (native x86_64), release build, one run each, and are
 not gated: peak RSS of the whole run 9596928 bytes.
 
 | fixture | evidence class | conformance | leaves kept | entities | .pvec bytes | wall (ms) | platform |
@@ -68,6 +68,8 @@ not gated: peak RSS of the whole run 9596928 bytes.
 | image-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.9 | x86_64-linux-mars |
 | large-coords-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 368 | 1.8 | x86_64-linux-mars |
 | layer-state-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 3 | 344 | 4.4 | x86_64-linux-mars |
+| layout-plot-settings-inch-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 13.1 | x86_64-linux-mars |
+| layout-plot-settings-mm-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 13.2 | x86_64-linux-mars |
 | line-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 352 | 9.9 | x86_64-linux-mars |
 | lwpolyline-closed-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 368 | 2.4 | x86_64-linux-mars |
 | mesh-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.9 | x86_64-linux-mars |
@@ -75,6 +77,7 @@ not gated: peak RSS of the whole run 9596928 bytes.
 | mtext-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.8 | x86_64-linux-mars |
 | near-singular-001 | KNOWN_TRUTH_EXACT | NoGeometry | null | 0 | 0 | 0.7 | x86_64-linux-mars |
 | nested-blocks-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 352 | 2.6 | x86_64-linux-mars |
+| no-plot-layer-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 2 | 2 | 352 | 12.6 | x86_64-linux-mars |
 | nonuniform-scale-circle-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 360 | 2.3 | x86_64-linux-mars |
 | nonuniform-scale-rotated-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 384 | 2.0 | x86_64-linux-mars |
 | nonunit-weight-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 928 | 1.9 | x86_64-linux-mars |
@@ -100,6 +103,10 @@ not gated: peak RSS of the whole run 9596928 bytes.
 | uniform-scale-001 | KNOWN_TRUTH_EXACT | SupportedExact | 1 | 1 | 360 | 1.8 | x86_64-linux-mars |
 | viewport-clipped-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 1.2 | x86_64-linux-mars |
 | viewport-clipped-bounded-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 1.0 | x86_64-linux-mars |
+| viewport-frozen-layer-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 2 | 2 | 352 | 11.5 | x86_64-linux-mars |
+| viewport-hide-plot-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 9.6 | x86_64-linux-mars |
+| viewport-non-plan-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 8.9 | x86_64-linux-mars |
+| viewport-twisted-001 | KNOWN_TRUTH_EXACT | SupportedEquivalent | 1 | 1 | 344 | 8.4 | x86_64-linux-mars |
 | wipeout-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.6 | x86_64-linux-mars |
 | xref-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.9 | x86_64-linux-mars |
 | zero-length-segment-001 | QUARANTINED | NoGeometry | null | 1 | 0 | 0.6 | x86_64-linux-mars |

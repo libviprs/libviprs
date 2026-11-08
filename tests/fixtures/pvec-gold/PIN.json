@@ -1,7 +1,7 @@
 {
  "corpus_revision": "r3-open",
- "gold_commit": "133b55108297eec2168b805588d69a3f24a0bcab",
- "r3_manifest_sha256": "d2bc1f1e1eecec797757df4dfec10b1376e9fac44501b5283e0fb91385bfb6c2",
+ "gold_commit": "7e251ab0d3642e4e154494205a0e9fb4b505d3f9",
+ "r3_manifest_sha256": "1194329dbba2b424e450ab632a6f8019bdbb3e0c18d42a0c4efe6fa926e24f8b",
  "skipped": [
   "arch-aecobjects-001",
   "general-sample-ac1032-001"

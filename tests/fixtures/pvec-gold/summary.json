@@ -6,11 +6,18 @@
   ],
   "KNOWN_TRUTH_EXACT / READER_MAPPING_ONLY": [
    "layer-state-001",
+   "layout-plot-settings-inch-001",
+   "layout-plot-settings-mm-001",
    "mixed-entity-001",
+   "no-plot-layer-001",
    "paper-space-multi-viewport-001",
    "tiny-extent-001",
    "viewport-clipped-001",
-   "viewport-clipped-bounded-001"
+   "viewport-clipped-bounded-001",
+   "viewport-frozen-layer-001",
+   "viewport-hide-plot-001",
+   "viewport-non-plan-001",
+   "viewport-twisted-001"
   ],
   "KNOWN_TRUTH_EXACT / STEP_ORACLE": [
    "arc-seam-001",

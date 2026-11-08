@@ -1,0 +1,316 @@
+{
+  "schema_version": "pvec-gold/expected.math/1",
+  "fixture_id": "layout-plot-settings-mm-001",
+  "evidence_class": "KNOWN_TRUTH_EXACT",
+  "units": {
+    "name": "metre",
+    "canonical": "metre",
+    "scale_to_canonical": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    }
+  },
+  "provenance": {
+    "derivation": "AUTHORING_PARAMETERS",
+    "authoring_script": "tools/authoring/author_probes.py",
+    "parameter_file": "tools/authoring/params-r3/layout-plot-settings-mm-001.json",
+    "parameter_file_sha256": "3b450988cf559db04b4a440a0032cbce8c27e8417a12df258bc5c1bfc4812f9e",
+    "parameters": {
+      "id": "layout-plot-settings-mm-001",
+      "kind": "viewport_print",
+      "description": "A layout with plot settings in millimetres: ISO A3 (420 by 297), landscape rotation code 1, plot scale 1:50, margins 5, 6, 7 and 8 (left, bottom, right, top), plot origin (10, 12), lineweights not printed and the monochrome.ctb style table named. One viewport and a paper-space border line. Every plot setting has to survive.",
+      "layout": "Layout1",
+      "layers": [],
+      "model_curves": [
+        {
+          "layer": "0",
+          "start": [
+            "0",
+            "0",
+            "0"
+          ],
+          "end": [
+            "12",
+            "9",
+            "0"
+          ]
+        }
+      ],
+      "paper_curves": [
+        {
+          "layer": "0",
+          "start": [
+            "0",
+            "0",
+            "0"
+          ],
+          "end": [
+            "400",
+            "0",
+            "0"
+          ]
+        }
+      ],
+      "viewports": [
+        {
+          "id": "vp01",
+          "center": [
+            "200",
+            "140"
+          ],
+          "width": "300",
+          "height": "200",
+          "view_center": [
+            "6",
+            "4.5"
+          ],
+          "view_height": "20"
+        }
+      ],
+      "layout_plot": {
+        "paper_size": "ISO_A3_(420.00_x_297.00_MM)",
+        "paper_width": "420",
+        "paper_height": "297",
+        "paper_units": 1,
+        "rotation": 1,
+        "scale_numerator": "1",
+        "scale_denominator": "50",
+        "margins": [
+          "5",
+          "6",
+          "7",
+          "8"
+        ],
+        "origin": [
+          "10",
+          "12"
+        ],
+        "print_lineweights": false,
+        "plot_style_sheet": "monochrome.ctb"
+      }
+    }
+  },
+  "entities": [
+    {
+      "id": "layout-plot-settings-mm-001-model-1",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "12.0",
+            "f64_hex": "0x4028000000000000"
+          },
+          {
+            "decimal": "9.0",
+            "f64_hex": "0x4022000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "0",
+        "on": true,
+        "frozen": false
+      }
+    },
+    {
+      "id": "layout-plot-settings-mm-001-paper-1",
+      "class": "line",
+      "geometry": {
+        "start": [
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ],
+        "end": [
+          {
+            "decimal": "400.0",
+            "f64_hex": "0x4079000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          },
+          {
+            "decimal": "0.0",
+            "f64_hex": "0x0000000000000000"
+          }
+        ]
+      },
+      "parameter_domain": {
+        "start": {
+          "decimal": "0.0",
+          "f64_hex": "0x0000000000000000"
+        },
+        "end": {
+          "decimal": "1.0",
+          "f64_hex": "0x3ff0000000000000"
+        }
+      },
+      "closure": {
+        "closed_by_endpoint": false,
+        "closed_by_knots": false,
+        "periodic": false
+      },
+      "structure": "CURVE_ONLY",
+      "layer": {
+        "name": "0",
+        "on": true,
+        "frozen": false
+      },
+      "space": "PAPER"
+    }
+  ],
+  "assertions": [
+    {
+      "id": "a1",
+      "kind": "STRUCTURAL",
+      "entity": "layout-plot-settings-mm-001-model-1",
+      "claim": "VIEWPORT_COUNT_PRESERVED",
+      "statement": "The layout Layout1 keeps exactly 1 viewport(s); none is dropped or merged."
+    },
+    {
+      "id": "a2",
+      "kind": "STRUCTURAL",
+      "entity": "layout-plot-settings-mm-001-model-1",
+      "claim": "LAYOUT_PLOT_SETTINGS_PRESERVED",
+      "statement": "Every plot setting of Layout1 (paper, unit, rotation, scale, margins, origin, lineweights, style table) is kept as authored."
+    }
+  ],
+  "viewports": [
+    {
+      "id": "vp01",
+      "layout": "Layout1",
+      "paper": {
+        "center": [
+          {
+            "decimal": "200.0",
+            "f64_hex": "0x4069000000000000"
+          },
+          {
+            "decimal": "140.0",
+            "f64_hex": "0x4061800000000000"
+          }
+        ],
+        "width": {
+          "decimal": "300.0",
+          "f64_hex": "0x4072c00000000000"
+        },
+        "height": {
+          "decimal": "200.0",
+          "f64_hex": "0x4069000000000000"
+        }
+      },
+      "view": {
+        "center": [
+          {
+            "decimal": "6.0",
+            "f64_hex": "0x4018000000000000"
+          },
+          {
+            "decimal": "4.5",
+            "f64_hex": "0x4012000000000000"
+          }
+        ],
+        "height": {
+          "decimal": "20.0",
+          "f64_hex": "0x4034000000000000"
+        }
+      }
+    }
+  ],
+  "layout_plot": {
+    "layout": "Layout1",
+    "paper_size": "ISO_A3_(420.00_x_297.00_MM)",
+    "paper_width": {
+      "decimal": "420.0",
+      "f64_hex": "0x407a400000000000"
+    },
+    "paper_height": {
+      "decimal": "297.0",
+      "f64_hex": "0x4072900000000000"
+    },
+    "paper_units": 1,
+    "rotation": 1,
+    "scale_numerator": {
+      "decimal": "1.0",
+      "f64_hex": "0x3ff0000000000000"
+    },
+    "scale_denominator": {
+      "decimal": "50.0",
+      "f64_hex": "0x4049000000000000"
+    },
+    "margins": [
+      {
+        "decimal": "5.0",
+        "f64_hex": "0x4014000000000000"
+      },
+      {
+        "decimal": "6.0",
+        "f64_hex": "0x4018000000000000"
+      },
+      {
+        "decimal": "7.0",
+        "f64_hex": "0x401c000000000000"
+      },
+      {
+        "decimal": "8.0",
+        "f64_hex": "0x4020000000000000"
+      }
+    ],
+    "origin": [
+      {
+        "decimal": "10.0",
+        "f64_hex": "0x4024000000000000"
+      },
+      {
+        "decimal": "12.0",
+        "f64_hex": "0x4028000000000000"
+      }
+    ],
+    "print_lineweights": false,
+    "plot_style_sheet": "monochrome.ctb"
+  }
+}

@@ -172,23 +172,31 @@ fn issue_1584_a_no_plot_layer_is_left_out_in_model_and_in_paper_space() {
     let (out, dir) = sheet("no-plot-layer-001");
     let report = out.expect("the sheet converts");
     let vp = summary(&report).viewports[0].handle;
-    for (space, rows) in [
-        ("paper", lines(&report, None)),
-        ("model", lines(&report, Some(vp))),
-    ] {
-        assert_eq!(rows.len(), 2, "{space}: {rows:#?}");
-        let dropped: Vec<_> = rows
+    // The NOPLOT line of each space is excluded once, before any viewport sees it, and the line on
+    // layer 0 of each space is drawn: the paper one on the sheet, the model one through the viewport.
+    let dropped: Vec<&EntityRow> = report
+        .entities
+        .iter()
+        .filter(|r| r.source_class == "LINE" && r.policy_field.as_deref() == Some("layers.no_plot"))
+        .collect();
+    assert_eq!(dropped.len(), 2, "{:#?}", report.entities);
+    assert!(
+        dropped
             .iter()
-            .filter(|r| r.policy_field.as_deref() == Some("layers.no_plot"))
-            .collect();
-        assert_eq!(dropped.len(), 1, "{space}: {rows:#?}");
-        assert!(dropped[0].semantic_type.is_none(), "{space}");
-        assert_eq!(
-            rows.iter().filter(|r| r.semantic_type.is_some()).count(),
-            1,
-            "{space}: the line on layer 0 is drawn"
-        );
-    }
+            .all(|r| r.semantic_type.is_none() && r.viewport.is_none())
+    );
+    let drawn = |viewport: Option<u64>| {
+        lines(&report, viewport)
+            .iter()
+            .filter(|r| r.semantic_type.is_some())
+            .count()
+    };
+    assert_eq!(
+        (drawn(None), drawn(Some(vp))),
+        (1, 1),
+        "{:#?}",
+        report.entities
+    );
     let _ = fs::remove_dir_all(dir);
 }
 

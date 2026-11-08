@@ -85,8 +85,8 @@ fn n2_1_1050_the_pinned_corpus_is_the_revision_the_pin_names() {
     assert_eq!(corpus.upstream_manifest_sha256.len(), 64);
     assert_eq!(
         known_truth_ids(&corpus).len(),
-        41,
-        "r2-open has 38 and r3-open adds 3"
+        48,
+        "r2-open has 38, r3-open adds 3 and its print-profile probes (pvec-gold-fixtures#101) 7"
     );
 }
 
@@ -427,7 +427,12 @@ mod mapping {
         }
 
         let derived = |e: &&Value| e["id"].as_str().is_some_and(|i| i.contains("-equivalent-"));
-        let primary: Vec<&Value> = truth_entities.iter().filter(|e| !derived(e)).collect();
+        // Model space only: a `space: PAPER` entity sits in a layout, which this walk does not
+        // visit (`tests/pvec_1584_print_probes.rs` reads those through the print profile).
+        let primary: Vec<&Value> = truth_entities
+            .iter()
+            .filter(|e| !derived(e) && e["space"].as_str() != Some("PAPER"))
+            .collect();
         let extra: Vec<&Value> = truth_entities.iter().filter(derived).collect();
         if primary.len() != flat.entities.len() {
             out.push(format!(
