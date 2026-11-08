@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 use super::fidelity::{Classification, FidelityClass};
 use super::provider::{
     DwgProvider, EntityScope, Facet, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
-    ProviderError, RawEntity, ViewportEntity,
+    ProviderError, RawEntity, ViewportClip, ViewportEntity,
 };
 use super::view_profile::{LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError};
 use crate::cad::ItemHandle;
@@ -253,8 +253,8 @@ pub struct ViewportInput {
     pub layout: LayoutId,
     /// The viewport's own visibility.
     pub visible: bool,
-    /// The clip boundary, paper-space vertices in order.
-    pub clip: Vec<[f64; 2]>,
+    /// What the viewport is clipped to.
+    pub clip: ViewportClip,
     /// Layers frozen in this viewport only.
     pub frozen_layers: Vec<String>,
 }

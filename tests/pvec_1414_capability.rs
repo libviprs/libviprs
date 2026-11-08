@@ -129,6 +129,7 @@ impl DwgProvider for Mock {
             off: false,
             frozen: false,
             locked: false,
+            plottable: true,
         }])
     }
 

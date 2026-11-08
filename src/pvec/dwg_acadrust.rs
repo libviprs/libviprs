@@ -11,7 +11,8 @@
 //!   Layout objects ->  LayoutState     (model first, then paper layouts in tab order)
 //!   block record's entities -> EntityCursor -> RawEntity   (storage order, not expanded)
 //!   entity invisible flag  ->  EntityFacts      (own flag, and the provider's own answer)
-//!   paper-space viewports  ->  ViewportEntity   (visibility, clip boundary, frozen layer names)
+//!   Layout plot settings   ->  LayoutPlot       (paper, units, scale, margins, CTB name, flags)
+//!   paper-space viewports  ->  ViewportEntity   (visibility, view, plot flags, clip by kind, frozen layers)
 //! ```
 //!
 //! # Where the facts come from
@@ -46,10 +47,10 @@ use acr::{DwgReader, EntityType};
 use crate::cad::{CadSource, Fill, ItemHandle};
 use crate::pvec::provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
-    EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
-    Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
-    SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextStyleRef,
-    ViewportEntity, XrefAttachment,
+    EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot,
+    LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry,
+    RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform,
+    TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -248,6 +249,9 @@ pub struct AcadrustProvider {
     doc: acr::CadDocument,
     caps: ProviderCaps,
     layouts: Vec<LayoutState>,
+    /// The plot settings of each of `layouts`, by position; `None` for a layout named after its
+    /// block record, which has no Layout object to hold them.
+    plots: Vec<Option<LayoutPlot>>,
 }
 
 impl AcadrustProvider {
@@ -461,19 +465,54 @@ impl AcadrustProvider {
         })
     }
 
-    fn collect_layouts(doc: &acr::CadDocument) -> Vec<LayoutState> {
+    fn collect_layouts(doc: &acr::CadDocument) -> Vec<(LayoutState, Option<LayoutPlot>)> {
         let block_of = |handle: acr::Handle| {
             doc.block_records
                 .iter()
                 .find(|b| b.handle == handle)
                 .map(|b| b.name.clone())
         };
-        let mut found: Vec<(i16, u64, String, String)> = Vec::new();
+        let mut found: Vec<(i16, u64, String, String, Option<LayoutPlot>)> = Vec::new();
         for o in doc.objects.values() {
             if let ObjectType::Layout(l) = o
                 && let Some(block) = block_of(l.block_record)
             {
-                found.push((l.tab_order, l.handle.value(), l.name.clone(), block));
+                let plot = LayoutPlot {
+                    paper_size: l.paper_size.clone(),
+                    paper_width: l.paper_width,
+                    paper_height: l.paper_height,
+                    paper_units: l.plot_paper_units,
+                    plot_type: l.plot_type,
+                    window: [
+                        l.plot_window_min_x,
+                        l.plot_window_min_y,
+                        l.plot_window_max_x,
+                        l.plot_window_max_y,
+                    ],
+                    scale_numerator: l.plot_scale_numerator,
+                    scale_denominator: l.plot_scale_denominator,
+                    rotation: l.plot_rotation,
+                    margins: [
+                        l.plot_margin_left,
+                        l.plot_margin_bottom,
+                        l.plot_margin_right,
+                        l.plot_margin_top,
+                    ],
+                    origin: [l.plot_origin_x, l.plot_origin_y],
+                    style_sheet: l.plot_style_sheet.clone(),
+                    print_lineweights: l.plot_flags.print_lineweights,
+                    scale_lineweights: l.plot_flags.scale_lineweights,
+                    plot_plot_styles: l.plot_flags.plot_plot_styles,
+                    plot_viewport_borders: l.plot_flags.plot_viewport_borders,
+                    draw_viewports_first: l.plot_flags.draw_viewports_first,
+                };
+                found.push((
+                    l.tab_order,
+                    l.handle.value(),
+                    l.name.clone(),
+                    block,
+                    Some(plot),
+                ));
             }
         }
         if found.is_empty() {
@@ -487,7 +526,7 @@ impl AcadrustProvider {
                     } else {
                         b.name.clone()
                     };
-                    found.push((0, b.handle.value(), name, b.name.clone()));
+                    found.push((0, b.handle.value(), name, b.name.clone(), None));
                 }
             }
         }
@@ -497,15 +536,18 @@ impl AcadrustProvider {
         found
             .into_iter()
             .enumerate()
-            .map(|(i, (_, _, name, block))| LayoutState {
-                id: LayoutId(u32::try_from(i).unwrap_or(u32::MAX)),
-                name,
-                kind: if is_model(&block) {
-                    LayoutKind::Model
-                } else {
-                    LayoutKind::Paper
-                },
-                block_name: block,
+            .map(|(i, (_, _, name, block, plot))| {
+                let state = LayoutState {
+                    id: LayoutId(u32::try_from(i).unwrap_or(u32::MAX)),
+                    name,
+                    kind: if is_model(&block) {
+                        LayoutKind::Model
+                    } else {
+                        LayoutKind::Paper
+                    },
+                    block_name: block,
+                };
+                (state, plot)
             })
             .collect()
     }
@@ -543,11 +585,12 @@ impl DwgProvider for AcadrustProvider {
                 });
             }
         };
-        let layouts = Self::collect_layouts(&doc);
+        let (layouts, plots) = Self::collect_layouts(&doc).into_iter().unzip();
         Ok(Self {
             doc,
             caps: Self::capabilities(),
             layouts,
+            plots,
         })
     }
 
@@ -563,6 +606,14 @@ impl DwgProvider for AcadrustProvider {
         Ok(self.layouts.clone())
     }
 
+    fn layout_plot(&self, layout: LayoutId) -> Result<SourceFact<LayoutPlot>, ProviderError> {
+        let plot = self
+            .plots
+            .get(layout.0 as usize)
+            .ok_or_else(|| ProviderError::NoSuchScope(format!("layout {}", layout.0)))?;
+        Ok(plot.clone().map_or(SourceFact::Absent, SourceFact::Present))
+    }
+
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
         Ok(self
             .doc
@@ -574,6 +625,7 @@ impl DwgProvider for AcadrustProvider {
                 off: l.is_off(),
                 frozen: l.is_frozen(),
                 locked: l.is_locked(),
+                plottable: l.is_plottable,
             })
             .collect())
     }
@@ -626,15 +678,24 @@ impl DwgProvider for AcadrustProvider {
                 else {
                     continue;
                 };
-                // Viewport id 1 is the paper-space view itself, not a window onto the model.
-                if v.id == 1 {
-                    continue;
-                }
                 out.push(ViewportEntity {
                     handle: key,
                     layout: layout.id,
+                    id: v.id,
                     visible: v.status.is_on && !v.common.invisible,
                     clip: self.viewport_clip(v),
+                    layer: v.common.layer.clone(),
+                    center: [v.center.x, v.center.y],
+                    width: v.width,
+                    height: v.height,
+                    view_center: [v.view_center.x, v.view_center.y],
+                    view_height: v.view_height,
+                    view_target: p3(v.view_target),
+                    view_direction: p3(v.view_direction),
+                    twist: v.twist_angle,
+                    perspective: v.status.perspective,
+                    hide_plot: v.status.hide_plot,
+                    non_rectangular_clipping: v.status.non_rectangular_clipping,
                     frozen_layers: v
                         .frozen_layers
                         .iter()
@@ -744,36 +805,46 @@ impl AcadrustProvider {
         Ok((record, path))
     }
 
-    /// The viewport's clip boundary: the polyline it is clipped to when it has one, else
-    /// the rectangle its centre, width and height describe.
-    fn viewport_clip(&self, v: &acr::entities::Viewport) -> Vec<[f64; 2]> {
-        if !v.clip_boundary_handle.is_null() {
-            match self.doc.get_entity(v.clip_boundary_handle) {
-                Some(EntityType::LwPolyline(p)) => {
-                    return p
-                        .vertices
+    /// What the viewport is clipped to: the boundary entity it names, by kind, else the
+    /// rectangle its centre, width and height describe. A boundary that is not a polyline is
+    /// named, never replaced by the rectangle (#1560).
+    fn viewport_clip(&self, v: &acr::entities::Viewport) -> ViewportClip {
+        if let Some(handle) = item_handle(v.clip_boundary_handle) {
+            let vertex = |x: f64, y: f64, bulge: f64| RawVertex { x, y, bulge };
+            return match self.doc.get_entity(v.clip_boundary_handle) {
+                Some(EntityType::LwPolyline(p)) => ViewportClip::Polygon(
+                    p.vertices
                         .iter()
-                        .map(|q| [q.location.x, q.location.y])
-                        .collect();
-                }
-                Some(EntityType::Polyline2D(p)) => {
-                    return p
-                        .vertices
+                        .map(|q| vertex(q.location.x, q.location.y, q.bulge))
+                        .collect(),
+                ),
+                Some(EntityType::Polyline2D(p)) => ViewportClip::Polygon(
+                    p.vertices
                         .iter()
-                        .map(|q| [q.location.x, q.location.y])
-                        .collect();
-                }
-                _ => {}
-            }
+                        .map(|q| vertex(q.location.x, q.location.y, q.bulge))
+                        .collect(),
+                ),
+                Some(EntityType::Circle(_)) => ViewportClip::Circle(handle),
+                Some(EntityType::Ellipse(_)) => ViewportClip::Ellipse(handle),
+                Some(EntityType::Spline(_)) => ViewportClip::Spline(handle),
+                Some(e) => ViewportClip::Other {
+                    handle,
+                    class_name: e.as_entity().entity_type().to_string(),
+                },
+                None => ViewportClip::Other {
+                    handle,
+                    class_name: "UNKNOWN".into(),
+                },
+            };
         }
         let (cx, cy) = (v.center.x, v.center.y);
         let (hw, hh) = (v.width / 2.0, v.height / 2.0);
-        vec![
+        ViewportClip::Rectangle([
             [cx - hw, cy - hh],
             [cx + hw, cy - hh],
             [cx + hw, cy + hh],
             [cx - hw, cy + hh],
-        ]
+        ])
     }
 }
 

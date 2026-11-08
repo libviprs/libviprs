@@ -11,8 +11,8 @@ use libviprs::pvec::{
     Availability, DwgProvider, EntityCursor, EntityFacts, EntityScope, EntityStates, EntityStyle,
     Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, PolicyReason,
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, SourceFact,
-    SpaceSelection, ViewProfile, ViewProfileError, ViewportEntity, ViewportFreezeMode,
-    VisibilityFilter,
+    SpaceSelection, ViewProfile, ViewProfileError, ViewportClip, ViewportEntity,
+    ViewportFreezeMode, VisibilityFilter,
 };
 
 struct Mock {
@@ -115,6 +115,7 @@ fn layer(name: &str, off: bool, frozen: bool) -> LayerState {
         off,
         frozen,
         locked: false,
+        plottable: true,
     }
 }
 
@@ -313,16 +314,42 @@ fn pvec_1296_viewports_of_the_selected_paper_layout_reach_the_outcome() {
         ViewportEntity {
             handle: h(50),
             layout: LayoutId(1),
+            id: 2,
             visible: true,
-            clip: vec![[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]],
+            clip: ViewportClip::Rectangle([[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]),
             frozen_layers: vec!["WALLS".into()],
+            layer: "VIEWPORTS".into(),
+            center: [5.0, 2.5],
+            width: 10.0,
+            height: 5.0,
+            view_center: [0.0, 0.0],
+            view_height: 5.0,
+            view_target: [0.0, 0.0, 0.0],
+            view_direction: [0.0, 0.0, 1.0],
+            twist: 0.0,
+            perspective: false,
+            hide_plot: false,
+            non_rectangular_clipping: false,
         },
         ViewportEntity {
             handle: h(51),
             layout: LayoutId(2),
+            id: 2,
             visible: false,
-            clip: vec![],
+            clip: ViewportClip::Rectangle([[0.0, 0.0], [10.0, 0.0], [10.0, 5.0], [0.0, 5.0]]),
             frozen_layers: vec![],
+            layer: "VIEWPORTS".into(),
+            center: [5.0, 2.5],
+            width: 10.0,
+            height: 5.0,
+            view_center: [0.0, 0.0],
+            view_height: 5.0,
+            view_target: [0.0, 0.0, 0.0],
+            view_direction: [0.0, 0.0, 1.0],
+            twist: 0.0,
+            perspective: false,
+            hide_plot: false,
+            non_rectangular_clipping: false,
         },
     ]);
     let mut profile = ViewProfile::default_profile();
@@ -332,7 +359,7 @@ fn pvec_1296_viewports_of_the_selected_paper_layout_reach_the_outcome() {
     assert_eq!(out.viewports.len(), 1);
     assert_eq!(out.viewports[0].handle, h(50));
     assert_eq!(out.viewports[0].frozen_layers, vec!["WALLS".to_string()]);
-    assert_eq!(out.viewports[0].clip.len(), 4);
+    assert!(matches!(out.viewports[0].clip, ViewportClip::Rectangle(_)));
 }
 
 #[test]
