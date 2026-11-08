@@ -306,15 +306,19 @@ pub fn build_streams(
                 skip(r, "provenance", "stream-full");
                 continue;
             }
-            let mut bytes = handle.map_or_else(Vec::new, |h| h.to_be_bytes().to_vec());
             // 1 is a DWG source entity; 2 is one seen through a viewport, its 8 byte handle
-            // followed by the viewport's.
-            let source_kind = match viewport {
+            // followed by the viewport's, with a source that has no handle written as the null
+            // handle 0 so the layout stays 16 bytes.
+            let (source_kind, bytes) = match viewport {
                 Some(v) => {
-                    bytes.extend_from_slice(&v.to_be_bytes());
-                    2
+                    let mut b = handle.unwrap_or(0).to_be_bytes().to_vec();
+                    b.extend_from_slice(&v.to_be_bytes());
+                    (2, b)
                 }
-                None => 1,
+                None => (
+                    1,
+                    handle.map_or_else(Vec::new, |h| h.to_be_bytes().to_vec()),
+                ),
             };
             records.push(ProvenanceRecord {
                 entity: *id,

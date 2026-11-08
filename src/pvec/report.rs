@@ -320,9 +320,9 @@ pub struct SheetSummary {
     /// One row per VIEWPORT entity on the sheet, in the drawing's order: what it did and why
     /// (#1563).
     pub viewports: Vec<SheetViewport>,
-    /// What the sheet clip did, by key: `outside` (dropped, wholly outside), `crossing` (a curve
-    /// that crosses the edge, refused), `cut` (a line or polyline cut at the edge) and `pieces`
-    /// (what the cut ones became).
+    /// What the clip did, by key, at the sheet's edge and at each drawn viewport's (#1563):
+    /// `outside` (dropped, wholly outside), `crossing` (a curve that crosses the edge, refused),
+    /// `cut` (a line or polyline cut at the edge) and `pieces` (what the cut ones became).
     pub clip: BTreeMap<String, u64>,
     /// What the drawing said that was reported and not applied, by key, in a fixed order.
     pub notes: Vec<String>,

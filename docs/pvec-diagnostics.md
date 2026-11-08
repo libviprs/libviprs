@@ -42,8 +42,9 @@ rectangle, or one the provider reports nothing about, #1563), and a curve that c
 a viewport edge, until curves are split (#1565). An entity wholly outside the sheet or its viewport is
 `ENTITY_IGNORED_BY_POLICY` with the message id `viewport_clipping` and an `OUTSIDE_VIEWPORT` warning,
 one on a no-plot layer has `layers.no_plot`, one on a layer frozen in the viewport it is seen through
-has `layers.frozen_in_viewport`, and a VIEWPORT that is drawn, off, hidden when plotting or the
-sheet's own paper view has `space`.
+has `layers.frozen_in_viewport`, and a VIEWPORT that is drawn, off or hidden when plotting has `space`;
+the sheet's own paper view has `space` too, with a `PAPER_VIEW` warning, so it is never dropped
+silently.
 
 ## Fields
 

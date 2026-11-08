@@ -866,7 +866,14 @@ impl<'a> PvecConversion<'a> {
             .collect();
         let mut model_view = None;
         let mut model_flat = None;
+        // The own layer of every INSERT a model leaf is reached through, so a freeze on an INSERT's
+        // layer takes its whole block with it inside that viewport, as the view pass does for a
+        // frozen layer (P-3).
+        let mut insert_layers: BTreeMap<u64, String> = BTreeMap::new();
         if !drawn.is_empty() {
+            if cancel.is_cancelled() {
+                return Err(PvecConvertError::Cancelled);
+            }
             let model = layouts
                 .iter()
                 .find(|l| l.kind == LayoutKind::Model)
@@ -895,6 +902,42 @@ impl<'a> PvecConversion<'a> {
                     )
                     .map_err(PvecConvertError::Flatten)?,
             );
+            if drawn
+                .iter()
+                .any(|&k| !windows[k].0.frozen_layers.is_empty())
+                && let Some(mf) = &model_flat
+            {
+                // Each scope an INSERT of some leaf's path sits in is read once.
+                let mut read: BTreeSet<String> = BTreeSet::new();
+                for f in &mf.entities {
+                    let steps = f.entity.provenance.block_path.steps();
+                    let mut via_path = crate::pvec::InstancePath::root();
+                    for (i, step) in steps.iter().enumerate() {
+                        let scope = if i == 0 {
+                            EntityScope::Layout(model.id)
+                        } else {
+                            EntityScope::BlockDefinition {
+                                name: steps[i - 1].block_name.clone(),
+                                reached_via: via_path.clone(),
+                            }
+                        };
+                        if read.insert(via_path.to_string()) {
+                            let entities = provider
+                                .entities(&scope)
+                                .and_then(|mut c| c.collect_all())
+                                .map_err(|e| PvecConvertError::View(e.into()))?;
+                            for e in entities {
+                                if let (RawGeometry::Insert(_), Some(h)) =
+                                    (&e.geometry, e.provenance.handle)
+                                {
+                                    insert_layers.insert(h.get(), e.provenance.layer);
+                                }
+                            }
+                        }
+                        via_path = via_path.child(step.block_name.clone(), step.insert_handle);
+                    }
+                }
+            }
         }
         // The effective layer of each kept model leaf, which a viewport freeze is matched against.
         let model_layers: BTreeMap<(Option<u64>, String, String), String> = model_view
@@ -906,28 +949,23 @@ impl<'a> PvecConversion<'a> {
                     .collect()
             })
             .unwrap_or_default();
-        let composed: Vec<(usize, FlatEntity)> = match &model_flat {
-            Some(mf) => drawn
-                .iter()
-                .flat_map(|&k| {
-                    let Window::Drawn { map, .. } = windows[k].1 else {
-                        unreachable!("only drawn windows are listed")
-                    };
-                    mf.entities
-                        .iter()
-                        .filter(|f| model_layers.contains_key(&flat_key(f)))
-                        .map(move |f| (k, f.through(map)))
-                })
-                .collect(),
-            None => Vec::new(),
-        };
         // Where each item draws: the paper itself, or through window k. The rank puts what the
-        // viewports show under the sheet's own entities when `draw_viewports_first` says so.
+        // viewports show under the sheet's own entities when `draw_viewports_first` says so. A
+        // model leaf is listed once per drawn viewport and its map is composed only when it is
+        // classified, so nothing is copied per viewport up front.
         let paper_rank = if first { u32::MAX } else { 0 };
         let mut via: Vec<(u32, Option<usize>)> = vec![(paper_rank, None); items.len()];
-        for (k, f) in &composed {
-            items.push(Item::Leaf(f));
-            via.push((u32::try_from(*k).unwrap_or(u32::MAX - 2) + 1, Some(*k)));
+        if let Some(mf) = &model_flat {
+            for &k in &drawn {
+                for f in mf
+                    .entities
+                    .iter()
+                    .filter(|f| model_layers.contains_key(&flat_key(f)))
+                {
+                    items.push(Item::Leaf(f));
+                    via.push((u32::try_from(k).unwrap_or(u32::MAX - 2) + 1, Some(k)));
+                }
+            }
         }
         let once = u32::try_from(windows.len()).unwrap_or(u32::MAX - 2) + 1;
         if let (Some(mv), Some(mf)) = (&model_view, &model_flat) {
@@ -1090,10 +1128,23 @@ impl<'a> PvecConversion<'a> {
                     failure = Some(PvecConvertError::Cancelled);
                     break;
                 }
+                let window = via[at].1;
+                // A model leaf drawn through a viewport gets the viewport's map composed onto its
+                // own here, the moment it is classified (#1563).
+                let lifted_leaf;
+                let lifted;
+                let item: &Item<'_> = match (window.map(|k| &windows[k].1), &items[at]) {
+                    (Some(Window::Drawn { map, .. }), Item::Leaf(f)) => {
+                        lifted_leaf = f.through(*map);
+                        lifted = Item::Leaf(&lifted_leaf);
+                        &lifted
+                    }
+                    _ => &items[at],
+                };
                 // A leaf is classified where it sits; an excluded or skipped one has no entity of
                 // its own, so its stand-in is made for the moment it is classified.
                 let stand_in;
-                let raw: &RawEntity = match &items[at] {
+                let raw: &RawEntity = match item {
                     Item::Leaf(f) => &f.entity,
                     Item::Excluded(x) => {
                         stand_in = stub(
@@ -1116,25 +1167,20 @@ impl<'a> PvecConversion<'a> {
                         &stand_in
                     }
                 };
-                let mut done = match classify_item(
-                    &items[at],
-                    raw,
-                    gate,
-                    via[at].1.map(|k| windows[k].0.handle),
-                ) {
-                    Ok(done) => done,
-                    Err(e) => {
-                        failure = Some(e);
-                        break;
-                    }
-                };
-                let window = via[at].1;
+                let mut done =
+                    match classify_item(item, raw, gate, window.map(|k| windows[k].0.handle)) {
+                        Ok(done) => done,
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                    };
                 // A VIEWPORT on the sheet is a window, not geometry of its own (#1563): its row
                 // says what the window did, and one the print profile cannot map is refused with
                 // 508. A viewport entity the provider reports nothing about cannot be placed.
                 if sheet.is_some()
                     && window.is_none()
-                    && matches!(items[at], Item::Leaf(_))
+                    && matches!(item, Item::Leaf(_))
                     && raw.provenance.class_name == "VIEWPORT"
                 {
                     let decided = raw
@@ -1160,9 +1206,14 @@ impl<'a> PvecConversion<'a> {
                                 ],
                             )
                         }
-                        Some((_, Window::Paper)) => {
-                            space("the sheet's own paper view, not a window onto the model")
-                        }
+                        // The paper view keeps its row, under its own code.
+                        Some((_, Window::Paper)) => without_geometry(
+                            Classification::ignored_by_policy("space", "VIEWPORT"),
+                            vec![
+                                "PAPER_VIEW: the sheet's own paper view, not a window onto the model"
+                                    .to_owned(),
+                            ],
+                        ),
                         Some((_, Window::Dropped(why))) => {
                             space(&format!("contributes nothing to a print ({why})"))
                         }
@@ -1178,13 +1229,29 @@ impl<'a> PvecConversion<'a> {
                 // P-3: a layer frozen in a viewport is dropped inside it, and drawn everywhere
                 // else.
                 let mut frozen_here = false;
-                if let (Some(k), Item::Leaf(f)) = (window, &items[at]) {
+                if let (Some(k), Item::Leaf(f)) = (window, item) {
                     let v = &windows[k].0;
-                    let frozen = model_layers.get(&flat_key(f)).is_some_and(|layer| {
+                    let cold = |layer: &str| {
                         v.frozen_layers
                             .iter()
                             .any(|l| l.eq_ignore_ascii_case(layer))
-                    });
+                    };
+                    // The leaf's own effective layer, or that of any INSERT it is reached
+                    // through: an INSERT on layer 0 takes its parent's (V1-2).
+                    let mut parent = "0";
+                    let mut through_cold = false;
+                    for step in f.entity.provenance.block_path.steps() {
+                        if let Some(own) = insert_layers.get(&step.insert_handle.get()) {
+                            if !own.eq_ignore_ascii_case("0") {
+                                parent = own;
+                            }
+                            through_cold |= cold(parent);
+                        }
+                    }
+                    let frozen = through_cold
+                        || model_layers
+                            .get(&flat_key(f))
+                            .is_some_and(|layer| cold(layer));
                     if frozen {
                         if view_profile.layers.frozen_in_viewport == ViewportFreezeRule::Apply {
                             frozen_here = true;
@@ -1348,13 +1415,13 @@ impl<'a> PvecConversion<'a> {
                 let mut stop = false;
                 for done in std::iter::once(done).chain(more) {
                     let mut diagnostic =
-                        entity_diagnostic(&items[at], raw, &done.classification, &layout.name);
+                        entity_diagnostic(item, raw, &done.classification, &layout.name);
                     if let Some(d) = &mut diagnostic {
                         d.source = Some(source_name.clone());
                     }
                     let id = EntityId::at(next_id);
                     next_id += 1;
-                    if let (Some(rules), Item::Leaf(f), true) = (&rules, &items[at], whole) {
+                    if let (Some(rules), Item::Leaf(f), true) = (&rules, item, whole) {
                         match &raw.geometry {
                             RawGeometry::Line { start, end }
                                 if done.geometry.geometry().is_some()
@@ -1458,7 +1525,6 @@ impl<'a> PvecConversion<'a> {
             {
                 s.summary.clip.insert(key.to_owned(), n);
             }
-            let text = |v: f64| format!("{v}");
             s.summary.viewports = windows
                 .iter()
                 .zip(&through)
@@ -1470,7 +1536,7 @@ impl<'a> PvecConversion<'a> {
                         Window::Drawn { .. } => ("drawn", None),
                     };
                     let rect = match w {
-                        Window::Drawn { rect, .. } => Some(rect.map(text)),
+                        Window::Drawn { rect, .. } => Some(rect.map(|v| format!("{v}"))),
                         _ => None,
                     };
                     SheetViewport {
