@@ -5,9 +5,10 @@
 //! centre + s * (model - target - view centre)` with `s = height / view height`, composed onto
 //! each leaf's flatten map. What it shows is cut to its rectangle by the sheet's clipper, the
 //! layers it freezes are dropped inside it, and a model entity seen through two viewports is two
-//! entities with provenance kind 2 (source handle then viewport handle). A viewport that is off,
-//! hidden when plotting or on a no-plot layer contributes nothing; a non-plan, perspective,
-//! zero-height, twisted or non-rectangular one is refused with 508. The paper view itself (id 1,
+//! entities with provenance kind 2 (source handle then viewport handle). A viewport that is off or
+//! hidden when plotting contributes nothing, and one on a no-plot layer draws what it shows with
+//! only its border hidden (#1577); a non-plan, perspective, zero-height, twisted or
+//! non-rectangular one is refused with 508. The paper view itself (id 1,
 //! showing paper space 1:1 centred on itself, as AutoCAD writes it) is not a window onto the model.
 //!
 //! Most of it runs on a hand-built provider so the maps and the cuts are pinned exactly; the rest
@@ -312,7 +313,16 @@ fn viewports() -> Vec<ViewportEntity> {
     let mut round = elsewhere(ROUND, 11);
     round.clip = ViewportClip::Circle(ItemHandle::new(0x99));
     round.non_rectangular_clipping = true;
-    let mut no_plot = elsewhere(NO_PLOT_VP, 12);
+    // On Defpoints, as sheets often put them: it shows model x 3..7, y 3.5..6.5 at 10 paper
+    // units per model unit (#1577).
+    let mut no_plot = vp(
+        NO_PLOT_VP,
+        12,
+        [210.0, 250.0],
+        [40.0, 30.0],
+        [5.0, 5.0],
+        3.0,
+    );
     no_plot.layer = "Defpoints".into();
     let mut targeted = elsewhere(TARGETED, 13);
     targeted.view_target = [1.0, 1.0, 0.0];
@@ -596,7 +606,8 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     assert_eq!(status(VP_B), ("drawn", None));
     assert_eq!(status(HIDDEN), ("hide-plot", None));
     assert_eq!(status(OFF), ("off", None));
-    assert_eq!(status(NO_PLOT_VP), ("no-plot-layer", None));
+    // A no-plot layer hides only the viewport's border (#1577).
+    assert_eq!(status(NO_PLOT_VP), ("drawn", None));
     assert_eq!(status(TWISTED), ("refused", Some("twist")));
     assert_eq!(status(PERSPECTIVE), ("refused", Some("perspective")));
     assert_eq!(status(SIDE_VIEW), ("refused", Some("non-plan")));
@@ -622,6 +633,35 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     );
     // A viewport that is drawn is not refused any more.
     assert_ne!(row(&report, VP_A, None).fidelity, "Unsupported");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1577_a_viewport_on_a_no_plot_layer_draws_what_it_shows_and_hides_its_border() {
+    let (out, dir) = convert("noplot", drawing(false), |c| c);
+    let report = out.expect("the sheet converts").report;
+    let r = sheet_row(&report, NO_PLOT_VP);
+    assert_eq!(r.status, "drawn", "{r:?}");
+    assert_eq!(r.border.as_deref(), Some("no-plot-layer"), "{r:?}");
+    assert_eq!(r.scale.as_deref(), Some("1:0.1"));
+    assert!(r.entities > 0, "{r:?}");
+    // A viewport on a plottable layer says nothing about its border.
+    assert_eq!(sheet_row(&report, VP_A).border, None);
+    // SHORT, x 2..8 at y 5, is cut at x 3 and 7: 210 + 10 * (x - 5), 250 + 10 * (y - 5).
+    assert!(near(
+        ends(&curve_of(&report, &dir, SHORT, NO_PLOT_VP)),
+        [[190.0, 250.0], [230.0, 250.0]]
+    ));
+    // The VIEWPORT entity itself is on Defpoints, so the no-plot rule takes it like any other
+    // entity there: no border is drawn.
+    let border = row(&report, NO_PLOT_VP, None);
+    assert_eq!(border.semantic_type, None, "{border:?}");
+    assert_eq!(
+        border.policy_field.as_deref(),
+        Some("layers.no_plot"),
+        "{border:?}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -686,9 +726,10 @@ fn issue_1563_draw_viewports_first_puts_what_they_show_under_the_sheet() {
 #[cfg_attr(miri, ignore)]
 fn issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note() {
     let mut mock = drawing(false);
-    mock.viewports.retain(|v| v.handle.get() != VP_B);
+    let gone = |h: u64| h == VP_B || h == NO_PLOT_VP;
+    mock.viewports.retain(|v| !gone(v.handle.get()));
     mock.paper
-        .retain(|e| e.provenance.handle != Some(ItemHandle::new(VP_B)));
+        .retain(|e| !e.provenance.handle.is_some_and(|h| gone(h.get())));
     let (out, dir) = convert("note", mock, |c| c);
     out.expect("the sheet converts");
     let claim = open_published(&dir.join("sheet.pvec"))

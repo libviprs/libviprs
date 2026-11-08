@@ -152,17 +152,26 @@ fn issue_1584_a_layer_frozen_in_one_viewport_is_dropped_there_and_drawn_in_the_o
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1584_hide_plot_and_no_plot_layer_viewports_draw_nothing_beside_one_that_plots() {
+fn issue_1584_a_hide_plot_viewport_draws_nothing_and_one_on_a_no_plot_layer_hides_only_its_border()
+{
     let (out, dir) = sheet("viewport-hide-plot-001");
     let report = out.expect("the sheet converts");
+    // Since #1577 a viewport on a no-plot layer still shows model space; only its border is not
+    // printed. hide_plot keeps the whole viewport off the print.
     assert_eq!(
         statuses(&report),
         [
             ("hide-plot", None, 0),
-            ("no-plot-layer", None, 0),
+            ("drawn", None, 1),
             ("drawn", None, 1)
         ]
     );
+    let borders: Vec<_> = summary(&report)
+        .viewports
+        .iter()
+        .map(|v| v.border.as_deref())
+        .collect();
+    assert_eq!(borders, [None, Some("no-plot-layer"), None]);
     let _ = fs::remove_dir_all(dir);
 }
 
