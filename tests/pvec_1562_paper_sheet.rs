@@ -20,7 +20,6 @@ use std::path::PathBuf;
 
 use libviprs::cad::{CadSource, ItemHandle};
 use libviprs::pvec::components::StreamSelection;
-use libviprs::pvec::diagnostics::DiagnosticCode;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::{ConversionReport, EntityRow};
 use libviprs::pvec::{
@@ -551,7 +550,7 @@ fn issue_1562_lines_and_polylines_are_cut_exactly_at_the_sheet_edge() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_refused_with_508() {
+fn issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_cut() {
     let (out, dir) = convert("curves", clipping_sheet(), |c| c);
     let report = out.unwrap().report;
     assert_eq!(row_of(&report, INSIDE_CIRCLE).fidelity, "SupportedExact");
@@ -566,18 +565,16 @@ fn issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_refused_with_5
             "{r:?}"
         );
     }
+    // A curve over the sheet edge is cut exactly since curve splitting landed (#1565): every
+    // piece is a row of its own, and none is refused.
     for h in [CROSSING_CIRCLE, BULGED] {
-        let r = row_of(&report, h);
-        assert_eq!(r.fidelity, "Unsupported", "{r:?}");
-        assert_eq!(r.reason.as_deref(), Some("view-not-enabled"));
-        assert!(r.warnings.iter().any(|w| w.contains("sheet edge")), "{r:?}");
-        let d = report
-            .diagnostics
-            .iter()
-            .find(|d| d.handle == Some(h))
-            .expect("a diagnostic");
-        assert_eq!(d.code, DiagnosticCode::EntityUnsupported);
-        assert_eq!(d.message_id, "view-not-enabled");
+        let rows = rows_of(&report, h);
+        assert!(!rows.is_empty(), "{h:#X}");
+        for r in rows {
+            assert_eq!(r.fidelity, "SupportedExact", "{r:?}");
+            assert_eq!(r.reason, None, "{r:?}");
+        }
+        assert!(report.diagnostics.iter().all(|d| d.handle != Some(h)));
     }
     let _ = fs::remove_dir_all(dir);
 }
