@@ -14,14 +14,17 @@
 //! | `viewport_clipping` | `viewport-clip-exact`, `viewport-clip-bounded` | unsupported |
 //! | `layers.off` | `layer-off` | exclude |
 //! | `layers.frozen` | `layer-frozen` | exclude |
+//! | `layers.no_plot` | `layer-no-plot` (print profile ADR) | ignore |
 //! | `layers.frozen_in_viewport` | `layer-frozen-in-viewport` | ignore and report |
 //! | `layers.insert_override` | `insert-layer-override` | layer "0" inherits the INSERT's layer |
 //! | `nested_inserts.max_depth` | `nested-insert` | 64, the decoder's own limit |
 //! | `xrefs` | `xref` | report as external |
 //!
 //! [`ViewProfile::knobs`] returns that table as data, and a test checks every row name against
-//! the spike document, so a knob without a row is a red test. Locked and no-plot layers are
-//! visible under V1-3 and have no knob.
+//! the spike document, so a knob without a row is a red test. Locked layers are visible under
+//! V1-3 and have no knob. No-plot layers are visible under V1-3 too; `layers.no_plot` is the
+//! knob [`ViewProfile::print_profile`] sets to exclude them (P-3 of
+//! `docs/adr/pvec-print-profile.md`).
 //!
 //! # Policy is applied here, not trusted
 //!
@@ -295,12 +298,29 @@ impl ViewProfile {
         }
     }
 
-    /// The print of one paper layout, `docs/adr/pvec-print-profile.md` (P-1 to P-9).
+    /// The print of one paper layout in monochrome, the rule of `docs/adr/pvec-print-profile.md`
+    /// (P-1 to P-9), spelled out field by field beside [`default_profile`](Self::default_profile).
+    ///
+    /// The layout's own entities and model space seen through its viewports, nothing drawn
+    /// outside a viewport or the sheet, no-plot layers excluded and viewport freezes applied. A
+    /// test pins every value. Until the sheet lands (#1562) [`apply`](Self::apply) refuses it with
+    /// [`ViewProfileError::PaperSpaceUnsupported`].
     #[must_use]
     pub fn print_profile(layout: impl Into<String>) -> Self {
-        let mut p = Self::default_profile();
-        p.space = SpaceSelection::PaperLayout(layout.into());
-        p
+        Self {
+            space: SpaceSelection::PaperLayout(layout.into()),
+            viewport_clipping: ViewportClipping::Exact,
+            layers: LayerVisibility {
+                off: LayerStateRule::Exclude,
+                frozen: LayerStateRule::Exclude,
+                no_plot: LayerStateRule::Exclude,
+                frozen_in_viewport: ViewportFreezeRule::Apply,
+                insert_override: InsertLayerRule::InheritOnLayerZero,
+            },
+            nested_inserts: NestedInsertPolicy { max_depth: 64 },
+            xrefs: XrefPolicy::ReportExternal,
+            limits: SourceLimits::default(),
+        }
     }
 
     /// This profile with `limits` as its resource ceilings.
@@ -345,6 +365,11 @@ impl ViewProfile {
                 field: "layers.frozen",
                 value: rule(self.layers.frozen).into(),
                 row: "layer-frozen",
+            },
+            Knob {
+                field: "layers.no_plot",
+                value: rule(self.layers.no_plot).into(),
+                row: "layer-no-plot",
             },
             Knob {
                 field: "layers.frozen_in_viewport",
@@ -407,8 +432,10 @@ impl ViewProfile {
     ///
     /// [`ViewProfileError::LayoutNotFound`] for a paper layout the drawing does not have,
     /// [`ViewProfileError::PaperSpaceUnsupported`] for one it does (v1 draws model space only),
-    /// [`ViewProfileError::NoModelSpace`], and [`ViewProfileError::Provider`] when the provider
-    /// fails or cannot report layer state while the profile acts on it.
+    /// [`ViewProfileError::NoModelSpace`], [`ViewProfileError::RuleNotEnabled`] for
+    /// `layers.no_plot = exclude` until the provider reports plottability, and
+    /// [`ViewProfileError::Provider`] when the provider fails or cannot report layer state while
+    /// the profile acts on it.
     pub fn apply<P: DwgProvider + ?Sized>(
         &self,
         provider: &P,
@@ -444,6 +471,14 @@ impl ViewProfile {
                 );
             }
         };
+
+        // P-3's no-plot rule needs the layer's plottable flag, which the provider boundary does
+        // not carry yet (#1560). Refused rather than drawn, so the knob never lies.
+        if self.layers.no_plot == LayerStateRule::Exclude {
+            return Err(ViewProfileError::RuleNotEnabled {
+                field: "layers.no_plot",
+            });
+        }
 
         let needs_layers = self.layers.off == LayerStateRule::Exclude
             || self.layers.frozen == LayerStateRule::Exclude;

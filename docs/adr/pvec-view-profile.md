@@ -58,6 +58,8 @@ All native x86_64 on MARS, JIT run of the decoder sources, ACadSharp 3.7.1, no a
   while the provider catches up (#1239, plus the provider traits of N4.1).
 - Paper space is a stated v1 non-goal. Anyone who wants it needs a new ADR and a viewport-clip
   measurement against AutoCAD, which does not exist yet.
+  That ADR is [pvec-print-profile.md](pvec-print-profile.md) (#1559): a second named profile for
+  a paper layout, which leaves V1-1 to V1-5 and the default profile as they are.
 
 ## Open items
 
