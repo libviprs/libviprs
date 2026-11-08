@@ -701,6 +701,17 @@ annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_the_plot_sca
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_the_sheet_frame_is_the_paper_placed_from_the_margins_and_origin
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_unknown_paper_units_fall_back_to_the_drawing_unit
 annotated   fs-detected  tests/pvec_1562_paper_sheet.rs::issue_1562_without_plot_settings_the_frame_is_the_extents_and_nothing_is_cut
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_a_cancelled_run_is_an_error_and_writes_no_index
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_a_destination_that_is_not_a_directory_is_refused_before_anything_is_written
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_a_drawing_that_does_not_open_is_an_error
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_a_drawing_whose_layouts_are_all_empty_still_writes_the_index
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_a_drawing_with_no_paper_layout_writes_nothing_and_does_not_fall_back_to_model_space
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_a_selected_layout_that_does_not_exist_is_an_error
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_an_empty_layout_is_skipped_and_listed_and_writes_no_file
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_each_sheet_is_named_by_its_tab_position_and_a_slug_of_its_name
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_one_failing_sheet_does_not_lose_the_others
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_the_number_is_as_wide_as_the_count_and_counts_every_paper_layout
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_the_stem_comes_from_the_file_name_and_bytes_need_one
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs
