@@ -340,8 +340,9 @@ pub struct SheetViewport {
     /// onto the model), `off`, `hide-plot`, `no-plot-layer`, or `refused`.
     pub status: String,
     /// Why a refused viewport is refused: `non-plan`, `perspective`, `view-height`, `twist`,
-    /// `target`, `clip-polygon`, `clip-circle`, `clip-ellipse`, `clip-spline`, `clip-other` or
-    /// `not-reported`.
+    /// `target`, `clip-bulge` (a polygon boundary with a bulged edge), `clip-polygon` (fewer than
+    /// three vertices, or one that is not finite), `clip-circle`, `clip-ellipse`, `clip-spline`,
+    /// `clip-other` or `not-reported`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// For a drawn viewport, its scale as `1:N`: one paper unit shows `N` model units.

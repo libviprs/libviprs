@@ -181,13 +181,15 @@ fn spline(handle: u64, weights: SourceFact<Vec<f64>>) -> RawEntity {
         "SPLINE",
         RawGeometry::Spline {
             degree: 3,
+            // Two knot spans, so it stays a B-spline (one span would be a Bezier).
             control_points: vec![
                 [6.0, 4.0, 0.0],
                 [8.0, 7.0, 0.0],
+                [11.0, 7.0, 0.0],
                 [12.0, 6.0, 0.0],
                 [13.0, 3.0, 0.0],
             ],
-            knots: SourceFact::Present(vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0]),
+            knots: SourceFact::Present(vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0, 2.0]),
             weights,
             periodic: SourceFact::Present(false),
             closed: false,
@@ -306,7 +308,7 @@ fn drawing() -> Mock {
             // Model x 8..12 crosses A's right edge at x 10.
             circle(EDGE_RING, [10.0, 5.0], 2.0),
             spline(SPLINE, SourceFact::Absent),
-            spline(RATIONAL, SourceFact::Present(vec![1.0, 0.5, 2.0, 1.0])),
+            spline(RATIONAL, SourceFact::Present(vec![1.0, 0.5, 2.0, 0.5, 1.0])),
             line(ACROSS, [-20.0, 5.0], [20.0, 5.0]),
             circle(RING, [5.0, 5.0], 3.0),
         ],
@@ -436,7 +438,7 @@ fn issue_1565_a_spline_over_a_viewport_edge_is_cut_as_a_sub_range_and_says_its_t
     let (out, dir) = convert("spline");
     let report = out.expect("the sheet converts").report;
     let cut = pieces(&report, &dir, SPLINE, Some(VP_A));
-    assert_eq!(cut.len(), 1, "{cut:#?}");
+    assert_eq!(cut.len(), 1, "{:#?}", rows(&report, SPLINE, Some(VP_A)));
     let (row, curve) = &cut[0];
     assert_eq!(row.fidelity, "SupportedEquivalent");
     assert!(matches!(curve, Curve::BSpline(_)), "{curve:?}");
@@ -498,10 +500,11 @@ fn issue_1565_a_viewport_clipped_to_a_polygon_draws_inside_the_polygon() {
     let [a, z] = ends(&line[0].1);
     assert!(close(a[0], 280.0) && close(a[1], 100.0), "{a:?}");
     assert!(close(z[0], 320.0) && close(z[1], 100.0), "{z:?}");
-    // The circle r 3 about the centre is paper r 30 about (300, 100), and the triangle cuts it
-    // on all three sides: three arcs, each starting and ending on the triangle.
+    // The circle r 3 about the centre is paper r 30 about (300, 100). It clears the base, and
+    // each slanted side cuts off a cap: two arcs are left, the bottom one and the top one through
+    // the apex, each starting and ending on the triangle.
     let ring = pieces(&report, &dir, RING, Some(VP_T));
-    assert_eq!(ring.len(), 3, "{ring:#?}");
+    assert_eq!(ring.len(), 2, "{ring:#?}");
     for (row, c) in &ring {
         assert_eq!(row.fidelity, "SupportedExact");
         for q in ends(c) {

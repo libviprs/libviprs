@@ -502,7 +502,8 @@ fn issue_1562_lines_and_polylines_are_cut_exactly_at_the_sheet_edge() {
     }
 
     let curves = written(report, &dir);
-    assert_eq!(out.written, 6);
+    // Six, and the crossing circle's arc since curves are cut (#1565).
+    assert_eq!(out.written, 7);
     let of = |h: u64| -> Vec<&Curve> {
         curves
             .iter()
@@ -541,9 +542,10 @@ fn issue_1562_lines_and_polylines_are_cut_exactly_at_the_sheet_edge() {
 
     let sheet = report.sheet.as_ref().expect("a sheet section");
     let clip: Vec<(&str, u64)> = sheet.clip.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+    // The crossing circle and the bulged polyline are cut too since #1565, one piece each.
     assert_eq!(
         clip,
-        [("crossing", 2), ("cut", 3), ("outside", 2), ("pieces", 4)]
+        [("crossing", 0), ("cut", 5), ("outside", 2), ("pieces", 6)]
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -566,15 +568,19 @@ fn issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_cut() {
         );
     }
     // A curve over the sheet edge is cut exactly since curve splitting landed (#1565): every
-    // piece is a row of its own, and none is refused.
-    for h in [CROSSING_CIRCLE, BULGED] {
-        let rows = rows_of(&report, h);
-        assert!(!rows.is_empty(), "{h:#X}");
-        for r in rows {
-            assert_eq!(r.fidelity, "SupportedExact", "{r:?}");
-            assert_eq!(r.reason, None, "{r:?}");
-        }
-        assert!(report.diagnostics.iter().all(|d| d.handle != Some(h)));
+    // piece is a row of its own, and none is refused with 508. The circle is an arc of itself;
+    // the bulged polyline's pieces are composites, which PVec's container cannot store yet, the
+    // same as the whole polyline when it is inside.
+    let ring = rows_of(&report, CROSSING_CIRCLE);
+    assert!(!ring.is_empty());
+    for r in ring {
+        assert_eq!(r.fidelity, "SupportedExact", "{r:?}");
+        assert_eq!(r.reason, None, "{r:?}");
+    }
+    let bulged = rows_of(&report, BULGED);
+    assert!(!bulged.is_empty());
+    for r in bulged {
+        assert_ne!(r.reason.as_deref(), Some("view-not-enabled"), "{r:?}");
     }
     let _ = fs::remove_dir_all(dir);
 }

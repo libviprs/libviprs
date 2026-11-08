@@ -46,11 +46,13 @@ a red test and a new ADR.
   `sheet: extents`.
 - **P-7 Clipping.** Nothing is drawn outside its viewport or outside the sheet
   (`viewport_clipping = exact`). Lines and polylines are split exactly against the rectangle.
-  Until slice 6 a curve wholly inside is kept, one wholly outside is dropped as `OutsideViewport`,
-  and one that crosses is dropped and counted `Unsupported` with a per-entity 508. Slice 6 splits
-  circles, arcs and ellipses by parameter interval (`SupportedExact`) and splines by knot insertion
-  (`SupportedEquivalent`, with the parameter tolerance reported). Nothing is ever tessellated and
-  there is no pvec clip capability.
+  A curve wholly inside is kept and one wholly outside is dropped as `OutsideViewport`. Since
+  slice 6 (#1565) one that crosses is split: circles, arcs and ellipses by parameter interval
+  (`SupportedExact`) and splines by knot insertion (`SupportedEquivalent`, with the parameter
+  tolerance in the row), and a viewport clipped to a straight-edged polygon is cut by the
+  polygon, then the sheet. A rational spline that crosses is still dropped and counted
+  `Unsupported` with a per-entity 508, and so is a viewport whose boundary has a bulge or is a
+  circle, ellipse or spline. Nothing is ever tessellated and there is no pvec clip capability.
 - **P-8 Monochrome.** monochrome.ctb semantics: every visible stroke is black, no screening,
   colours 7 and 255 black, object lineweight kept in the style stream. `print_lineweights = false`
   drops widths and is reported. `scale_lineweights`, `plot_plot_styles` and the named
@@ -94,8 +96,8 @@ itself, as AutoCAD writes it) is not a window onto the model.
 
 [pvec-unsupported-policy.md](pvec-unsupported-policy.md) is amended to match: paper space is no
 longer `Unsupported` as a whole. `VIEW_NOT_ENABLED` (508) stays, per viewport (a non-plan view
-direction, perspective, `view_height <= 0`, a polygon clip until slice 6, a twist until its sign is
-measured) and per entity (a curve crossing a clip until slice 6).
+direction, perspective, `view_height <= 0`, a clip boundary with a bulge or a curve, a twist until
+its sign is measured) and per entity (a rational spline crossing a clip).
 
 Rejected: amending V1-1 and V1-3 in place (every caller of the default profile would change
 behaviour); one profile with a `space` switch that flips the rules (the rules are the profile); a

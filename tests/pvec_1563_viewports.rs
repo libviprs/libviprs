@@ -685,9 +685,14 @@ fn issue_1563_draw_viewports_first_puts_what_they_show_under_the_sheet() {
 #[cfg_attr(miri, ignore)]
 fn issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note() {
     let mut mock = drawing(false);
-    mock.viewports.retain(|v| v.handle.get() != VP_B);
-    mock.paper
-        .retain(|e| e.provenance.handle != Some(ItemHandle::new(VP_B)));
+    // B, and the polygon viewport, which is drawn since #1565.
+    mock.viewports
+        .retain(|v| ![VP_B, POLYGON].contains(&v.handle.get()));
+    mock.paper.retain(|e| {
+        ![VP_B, POLYGON]
+            .iter()
+            .any(|h| e.provenance.handle == Some(ItemHandle::new(*h)))
+    });
     let (out, dir) = convert("note", mock, |c| c);
     out.expect("the sheet converts");
     let claim = open_published(&dir.join("sheet.pvec"))
