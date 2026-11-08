@@ -1,0 +1,2 @@
+# The DXF twins are byte-exact fixtures written with CRLF line ends; keep git from touching them.
+*.dxf -text

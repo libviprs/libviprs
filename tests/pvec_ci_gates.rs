@@ -205,15 +205,23 @@ fn n2_8_1060_the_baselines_are_checked_in_sorted_with_one_line_per_accepted_fixt
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
     let index: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.join("pvec-gold/index.json")).unwrap()).unwrap();
-    let mut want: Vec<&str> = index["fixtures"]
+    let mut want: Vec<String> = index["fixtures"]
         .as_array()
         .unwrap()
         .iter()
         .filter(|f| f["evidence_class"] != "QUARANTINED")
-        .map(|f| f["id"].as_str().unwrap())
+        .map(|f| f["id"].as_str().unwrap().to_owned())
         .collect();
-    want.sort_unstable();
     assert!(want.len() >= 30, "the corpus slice is not empty");
+    // The DXF twins of #1561 have a row each too, named by their file.
+    want.extend(
+        std::fs::read_dir(dir.join("pvec-dxf"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".dxf")),
+    );
+    want.sort_unstable();
     for name in ["classification", "view-decisions", "determinism"] {
         let text = std::fs::read_to_string(dir.join(format!("pvec-gate/{name}.baseline")))
             .unwrap_or_else(|e| panic!("{name}.baseline is not checked in: {e}"));
