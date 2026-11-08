@@ -882,7 +882,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1577 adds 1: `tests/pvec_1563_viewports.rs::issue_1577_a_viewport_on_a_no_plot_layer_draws_what_it_shows_and_hides_its_border`, which converts a sheet into a temp dir. It said 1107 before this line moved.
 /// #1580 adds 2: the `tests/pvec_1563_viewports.rs` cells that convert a sheet against a tight entity limit into a temp dir. It said 1108 before this line moved.
 /// #1581 adds 1: `tests/pvec_1563_viewports.rs::issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_is_inserted`, which converts a sheet into a temp dir. It said 1110 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1111;
+/// #1578 adds 3: the two `tests/pvec_1578_pdf_page_to_pvec.rs` cells that read `blueprint-mix.pdf`, and `tests/pvec_api_surface.rs::pvec_container_is_optional_and_named_by_its_one_file`, which reads the manifest. It said 1111 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1114;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

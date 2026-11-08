@@ -32,6 +32,7 @@ fn blueprint_mix() -> Option<PathBuf> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn blueprint_mix_bytes_match_the_mapping_the_server_had() {
     let Some(path) = blueprint_mix() else { return };
     let page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
@@ -41,6 +42,7 @@ fn blueprint_mix_bytes_match_the_mapping_the_server_had() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_page_with_nothing_painted_is_refused_with_the_servers_message() {
     let Some(path) = blueprint_mix() else { return };
     let mut page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
