@@ -111,7 +111,7 @@ fn probe_answers_from_the_version_stamp_alone() {
     assert!(AcadrustProvider::probe(CadSource::Path(&p)).unwrap());
     assert!(AcadrustProvider::probe(CadSource::Bytes(b"AC1032\0\0\0\0")).unwrap());
     assert!(!AcadrustProvider::probe(CadSource::Bytes(b"AC1009\0\0\0\0")).unwrap());
-    assert!(!AcadrustProvider::probe(CadSource::Bytes(b"  0\nSECTION\n")).unwrap());
+    // A DXF header probes true since #1561; `pvec_1561_dxf` covers the DXF sniff.
     assert!(!AcadrustProvider::probe(CadSource::Bytes(b"")).unwrap());
 }
 
