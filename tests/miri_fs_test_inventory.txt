@@ -1008,6 +1008,8 @@ annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_one_model_enti
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_what_a_viewport_shows_is_cut_exactly_at_its_rectangle
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1577_a_viewport_on_a_no_plot_layer_draws_what_it_shows_and_hides_its_border
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1580_a_sheet_at_the_entity_limit_still_converts
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1580_viewports_times_model_entities_count_against_the_entity_limit
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_2d_solid_is_filled_in_its_visible_vertex_order
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_fill_across_four_tiles_is_closed_and_inside_each_tile
 annotated   not-detected tests/vector_1034_acadrust_fill.rs::a_fill_too_heavy_to_nest_is_drawn_ring_by_ring_and_counted
