@@ -65,17 +65,20 @@ pub enum PolicyReason {
     NotInSelectedLayout,
     /// The clipping stage reported it outside its viewport.
     OutsideViewport,
+    /// A VIEWPORT that is the sheet's own paper view, not a window onto the model (#1563, #1582).
+    PaperView,
 }
 
 impl PolicyReason {
     /// Every reason, in evaluation order.
-    pub const ALL: [PolicyReason; 6] = [
+    pub const ALL: [PolicyReason; 7] = [
         PolicyReason::NotInSelectedLayout,
         PolicyReason::LayerOff,
         PolicyReason::LayerFrozen,
         PolicyReason::ViewportFrozen,
         PolicyReason::EntityInvisible,
         PolicyReason::OutsideViewport,
+        PolicyReason::PaperView,
     ];
 
     /// The view-profile field responsible, as [`ViewProfile::knobs`] spells it.
@@ -86,7 +89,9 @@ impl PolicyReason {
             PolicyReason::LayerFrozen => "layers.frozen",
             PolicyReason::ViewportFrozen => "layers.frozen_in_viewport",
             PolicyReason::EntityInvisible => "entity.visible",
-            PolicyReason::NotInSelectedLayout | PolicyReason::OutsideViewport => "space",
+            PolicyReason::NotInSelectedLayout
+            | PolicyReason::OutsideViewport
+            | PolicyReason::PaperView => "space",
         }
     }
 
@@ -101,6 +106,7 @@ impl PolicyReason {
             PolicyReason::EntityInvisible => "ENTITY_INVISIBLE",
             PolicyReason::NotInSelectedLayout => "NOT_IN_SELECTED_LAYOUT",
             PolicyReason::OutsideViewport => "OUTSIDE_VIEWPORT",
+            PolicyReason::PaperView => "PAPER_VIEW",
         }
     }
 

@@ -1210,11 +1210,14 @@ impl<'a> PvecConversion<'a> {
                         }
                         // The paper view keeps its row, under its own code.
                         Some((_, Window::Paper)) => without_geometry(
-                            Classification::ignored_by_policy("space", "VIEWPORT"),
-                            vec![
-                                "PAPER_VIEW: the sheet's own paper view, not a window onto the model"
-                                    .to_owned(),
-                            ],
+                            Classification::ignored_by_policy(
+                                PolicyReason::PaperView.field(),
+                                "VIEWPORT",
+                            ),
+                            vec![format!(
+                                "{}: the sheet's own paper view, not a window onto the model",
+                                PolicyReason::PaperView.code()
+                            )],
                         ),
                         Some((_, Window::Dropped(why))) => {
                             space(&format!("contributes nothing to a print ({why})"))
