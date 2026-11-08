@@ -272,6 +272,8 @@ const RATIONAL: u64 = 0x42;
 const ACROSS: u64 = 0x43;
 const RING: u64 = 0x44;
 const PAPER_RING: u64 = 0x45;
+const RATIONAL_IN: u64 = 0x46;
+const CORNER_DOT: u64 = 0x47;
 
 /// The triangle T is clipped to, in paper units: its apex is above A's centre.
 const TRIANGLE: [[f64; 2]; 3] = [[260.0, 60.0], [340.0, 60.0], [300.0, 140.0]];
@@ -311,6 +313,26 @@ fn drawing() -> Mock {
             spline(RATIONAL, SourceFact::Present(vec![1.0, 0.5, 2.0, 0.5, 1.0])),
             line(ACROSS, [-20.0, 5.0], [20.0, 5.0]),
             circle(RING, [5.0, 5.0], 3.0),
+            // Paper (295..305, 90..100) through T, well inside the triangle.
+            ent(
+                RATIONAL_IN,
+                "SPLINE",
+                RawGeometry::Spline {
+                    degree: 2,
+                    control_points: vec![
+                        [4.5, 4.0, 0.0],
+                        [5.0, 5.0, 0.0],
+                        [5.5, 4.0, 0.0],
+                        [5.5, 4.5, 0.0],
+                    ],
+                    knots: SourceFact::Present(vec![0.0, 0.0, 0.0, 1.0, 2.0, 2.0, 2.0]),
+                    weights: SourceFact::Present(vec![1.0, 0.5, 1.0, 1.0]),
+                    periodic: SourceFact::Present(false),
+                    closed: false,
+                },
+            ),
+            // Paper (265, 130) r 2 through T: inside the triangle's box, outside the triangle.
+            circle(CORNER_DOT, [1.5, 8.0], 0.2),
         ],
         viewports,
     }
@@ -585,5 +607,23 @@ fn issue_1565_viewport_clipped_001_draws_its_line_cut_at_the_clip_polygon() {
     // The probe's line is SupportedEquivalent in model space already
     // (tests/fixtures/pvec-gate/classification.baseline), and a straight cut keeps its class.
     assert_eq!(line[0].0.fidelity, "SupportedEquivalent");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1565_a_polygon_keeps_what_is_inside_it_and_drops_what_is_only_inside_its_box() {
+    let (out, dir) = convert("polygon-whole");
+    let report = out.expect("the sheet converts").report;
+    // A rational spline wholly inside is kept whole, even though it could not be cut.
+    let inside = rows(&report, RATIONAL_IN, Some(VP_T));
+    assert_eq!(inside.len(), 1, "{inside:#?}");
+    assert_ne!(inside[0].fidelity, "Unsupported", "{:?}", inside[0]);
+    assert!(inside[0].semantic_type.is_some(), "{:?}", inside[0]);
+    // A circle inside the triangle's box but outside the triangle is dropped as outside.
+    let corner = rows(&report, CORNER_DOT, Some(VP_T));
+    assert_eq!(corner.len(), 1, "{corner:#?}");
+    assert_eq!(corner[0].fidelity, "IgnoredByPolicy", "{:?}", corner[0]);
+    assert_eq!(corner[0].policy_field.as_deref(), Some("viewport_clipping"));
     let _ = fs::remove_dir_all(dir);
 }

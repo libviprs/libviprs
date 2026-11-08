@@ -580,7 +580,8 @@ fn issue_1562_curves_inside_are_kept_outside_dropped_and_crossing_cut() {
     let bulged = rows_of(&report, BULGED);
     assert!(!bulged.is_empty());
     for r in bulged {
-        assert_ne!(r.reason.as_deref(), Some("view-not-enabled"), "{r:?}");
+        assert_eq!(r.fidelity, "RequiresPVecCapability", "{r:?}");
+        assert_eq!(r.reason.as_deref(), Some("pvec-cannot-store"), "{r:?}");
     }
     let _ = fs::remove_dir_all(dir);
 }
