@@ -734,6 +734,140 @@ pub fn extract_page_paths_from_bytes(
     let resources = inherited_resources(&doc, page_id)?;
     run.stream(&ops, resources, base, 0)?;
 
+    /// The `/VP` array of a page (issue #1547), at most 64 viewports, each `/BBox` mapped by `base`
+    /// into page space. A viewport with no usable `/BBox` is skipped; a measure that cannot be read is
+    /// kept as [`PdfMeasure::Unread`], so the report can say so.
+    fn read_viewports(doc: &Document, page_id: lopdf::ObjectId, base: &Matrix) -> Vec<PdfViewport> {
+        fn deref<'a>(doc: &'a Document, o: &'a Object) -> Option<&'a Object> {
+            doc.dereference(o).ok().map(|(_, o)| o)
+        }
+        let numbers = |o: &Object| -> Option<Vec<f64>> {
+            deref(doc, o)?
+                .as_array()
+                .ok()?
+                .iter()
+                .map(|v| deref(doc, v).and_then(number))
+                .collect()
+        };
+        let text = |d: &Dictionary, key: &[u8]| {
+            d.get(key)
+                .ok()
+                .and_then(|o| deref(doc, o))
+                .and_then(|o| lopdf::decode_text_string(o).ok())
+        };
+        let Some(vps) = doc
+            .get_dictionary(page_id)
+            .ok()
+            .and_then(|d| d.get(b"VP").ok())
+            .and_then(|o| deref(doc, o))
+            .and_then(|o| o.as_array().ok())
+        else {
+            return Vec::new();
+        };
+        let format = |d: &Dictionary, key: &[u8]| -> Option<PdfNumberFormat> {
+            let first = deref(doc, d.get(key).ok()?)?.as_array().ok()?.first()?;
+            let f = deref(doc, first)?.as_dict().ok()?;
+            Some(PdfNumberFormat {
+                unit: text(f, b"U")?,
+                factor: number(deref(doc, f.get(b"C").ok()?)?)?,
+            })
+        };
+        let measure = |m: &Dictionary, [x0, y0, x1, y1]: [f64; 4]| -> PdfMeasure {
+            let subtype = m
+                .get(b"Subtype")
+                .ok()
+                .and_then(|o| o.as_name().ok())
+                .map(|n| String::from_utf8_lossy(n).into_owned())
+                .unwrap_or_default();
+            let unread = |detail: &str| PdfMeasure::Unread {
+                subtype: subtype.clone(),
+                detail: detail.to_owned(),
+            };
+            match subtype.as_str() {
+                "RL" => PdfMeasure::Rl {
+                    ratio: text(m, b"R").unwrap_or_default(),
+                    x: format(m, b"X"),
+                    y: format(m, b"Y"),
+                },
+                "GEO" => {
+                    let pairs = |key: &[u8]| m.get(key).ok().and_then(numbers);
+                    let Some(gpts) = pairs(b"GPTS") else {
+                        return unread("no /GPTS array of numbers");
+                    };
+                    let unit = pairs(b"LPTS")
+                        .or_else(|| pairs(b"Bounds"))
+                        .unwrap_or_else(|| vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]);
+                    if gpts.len() != unit.len() || gpts.len() % 2 != 0 || gpts.len() > 2 * 1024 {
+                        return unread(
+                            "/GPTS and /LPTS are not the same number of pairs, up to 1024",
+                        );
+                    }
+                    let Some(gcs) = m
+                        .get(b"GCS")
+                        .ok()
+                        .and_then(|o| deref(doc, o))
+                        .and_then(|o| o.as_dict().ok())
+                    else {
+                        return unread("no /GCS dictionary");
+                    };
+                    PdfMeasure::Geo {
+                        local: unit
+                            .as_chunks::<2>()
+                            .0
+                            .iter()
+                            .map(|p| base.apply([x0 + p[0] * (x1 - x0), y0 + p[1] * (y1 - y0)]))
+                            .collect(),
+                        geographic: gpts.as_chunks::<2>().0.to_vec(),
+                        gcs: PdfGcs {
+                            projected: gcs.get(b"Type").ok().and_then(|o| o.as_name().ok())
+                                == Some(b"PROJCS".as_slice()),
+                            epsg: gcs
+                                .get(b"EPSG")
+                                .ok()
+                                .and_then(|o| deref(doc, o))
+                                .and_then(|o| o.as_i64().ok()),
+                            wkt: text(gcs, b"WKT"),
+                        },
+                    }
+                }
+                _ => unread("a measure subtype this reader does not take"),
+            }
+        };
+        vps.iter()
+            .take(64)
+            .filter_map(|vp| {
+                let d = deref(doc, vp)?.as_dict().ok()?;
+                let b = numbers(d.get(b"BBox").ok()?)?;
+                let &[ax, ay, bx, by] = b.as_slice() else {
+                    return None;
+                };
+                let user = [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)];
+                if !user.iter().all(|v| v.is_finite()) {
+                    return None;
+                }
+                let (p, q) = (
+                    base.apply([user[0], user[1]]),
+                    base.apply([user[2], user[3]]),
+                );
+                Some(PdfViewport {
+                    bbox: [
+                        p[0].min(q[0]),
+                        p[1].min(q[1]),
+                        p[0].max(q[0]),
+                        p[1].max(q[1]),
+                    ],
+                    name: text(d, b"Name"),
+                    measure: d
+                        .get(b"Measure")
+                        .ok()
+                        .and_then(|o| deref(doc, o))
+                        .and_then(|o| o.as_dict().ok())
+                        .map(|m| measure(m, user)),
+                })
+            })
+            .collect()
+    }
+
     Ok(PdfVectorPage {
         page,
         width,
@@ -755,138 +889,6 @@ pub fn extract_page_paths_from_bytes(
             .and_then(number)
             .unwrap_or(1.0),
     })
-}
-
-/// The `/VP` array of a page (issue #1547), at most 64 viewports, each `/BBox` mapped by `base`
-/// into page space. A viewport with no usable `/BBox` is skipped; a measure that cannot be read is
-/// kept as [`PdfMeasure::Unread`], so the report can say so.
-fn read_viewports(doc: &Document, page_id: lopdf::ObjectId, base: &Matrix) -> Vec<PdfViewport> {
-    fn deref<'a>(doc: &'a Document, o: &'a Object) -> Option<&'a Object> {
-        doc.dereference(o).ok().map(|(_, o)| o)
-    }
-    let numbers = |o: &Object| -> Option<Vec<f64>> {
-        deref(doc, o)?
-            .as_array()
-            .ok()?
-            .iter()
-            .map(|v| deref(doc, v).and_then(number))
-            .collect()
-    };
-    let text = |d: &Dictionary, key: &[u8]| {
-        d.get(key)
-            .ok()
-            .and_then(|o| deref(doc, o))
-            .and_then(|o| lopdf::decode_text_string(o).ok())
-    };
-    let Some(vps) = doc
-        .get_dictionary(page_id)
-        .ok()
-        .and_then(|d| d.get(b"VP").ok())
-        .and_then(|o| deref(doc, o))
-        .and_then(|o| o.as_array().ok())
-    else {
-        return Vec::new();
-    };
-    let format = |d: &Dictionary, key: &[u8]| -> Option<PdfNumberFormat> {
-        let first = deref(doc, d.get(key).ok()?)?.as_array().ok()?.first()?;
-        let f = deref(doc, first)?.as_dict().ok()?;
-        Some(PdfNumberFormat {
-            unit: text(f, b"U")?,
-            factor: number(deref(doc, f.get(b"C").ok()?)?)?,
-        })
-    };
-    let measure = |m: &Dictionary, [x0, y0, x1, y1]: [f64; 4]| -> PdfMeasure {
-        let subtype = m
-            .get(b"Subtype")
-            .ok()
-            .and_then(|o| o.as_name().ok())
-            .map(|n| String::from_utf8_lossy(n).into_owned())
-            .unwrap_or_default();
-        let unread = |detail: &str| PdfMeasure::Unread {
-            subtype: subtype.clone(),
-            detail: detail.to_owned(),
-        };
-        match subtype.as_str() {
-            "RL" => PdfMeasure::Rl {
-                ratio: text(m, b"R").unwrap_or_default(),
-                x: format(m, b"X"),
-                y: format(m, b"Y"),
-            },
-            "GEO" => {
-                let pairs = |key: &[u8]| m.get(key).ok().and_then(numbers);
-                let Some(gpts) = pairs(b"GPTS") else {
-                    return unread("no /GPTS array of numbers");
-                };
-                let unit = pairs(b"LPTS")
-                    .or_else(|| pairs(b"Bounds"))
-                    .unwrap_or_else(|| vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 0.0]);
-                if gpts.len() != unit.len() || gpts.len() % 2 != 0 || gpts.len() > 2 * 1024 {
-                    return unread("/GPTS and /LPTS are not the same number of pairs, up to 1024");
-                }
-                let Some(gcs) = m
-                    .get(b"GCS")
-                    .ok()
-                    .and_then(|o| deref(doc, o))
-                    .and_then(|o| o.as_dict().ok())
-                else {
-                    return unread("no /GCS dictionary");
-                };
-                PdfMeasure::Geo {
-                    local: unit
-                        .as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|p| base.apply([x0 + p[0] * (x1 - x0), y0 + p[1] * (y1 - y0)]))
-                        .collect(),
-                    geographic: gpts.as_chunks::<2>().0.to_vec(),
-                    gcs: PdfGcs {
-                        projected: gcs.get(b"Type").ok().and_then(|o| o.as_name().ok())
-                            == Some(b"PROJCS".as_slice()),
-                        epsg: gcs
-                            .get(b"EPSG")
-                            .ok()
-                            .and_then(|o| deref(doc, o))
-                            .and_then(|o| o.as_i64().ok()),
-                        wkt: text(gcs, b"WKT"),
-                    },
-                }
-            }
-            _ => unread("a measure subtype this reader does not take"),
-        }
-    };
-    vps.iter()
-        .take(64)
-        .filter_map(|vp| {
-            let d = deref(doc, vp)?.as_dict().ok()?;
-            let b = numbers(d.get(b"BBox").ok()?)?;
-            let &[ax, ay, bx, by] = b.as_slice() else {
-                return None;
-            };
-            let user = [ax.min(bx), ay.min(by), ax.max(bx), ay.max(by)];
-            if !user.iter().all(|v| v.is_finite()) {
-                return None;
-            }
-            let (p, q) = (
-                base.apply([user[0], user[1]]),
-                base.apply([user[2], user[3]]),
-            );
-            Some(PdfViewport {
-                bbox: [
-                    p[0].min(q[0]),
-                    p[1].min(q[1]),
-                    p[0].max(q[0]),
-                    p[1].max(q[1]),
-                ],
-                name: text(d, b"Name"),
-                measure: d
-                    .get(b"Measure")
-                    .ok()
-                    .and_then(|o| deref(doc, o))
-                    .and_then(|o| o.as_dict().ok())
-                    .map(|m| measure(m, user)),
-            })
-        })
-        .collect()
 }
 
 /// `[a b c d e f]` in PDF's row-vector convention: `x' = a x + c y + e`,
