@@ -1474,7 +1474,8 @@ impl<'a> PvecConversion<'a> {
                                                 // own box (PVec's, enclosing it) as a closed outline
                                                 // tells wholly inside and wholly outside apart from
                                                 // crossing.
-                                                let outline = c.bounds().ok().and_then(|bx| {
+                                                let bx = c.bounds().ok();
+                                                let outline = bx.and_then(|bx| {
                                                     let (l, h) = (bx.min(), bx.max());
                                                     let corners = [
                                                         Point2::new(l.x, l.y),
@@ -1492,7 +1493,21 @@ impl<'a> PvecConversion<'a> {
                                                         next.push(c);
                                                         continue;
                                                     }
-                                                    Some(Ok(CurveClip::Outside)) => {
+                                                    // Outside also when the whole ring sits inside
+                                                    // the box, and then the curve may run through
+                                                    // it: only a ring with no vertex in the box is
+                                                    // clear of the curve.
+                                                    Some(Ok(CurveClip::Outside))
+                                                        if bx.is_some_and(|bx| {
+                                                            let (l, h) = (bx.min(), bx.max());
+                                                            !points.iter().any(|q| {
+                                                                q.x >= l.x
+                                                                    && q.x <= h.x
+                                                                    && q.y >= l.y
+                                                                    && q.y <= h.y
+                                                            })
+                                                        }) =>
+                                                    {
                                                         split = true;
                                                         continue;
                                                     }
