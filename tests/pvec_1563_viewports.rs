@@ -43,12 +43,16 @@ struct Mock {
     paper: Vec<RawEntity>,
     model: Vec<RawEntity>,
     viewports: Vec<ViewportEntity>,
-    /// The one block definition, `BLK`.
+    /// The block definition `BLK`.
     block: Vec<RawEntity>,
+    /// The block definition `INNER`, which `BLK` may insert (#1581).
+    inner: Vec<RawEntity>,
 }
 
 thread_local! {
     static NEXT: RefCell<Option<Mock>> = const { RefCell::new(None) };
+    /// How many times `BLK`'s definition was read on this thread (#1581).
+    static BLOCK_READS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 struct VecCursor(std::vec::IntoIter<RawEntity>);
@@ -130,8 +134,19 @@ impl DwgProvider for Mock {
         let list = match scope {
             EntityScope::Layout(LayoutId(0)) => self.model.clone(),
             EntityScope::Layout(LayoutId(1)) => self.paper.clone(),
-            EntityScope::BlockDefinition { name, reached_via } if name == "BLK" => self
-                .block
+            EntityScope::BlockDefinition { name, reached_via } if name == "BLK" => {
+                BLOCK_READS.with(|n| n.set(n.get() + 1));
+                self.block
+                    .iter()
+                    .cloned()
+                    .map(|mut e| {
+                        e.provenance.block_path = reached_via.clone();
+                        e
+                    })
+                    .collect()
+            }
+            EntityScope::BlockDefinition { name, reached_via } if name == "INNER" => self
+                .inner
                 .iter()
                 .cloned()
                 .map(|mut e| {
@@ -370,6 +385,7 @@ fn drawing(draw_viewports_first: bool) -> Mock {
         ],
         viewports: viewports(),
         block: vec![line(IN_BLOCK, "WALLS", [3.0, 6.0], [4.0, 6.0])],
+        inner: Vec::new(),
     }
 }
 
@@ -623,6 +639,62 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     // A viewport that is drawn is not refused any more.
     assert_ne!(row(&report, VP_A, None).fidelity, "Unsupported");
     let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_is_inserted() {
+    // BLK inserted five more times on layer 0, beside the INSERT on COLD, and BLK inserting
+    // INNER, so a leaf of INNER is reached through an INSERT that sits in BLK's definition.
+    let inserted = || {
+        let mut mock = drawing(false);
+        mock.block.push(ent(
+            0x60,
+            "INSERT",
+            "0",
+            RawGeometry::Insert(BlockRef {
+                block_name: "INNER".into(),
+                transform: SourceTransform::IDENTITY,
+                normal: [0.0, 0.0, 1.0],
+                grid: ArrayGrid::SINGLE,
+            }),
+        ));
+        mock.inner = vec![line(0x61, "0", [4.0, 4.0], [6.0, 4.0])];
+        for h in 0x50..0x55 {
+            mock.model.push(ent(
+                h,
+                "INSERT",
+                "0",
+                RawGeometry::Insert(BlockRef {
+                    block_name: "BLK".into(),
+                    transform: SourceTransform::IDENTITY,
+                    normal: [0.0, 0.0, 1.0],
+                    grid: ArrayGrid::SINGLE,
+                }),
+            ));
+        }
+        mock
+    };
+    let reads = |mock: Mock| {
+        BLOCK_READS.with(|n| n.set(0));
+        let (out, dir) = convert("reads", mock, |c| c);
+        out.expect("the sheet converts");
+        let _ = fs::remove_dir_all(dir);
+        BLOCK_READS.with(std::cell::Cell::get)
+    };
+    // Without a viewport freeze the INSERTs' own layers are never looked up, so the difference is
+    // what that lookup reads.
+    let mut thawed = inserted();
+    for v in &mut thawed.viewports {
+        v.frozen_layers.clear();
+    }
+    let without = reads(thawed);
+    let with = reads(inserted());
+    assert_eq!(
+        with - without,
+        1,
+        "{with} reads with the freeze, {without} without"
+    );
 }
 
 // ---- provenance and order ---------------------------------------------------------------
