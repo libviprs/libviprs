@@ -99,8 +99,8 @@ use crate::pvec::publish::{PublishError, StreamedPublishError, publish_streamed_
 use crate::pvec::regions::{RegionConfig, RoomLabel, WallEdge, derive_regions, semantic_stream};
 use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, RegionsSummary,
-    ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, UnresolvedXrefRow, ViewSummary,
-    XrefSummary,
+    ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, SheetViewport, UnresolvedXrefRow,
+    ViewSummary, XrefSummary,
 };
 use crate::pvec::style::{LineStyleComponent, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
@@ -109,9 +109,10 @@ use crate::pvec::writer::{
     open_geometry,
 };
 use crate::pvec::{
-    DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayoutKind,
-    PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceFact, SourceLimits,
-    SourceUnit, ViewProfile, ViewProfileError, select_layout,
+    DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
+    LayoutKind, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry, SourceFact,
+    SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError, ViewportClip,
+    ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
@@ -496,6 +497,111 @@ impl<'a> PvecConversion<'a> {
         let layout =
             select_layout(&layouts, &view_profile.space).map_err(PvecConvertError::View)?;
 
+        // The viewports of a sheet (#1563), each decided once: the paper view, one that contributes
+        // nothing (P-3), one refused with 508 for a view this slice cannot map, or one drawn
+        // through its similarity onto the sheet and its rectangle.
+        let mut windows: Vec<(ViewportEntity, Window)> = Vec::new();
+        if layout.kind == LayoutKind::Paper {
+            let listed = match provider.viewports() {
+                Ok(v) => v,
+                Err(ProviderError::CannotReport(_)) => Vec::new(),
+                Err(e) => return Err(PvecConvertError::View(e.into())),
+            };
+            let no_plot: BTreeSet<String> =
+                if view_profile.layers.no_plot == LayerStateRule::Exclude {
+                    provider
+                        .layers()
+                        .map_err(|e| PvecConvertError::View(e.into()))?
+                        .into_iter()
+                        .filter(|l| !l.plottable)
+                        .map(|l| l.name.to_ascii_lowercase())
+                        .collect()
+                } else {
+                    BTreeSet::new()
+                };
+            for v in listed.into_iter().filter(|v| v.layout == layout.id) {
+                let finite = [v.width, v.height, v.view_height, v.center[0], v.center[1]]
+                    .into_iter()
+                    .chain(v.view_center)
+                    .chain(v.view_target)
+                    .all(f64::is_finite);
+                let window = if v.id == 1 && v.center == v.view_center && v.height == v.view_height
+                {
+                    // AutoCAD's own paper view: number 1, showing paper space 1:1 centred on
+                    // itself (sample_AC1018). The reader numbers viewports, so the number alone
+                    // is not enough: the gold probes give 1 to a window onto the model.
+                    Window::Paper
+                } else if !v.visible {
+                    Window::Dropped("off")
+                } else if v.hide_plot {
+                    Window::Dropped("hide-plot")
+                } else if no_plot.contains(&v.layer.to_ascii_lowercase()) {
+                    Window::Dropped("no-plot-layer")
+                } else if !(v.view_direction[0] == 0.0
+                    && v.view_direction[1] == 0.0
+                    && v.view_direction[2] > 0.0)
+                {
+                    Window::Refused("non-plan")
+                } else if v.perspective {
+                    Window::Refused("perspective")
+                } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
+                    Window::Refused("view-height")
+                } else if v.twist != 0.0 {
+                    // The twist sign is not measured against AutoCAD yet (the ADR's open item).
+                    Window::Refused("twist")
+                } else if v.view_target[0] != 0.0 || v.view_target[1] != 0.0 {
+                    // The view centre is in display coordinates, whose origin is the target (DXF,
+                    // and acadrust's own docs), so a target off the origin moves the view. No
+                    // reference print measures that, and the gold probes are written reading the
+                    // centre as a world point with the target on it, so it is refused rather than
+                    // drawn somewhere that may be wrong.
+                    Window::Refused("target")
+                } else {
+                    match &v.clip {
+                        ViewportClip::Rectangle(_) => {
+                            // paper = centre + s * (model - view centre), for a plan view whose
+                            // target is the origin.
+                            let s = v.height / v.view_height;
+                            let (hw, hh) = (v.width / 2.0, v.height / 2.0);
+                            Window::Drawn {
+                                map: [
+                                    s,
+                                    0.0,
+                                    0.0,
+                                    s,
+                                    v.center[0] - s * v.view_center[0],
+                                    v.center[1] - s * v.view_center[1],
+                                ],
+                                rect: [
+                                    v.center[0] - hw,
+                                    v.center[1] - hh,
+                                    v.center[0] + hw,
+                                    v.center[1] + hh,
+                                ],
+                            }
+                        }
+                        ViewportClip::Polygon(_) => Window::Refused("clip-polygon"),
+                        ViewportClip::Circle(_) => Window::Refused("clip-circle"),
+                        ViewportClip::Ellipse(_) => Window::Refused("clip-ellipse"),
+                        ViewportClip::Spline(_) => Window::Refused("clip-spline"),
+                        _ => Window::Refused("clip-other"),
+                    }
+                };
+                windows.push((v, window));
+            }
+        }
+        // `1:N`, one paper unit to N model units, of a drawn viewport.
+        let scale_of = |v: &ViewportEntity| format!("1:{}", v.view_height / v.height);
+        // P-9: when exactly one viewport shows model space, its scale goes in the record's note.
+        let mut drawn_scales = windows
+            .iter()
+            .filter(|(_, w)| matches!(w, Window::Drawn { .. }))
+            .map(|(v, _)| scale_of(v));
+        let single_scale = match (drawn_scales.next(), drawn_scales.next()) {
+            (Some(one), None) => Some(one),
+            _ => None,
+        };
+
         // The paper sheet (#1562): its frame and unit (P-6), its print flags (P-8) and the plot
         // scale as the calibration (P-9). Zero or missing plot settings are not trusted for any of
         // it: the frame is then the kept geometry's extent, in the drawing's unit, and nothing is
@@ -630,11 +736,14 @@ impl<'a> PvecConversion<'a> {
                             let paper = metres_per_unit(sheet_unit).ok();
                             let claim = reduced.zip(paper).map(|((num, den), paper)| {
                                 let raw = n / d;
-                                let note = if uncertain {
+                                let mut note = if uncertain {
                                     format!("plot scale {n}:{d} as stored, written as {num}:{den}")
                                 } else {
                                     format!("plot scale {num}:{den}")
                                 };
+                                if let Some(one) = &single_scale {
+                                    note.push_str(&format!("; viewport {one}"));
+                                }
                                 ScaleClaim {
                                     metres_per_source_unit: paper * f64::from(den) / f64::from(num),
                                     provenance: ScaleProvenance::PlanScale {
@@ -731,6 +840,106 @@ impl<'a> PvecConversion<'a> {
             items.push(Item::Skipped(s));
         }
 
+        // Model space through the drawn viewports (#1563). It is walked once under the print
+        // profile's layer rules and flattened once; each drawn viewport then composes its
+        // similarity onto every kept leaf's map (P-4: one entity per viewport that shows it).
+        // What the walk excludes or skips is reported once, not once per viewport.
+        let first = sheet
+            .as_ref()
+            .and_then(|_| provider.layout_plot(layout.id).ok())
+            .and_then(|f| f.present().map(|p| p.draw_viewports_first))
+            .unwrap_or(false);
+        let drawn: Vec<usize> = windows
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, w))| matches!(w, Window::Drawn { .. }))
+            .map(|(k, _)| k)
+            .collect();
+        let mut model_view = None;
+        let mut model_flat = None;
+        if !drawn.is_empty() {
+            let model = layouts
+                .iter()
+                .find(|l| l.kind == LayoutKind::Model)
+                .ok_or_else(|| {
+                    PvecConvertError::View(ViewProfileError::NoModelSpace {
+                        available: layouts.iter().map(|l| l.name.clone()).collect(),
+                    })
+                })?;
+            let mut through_profile = view_profile.clone();
+            through_profile.space = SpaceSelection::Model;
+            through_profile.viewport_clipping = ViewportClipping::Unsupported;
+            through_profile.layers.frozen_in_viewport = ViewportFreezeRule::IgnoreAndReport;
+            model_view = Some(
+                through_profile
+                    .apply(provider)
+                    .map_err(PvecConvertError::View)?,
+            );
+            model_flat = Some(
+                BlockResolver::new(provider, FlattenBounds::from_profile(view_profile))
+                    .flatten(
+                        &EntityScope::Layout(model.id),
+                        &source_name,
+                        &model.name,
+                        &mut NoProvenance,
+                        &mut LineageStore::new(),
+                    )
+                    .map_err(PvecConvertError::Flatten)?,
+            );
+        }
+        // The effective layer of each kept model leaf, which a viewport freeze is matched against.
+        let model_layers: BTreeMap<(Option<u64>, String, String), String> = model_view
+            .as_ref()
+            .map(|v| {
+                v.included
+                    .iter()
+                    .map(|e| (leaf_key(e), e.effective_layer.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let composed: Vec<(usize, FlatEntity)> = match &model_flat {
+            Some(mf) => drawn
+                .iter()
+                .flat_map(|&k| {
+                    let Window::Drawn { map, .. } = windows[k].1 else {
+                        unreachable!("only drawn windows are listed")
+                    };
+                    mf.entities
+                        .iter()
+                        .filter(|f| model_layers.contains_key(&flat_key(f)))
+                        .map(move |f| (k, f.through(map)))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        // Where each item draws: the paper itself, or through window k. The rank puts what the
+        // viewports show under the sheet's own entities when `draw_viewports_first` says so.
+        let paper_rank = if first { u32::MAX } else { 0 };
+        let mut via: Vec<(u32, Option<usize>)> = vec![(paper_rank, None); items.len()];
+        for (k, f) in &composed {
+            items.push(Item::Leaf(f));
+            via.push((u32::try_from(*k).unwrap_or(u32::MAX - 2) + 1, Some(*k)));
+        }
+        let once = u32::try_from(windows.len()).unwrap_or(u32::MAX - 2) + 1;
+        if let (Some(mv), Some(mf)) = (&model_view, &model_flat) {
+            let excluded: BTreeSet<u64> = mv
+                .excluded
+                .iter()
+                .filter_map(|x| x.handle.map(|h| h.get()))
+                .collect();
+            for x in &mv.excluded {
+                items.push(Item::Excluded(x));
+                via.push((once, None));
+            }
+            for s in &mf.skipped {
+                if s.insert_handle.is_some_and(|h| excluded.contains(&h.get())) {
+                    continue;
+                }
+                items.push(Item::Skipped(s));
+                via.push((once, None));
+            }
+        }
+
         // Ids are positions in the canonical order, which is decided by block path, handle and
         // arrival position alone (arrival positions are all different, so no later key is ever
         // reached). Positions are sorted by those keys read in place, so no second copy of an
@@ -745,7 +954,12 @@ impl<'a> PvecConversion<'a> {
             Item::Excluded(x) => (&x.block_path, x.handle, i as u64),
             Item::Skipped(s) => (&s.block_path, s.insert_handle, i as u64),
         };
-        perm.sort_by(|&a, &b| key_cmp(key(a), key(b)));
+        perm.sort_by(|&a, &b| {
+            via[a]
+                .0
+                .cmp(&via[b].0)
+                .then_with(|| key_cmp(key(a), key(b)))
+        });
 
         // The classifying side produces, a consumer thread turns each outcome into a row, a
         // record, a diagnostic and a tally entry. They meet in a bounded queue, so a slow consumer
@@ -856,6 +1070,9 @@ impl<'a> PvecConversion<'a> {
         let mut clipped = [0u64; 4];
         // Ids are dense over what is written to the report, so a cut entity's pieces each take one.
         let mut next_id = 0u64;
+        // Rows drawn through each window, and the VIEWPORT entities the provider said nothing of.
+        let mut through = vec![0u64; windows.len()];
+        let mut unreported: Vec<u64> = Vec::new();
         let consumed = std::thread::scope(|scope| {
             let consumer = scope.spawn(|| consume(rx, &sent, observer));
             let mut failure = None;
@@ -890,47 +1107,140 @@ impl<'a> PvecConversion<'a> {
                         &stand_in
                     }
                 };
-                let mut done = match classify_item(&items[at], raw, gate) {
+                let mut done = match classify_item(
+                    &items[at],
+                    raw,
+                    gate,
+                    via[at].1.map(|k| windows[k].0.handle),
+                ) {
                     Ok(done) => done,
                     Err(e) => {
                         failure = Some(e);
                         break;
                     }
                 };
-                // A viewport on the sheet shows model space, which is not drawn yet (#1563): it is
-                // reported, never dropped.
+                let window = via[at].1;
+                // A VIEWPORT on the sheet is a window, not geometry of its own (#1563): its row
+                // says what the window did, and one the print profile cannot map is refused with
+                // 508. A viewport entity the provider reports nothing about cannot be placed.
                 if sheet.is_some()
+                    && window.is_none()
                     && matches!(items[at], Item::Leaf(_))
                     && raw.provenance.class_name == "VIEWPORT"
                 {
-                    done = without_geometry(
-                        Classification::refused(ReasonCode::ViewNotEnabled, "VIEWPORT"),
-                        vec![
-                            "VIEW_NOT_ENABLED (508): model space through a viewport is not drawn yet (#1563)"
-                                .to_owned(),
-                        ],
-                    );
+                    let decided = raw
+                        .provenance
+                        .handle
+                        .and_then(|h| windows.iter().find(|(v, _)| v.handle == h));
+                    let space = |why: &str| {
+                        without_geometry(
+                            Classification::ignored_by_policy("space", "VIEWPORT"),
+                            vec![format!("VIEWPORT: {why}")],
+                        )
+                    };
+                    done = match decided {
+                        None => {
+                            if let Some(h) = raw.provenance.handle {
+                                unreported.push(h.get());
+                            }
+                            without_geometry(
+                                Classification::refused(ReasonCode::ViewNotEnabled, "VIEWPORT"),
+                                vec![
+                                    "VIEW_NOT_ENABLED (508): the provider reports nothing about this viewport, so it cannot be placed"
+                                        .to_owned(),
+                                ],
+                            )
+                        }
+                        Some((_, Window::Paper)) => {
+                            space("the sheet's own paper view, not a window onto the model")
+                        }
+                        Some((_, Window::Dropped(why))) => {
+                            space(&format!("contributes nothing to a print ({why})"))
+                        }
+                        Some((_, Window::Drawn { .. })) => space("model space is drawn through it"),
+                        Some((_, Window::Refused(why))) => without_geometry(
+                            Classification::refused(ReasonCode::ViewNotEnabled, "VIEWPORT"),
+                            vec![format!(
+                                "VIEW_NOT_ENABLED (508): a viewport this profile cannot map ({why})"
+                            )],
+                        ),
+                    };
                 }
+                // P-3: a layer frozen in a viewport is dropped inside it, and drawn everywhere
+                // else.
+                let mut frozen_here = false;
+                if let (Some(k), Item::Leaf(f)) = (window, &items[at]) {
+                    let v = &windows[k].0;
+                    let frozen = model_layers.get(&flat_key(f)).is_some_and(|layer| {
+                        v.frozen_layers
+                            .iter()
+                            .any(|l| l.eq_ignore_ascii_case(layer))
+                    });
+                    if frozen {
+                        if view_profile.layers.frozen_in_viewport == ViewportFreezeRule::Apply {
+                            frozen_here = true;
+                            done = without_geometry(
+                                Classification::ignored_by_policy(
+                                    "layers.frozen_in_viewport",
+                                    raw.provenance.class_name.as_str(),
+                                ),
+                                vec![format!(
+                                    "{}: its layer is frozen in viewport {:X}",
+                                    PolicyReason::ViewportFrozen.code(),
+                                    v.handle.get()
+                                )],
+                            );
+                        } else {
+                            done.warnings.push(format!(
+                                "{}: its layer is frozen in viewport {:X}, drawn anyway",
+                                PolicyReason::ViewportFrozen.code(),
+                                v.handle.get()
+                            ));
+                        }
+                    }
+                }
+                // What it is cut to: the sheet, or the part of a viewport's rectangle on it.
+                let (clip_box, edge) = match window.map(|k| &windows[k].1) {
+                    Some(Window::Drawn { rect, .. }) => (
+                        Some(frame.map_or(*rect, |b| {
+                            [
+                                rect[0].max(b[0]),
+                                rect[1].max(b[1]),
+                                rect[2].min(b[2]),
+                                rect[3].min(b[3]),
+                            ]
+                        })),
+                        "viewport",
+                    ),
+                    _ => (frame, "sheet"),
+                };
                 // P-7: nothing is drawn outside the sheet. A line or a straight polyline is cut
                 // exactly and may become several pieces, each its own entity and row; any other
                 // curve is kept when wholly inside, dropped when wholly outside and refused when
                 // it crosses the edge. PVec's own box decides inside and outside.
                 let mut more: Vec<Done> = Vec::new();
-                let mut whole = true;
-                if let (Some(b), Some(bounds), Some(curve)) = (
-                    frame,
+                let mut whole = window.is_none();
+                if let (Some(b), Some(bounds), Some(curve), false) = (
+                    clip_box,
                     done.geometry.source_bounds(),
                     done.geometry.geometry(),
+                    frozen_here,
                 ) {
                     let (lo, hi) = (bounds.min(), bounds.max());
                     let class = raw.provenance.class_name.as_str();
-                    if hi.x < b[0] || lo.x > b[2] || hi.y < b[1] || lo.y > b[3] {
+                    if b[0] > b[2]
+                        || b[1] > b[3]
+                        || hi.x < b[0]
+                        || lo.x > b[2]
+                        || hi.y < b[1]
+                        || lo.y > b[3]
+                    {
                         clipped[0] += 1;
                         whole = false;
                         done = without_geometry(
                             Classification::ignored_by_policy("viewport_clipping", class),
                             vec![format!(
-                                "{}: wholly outside the sheet",
+                                "{}: wholly outside the {edge}",
                                 PolicyReason::OutsideViewport.code()
                             )],
                         );
@@ -941,10 +1251,9 @@ impl<'a> PvecConversion<'a> {
                                 clipped[1] += 1;
                                 done = without_geometry(
                                     Classification::refused(ReasonCode::ViewNotEnabled, class),
-                                    vec![
-                                        "VIEW_NOT_ENABLED (508): the curve crosses the sheet edge, and a curve is not cut until curve splitting lands (#1565)"
-                                            .to_owned(),
-                                    ],
+                                    vec![format!(
+                                        "VIEW_NOT_ENABLED (508): the curve crosses the {edge} edge, and a curve is not cut until curve splitting lands (#1565)"
+                                    )],
                                 );
                             }
                             Some(pieces) if pieces.is_empty() => {
@@ -952,7 +1261,7 @@ impl<'a> PvecConversion<'a> {
                                 done = without_geometry(
                                     Classification::ignored_by_policy("viewport_clipping", class),
                                     vec![format!(
-                                        "{}: wholly outside the sheet",
+                                        "{}: wholly outside the {edge}",
                                         PolicyReason::OutsideViewport.code()
                                     )],
                                 );
@@ -996,7 +1305,7 @@ impl<'a> PvecConversion<'a> {
                                                 class,
                                             ),
                                             vec![format!(
-                                                "{class}: a piece cut at the sheet edge is degenerate: {e}"
+                                                "{class}: a piece cut at the {edge} edge is degenerate: {e}"
                                             )],
                                         );
                                     }
@@ -1102,11 +1411,18 @@ impl<'a> PvecConversion<'a> {
                             style,
                             colour,
                             bad_style,
+                            viewport: window.map(|k| windows[k].0.handle),
                         }
                     });
+                    if let Some(k) = window
+                        && done.geometry.geometry().is_some()
+                    {
+                        through[k] += 1;
+                    }
                     let outcome = Outcome {
                         id,
                         handle: raw.provenance.handle.map(|h| h.get()),
+                        viewport: window.map(|k| windows[k].0.handle.get()),
                         done,
                         diagnostic,
                         side,
@@ -1133,6 +1449,38 @@ impl<'a> PvecConversion<'a> {
             {
                 s.summary.clip.insert(key.to_owned(), n);
             }
+            let text = |v: f64| format!("{v}");
+            s.summary.viewports = windows
+                .iter()
+                .zip(&through)
+                .map(|((v, w), n)| {
+                    let (status, reason) = match w {
+                        Window::Paper => ("paper-view", None),
+                        Window::Dropped(why) => (*why, None),
+                        Window::Refused(why) => ("refused", Some((*why).to_owned())),
+                        Window::Drawn { .. } => ("drawn", None),
+                    };
+                    let rect = match w {
+                        Window::Drawn { rect, .. } => Some(rect.map(text)),
+                        _ => None,
+                    };
+                    SheetViewport {
+                        handle: v.handle.get(),
+                        id: v.id,
+                        status: status.to_owned(),
+                        reason,
+                        scale: rect.is_some().then(|| scale_of(v)),
+                        paper_box: rect,
+                        entities: *n,
+                    }
+                })
+                .chain(unreported.iter().map(|h| SheetViewport {
+                    handle: *h,
+                    status: "refused".into(),
+                    reason: Some("not-reported".into()),
+                    ..SheetViewport::default()
+                }))
+                .collect();
             s
         });
         let xrefs = XrefSummary {
@@ -1323,6 +1671,7 @@ impl<'a> PvecConversion<'a> {
                         id: *id,
                         stub: &s.stub,
                         style: s.style.as_ref(),
+                        viewport: s.viewport,
                     })
                     .collect();
                 let built = build_streams(select, &open.source_ids, &layers, &rows)
@@ -1516,12 +1865,28 @@ struct Side {
     colour: bool,
     /// The line style stream is on and the DWG facts could not make a component of this entity.
     bad_style: bool,
+    /// The viewport a model entity was drawn through on a sheet (#1563).
+    viewport: Option<crate::cad::ItemHandle>,
+}
+
+/// What the print profile makes of one viewport of a sheet (#1563).
+enum Window {
+    /// The sheet's own paper view, not a window onto the model.
+    Paper,
+    /// Contributes nothing to a print: `off`, `hide-plot` or `no-plot-layer` (P-3).
+    Dropped(&'static str),
+    /// A view this slice cannot map, refused with 508, and why.
+    Refused(&'static str),
+    /// Model space shows through it: the similarity onto the sheet, and its rectangle there.
+    Drawn { map: [f64; 6], rect: [f64; 4] },
 }
 
 /// One entity's outcome on its way from the classifier to the consumer.
 struct Outcome {
     id: EntityId,
     handle: Option<u64>,
+    /// The viewport it was drawn through, for the report's row (#1563).
+    viewport: Option<u64>,
     done: Done,
     diagnostic: Option<Diagnostic>,
     side: Option<Side>,
@@ -1559,6 +1924,7 @@ fn consume(
     for Outcome {
         id,
         handle,
+        viewport,
         done,
         diagnostic,
         side,
@@ -1574,7 +1940,7 @@ fn consume(
             }
             out.diagnostics.push(d);
         }
-        out.rows.push(EntityRow::new(
+        let mut row = EntityRow::new(
             id,
             &done.classification,
             handle,
@@ -1583,7 +1949,9 @@ fn consume(
                 .and_then(|_| kind_of(&done.geometry))
                 .map(|k| row_for(k).pvec_type),
             done.warnings,
-        ));
+        );
+        row.viewport = viewport;
+        out.rows.push(row);
         if let Some(side) = side {
             out.sides.push((id, side));
         }
@@ -1644,6 +2012,16 @@ struct Done {
     warnings: Vec<String>,
 }
 
+/// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
+fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
+    let p = &f.entity.provenance;
+    (
+        p.handle.map(|h| h.get()),
+        p.block_path.to_string(),
+        p.class_name.clone(),
+    )
+}
+
 fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
     let p = &v.entity.provenance;
     (
@@ -1686,7 +2064,14 @@ fn without_geometry(classification: Classification, warnings: Vec<String>) -> Do
     }
 }
 
-fn classify_item(item: &Item<'_>, raw: &RawEntity, gate: &Gate) -> Result<Done, PvecConvertError> {
+/// `viewport` is the window a model leaf is drawn through on a sheet (#1563), whose map is already
+/// composed onto the leaf's.
+fn classify_item(
+    item: &Item<'_>,
+    raw: &RawEntity,
+    gate: &Gate,
+    viewport: Option<crate::cad::ItemHandle>,
+) -> Result<Done, PvecConvertError> {
     let class = raw.provenance.class_name.as_str();
     Ok(match item {
         Item::Excluded(x) => without_geometry(x.reason.classification(class), Vec::new()),
@@ -1700,15 +2085,19 @@ fn classify_item(item: &Item<'_>, raw: &RawEntity, gate: &Gate) -> Result<Done, 
                 vec![format!("INSERT of `{}`: {}", s.block_name, s.reason.code())],
             )
         }
-        Item::Leaf(f) => classify_leaf(f, gate)?,
+        Item::Leaf(f) => classify_leaf(f, gate, viewport)?,
     })
 }
 
-fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> {
+fn classify_leaf(
+    f: &FlatEntity,
+    gate: &Gate,
+    viewport: Option<crate::cad::ItemHandle>,
+) -> Result<Done, PvecConvertError> {
     let class = f.entity.provenance.class_name.as_str();
     let basic = match dwg_basic::extract(&f.entity) {
         Ok(b) => b,
-        Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate),
+        Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate, viewport),
         Err(e) => {
             return Ok(without_geometry(
                 e.classification(class),
@@ -1725,23 +2114,30 @@ fn classify_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> 
             ));
         }
     };
-    promote_leaf(f, record, gate)
+    promote_leaf(f, record, gate, viewport)
 }
 
 /// Pushes `record` through the map flattening composed for its leaf, and checks it against the
-/// gate. A leaf a layout owns directly has the identity map.
+/// gate. A leaf a layout owns directly has the identity map, unless it is drawn through a viewport.
 fn promote_leaf(
     f: &FlatEntity,
     record: Normalized2DGeometry,
     gate: &Gate,
+    viewport: Option<crate::cad::ItemHandle>,
 ) -> Result<Done, PvecConvertError> {
     let class = f.entity.provenance.class_name.as_str();
     // A leaf a layout owns directly has the identity map. A nested one is pushed through the map
-    // flattening composed for it, as one level named by its innermost INSERT.
+    // flattening composed for it, as one level named by its innermost INSERT; a model leaf of its
+    // own seen through a viewport, as one level named by the viewport (#1563).
     let path = &f.entity.provenance.block_path;
     let prov = &f.entity.provenance;
-    let Some(step) = path.steps().last().cloned() else {
-        return gated(record, prov, gate);
+    let step = match (path.steps().last(), viewport) {
+        (Some(s), _) => s.clone(),
+        (None, Some(v)) => crate::pvec::InstanceStep {
+            block_name: "*VIEWPORT".into(),
+            insert_handle: v,
+        },
+        (None, None) => return gated(record, prov, gate),
     };
     let composed = match ComposedTransform::identity().push_inner_coefficients(step, f.matrix()) {
         Ok(c) => c,
@@ -1773,7 +2169,11 @@ fn promote_leaf(
 /// A leaf the basic extractor does not take: a SPLINE goes through the exact spline extractor
 /// (#1430), anything else is an unmapped source class. The record's own class is the entity's, so
 /// a one-span spline that became a Bezier is exact and an unwrapped periodic one is equivalent.
-fn classify_spline_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvertError> {
+fn classify_spline_leaf(
+    f: &FlatEntity,
+    gate: &Gate,
+    viewport: Option<crate::cad::ItemHandle>,
+) -> Result<Done, PvecConvertError> {
     let class = f.entity.provenance.class_name.as_str();
     let spline = match dwg_spline::extract(&f.entity) {
         Ok(s) => s,
@@ -1799,7 +2199,7 @@ fn classify_spline_leaf(f: &FlatEntity, gate: &Gate) -> Result<Done, PvecConvert
             ));
         }
     };
-    promote_leaf(f, record, gate)
+    promote_leaf(f, record, gate, viewport)
 }
 
 /// A record PVec can carry, checked against the gate: its capability must be allowed, and under

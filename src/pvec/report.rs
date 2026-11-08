@@ -340,7 +340,7 @@ pub struct SheetViewport {
     /// onto the model), `off`, `hide-plot`, `no-plot-layer`, or `refused`.
     pub status: String,
     /// Why a refused viewport is refused: `non-plan`, `perspective`, `view-height`, `twist`,
-    /// `clip-polygon`, `clip-circle`, `clip-ellipse`, `clip-spline`, `clip-other` or
+    /// `target`, `clip-polygon`, `clip-circle`, `clip-ellipse`, `clip-spline`, `clip-other` or
     /// `not-reported`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,

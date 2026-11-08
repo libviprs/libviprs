@@ -371,6 +371,7 @@ fn issue_1525_two_linetypes_with_the_same_dashes_keep_their_own_names_in_the_tab
             id: o.id,
             stub: &o.entity.provenance,
             style: Some(s),
+            viewport: None,
         })
         .collect();
     let built = build_streams(only(false, true, false), &ids, &[], &rows).unwrap();

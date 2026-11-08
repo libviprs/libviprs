@@ -52,6 +52,7 @@ fn sources<'a>(
             id: *id,
             stub,
             style: styles.get(i),
+            viewport: None,
         })
         .collect()
 }

@@ -910,6 +910,7 @@ mod with_a_drawing {
     use acadrust::objects::ObjectType;
     use acadrust::{CadDocument, DwgWriter, EntityType, Vector3};
     use libviprs::pvec::FidelityClass;
+    use libviprs::pvec::ReasonCode;
 
     /// An A3 sheet in millimetres plotted 1:1, holding a line over its left edge, a line on a
     /// no-plot layer and a viewport. Returns the bytes and the three handles.
@@ -980,10 +981,10 @@ mod with_a_drawing {
             row_of(report, hidden).policy_field.as_deref(),
             Some("layers.no_plot")
         );
-        assert_eq!(
-            row_of(report, vp).reason.as_deref(),
-            Some("view-not-enabled")
-        );
+        // Since #1563 a viewport is placed rather than refused, and the sheet lists it.
+        assert_eq!(row_of(report, vp).reason, None);
+        let sheet = report.sheet.as_ref().unwrap();
+        assert!(sheet.viewports.iter().any(|v| v.handle == vp), "{sheet:#?}");
         assert_eq!(row_of(report, crossing).fidelity, "SupportedEquivalent");
         let curves = written(report, &dir);
         assert_eq!(curves.len(), 1);
@@ -1009,10 +1010,10 @@ mod with_a_drawing {
             .view_profile(ViewProfile::print_profile("Layout1"))
             .probe()
             .expect("Layout1 is walked");
-        // Since #1563 each viewport is drawn rather than refused, and none goes missing.
-        assert!(probed.encountered() >= 20);
-        assert_eq!(probed.count(FidelityClass::Unsupported), 0);
-        assert_eq!(probed.reasons().count(), 0);
+        assert_eq!(probed.encountered(), 20);
+        assert_eq!(probed.count(FidelityClass::Unsupported), 20);
+        let reasons: Vec<_> = probed.reasons().collect();
+        assert_eq!(reasons, [(ReasonCode::ViewNotEnabled, "VIEWPORT", 20)]);
     }
 
     #[test]

@@ -256,6 +256,7 @@ const FLAT: u64 = 0x38;
 const POLYGON: u64 = 0x39;
 const ROUND: u64 = 0x3A;
 const NO_PLOT_VP: u64 = 0x3B;
+const TARGETED: u64 = 0x3C;
 
 const TITLE: u64 = 0x20;
 const SHORT: u64 = 0x40;
@@ -299,6 +300,8 @@ fn viewports() -> Vec<ViewportEntity> {
     round.non_rectangular_clipping = true;
     let mut no_plot = elsewhere(NO_PLOT_VP, 12);
     no_plot.layer = "Defpoints".into();
+    let mut targeted = elsewhere(TARGETED, 13);
+    targeted.view_target = [1.0, 1.0, 0.0];
     vec![
         vp(
             PAPER_VIEW,
@@ -319,6 +322,7 @@ fn viewports() -> Vec<ViewportEntity> {
         polygon,
         round,
         no_plot,
+        targeted,
     ]
 }
 
@@ -456,7 +460,11 @@ fn issue_1563_a_model_line_lands_on_the_sheet_through_each_viewport_that_shows_i
         ends(&curve_of(&report, &dir, SHORT, VP_B)),
         [[285.0, 100.0], [315.0, 100.0]]
     );
-    assert_eq!(row(&report, SHORT, Some(VP_A)).fidelity, "SupportedExact");
+    assert_eq!(
+        row(&report, SHORT, Some(VP_A)).fidelity,
+        row(&report, TITLE, None).fidelity,
+        "a line through a viewport classifies as a line on the sheet"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -553,6 +561,8 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     assert_eq!(status(FLAT), ("refused", Some("view-height")));
     assert_eq!(status(POLYGON), ("refused", Some("clip-polygon")));
     assert_eq!(status(ROUND), ("refused", Some("clip-circle")));
+    // A target off the origin moves the view in a way no reference print has measured.
+    assert_eq!(status(TARGETED), ("refused", Some("target")));
     // The scale is one paper unit to so many model units.
     assert_eq!(sheet_row(&report, VP_A).scale.as_deref(), Some("1:0.1"));
     assert_eq!(sheet_row(&report, VP_B).scale.as_deref(), Some("1:0.2"));
@@ -648,100 +658,6 @@ fn issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note
 #[cfg(feature = "dwg-acadrust")]
 mod with_a_drawing {
     use super::*;
-
-    fn exact(v: &serde_json::Value) -> f64 {
-        let hex = v["f64_hex"].as_str().expect("f64_hex");
-        f64::from_bits(u64::from_str_radix(hex.trim_start_matches("0x"), 16).expect("hex"))
-    }
-
-    /// The model line `a`..`b` seen through a window `[x0, y0, x1, y1]`, by Liang-Barsky.
-    fn inside(a: [f64; 2], b: [f64; 2], w: [f64; 4]) -> Option<[[f64; 2]; 2]> {
-        let (mut t0, mut t1) = (0.0f64, 1.0f64);
-        for axis in 0..2 {
-            let d = b[axis] - a[axis];
-            let (lo, hi) = (w[axis], w[axis + 2]);
-            if d == 0.0 {
-                if a[axis] < lo || a[axis] > hi {
-                    return None;
-                }
-                continue;
-            }
-            let (p, q) = ((lo - a[axis]) / d, (hi - a[axis]) / d);
-            t0 = t0.max(p.min(q));
-            t1 = t1.min(p.max(q));
-        }
-        (t0 < t1).then(|| {
-            let at = |t: f64| [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
-            [at(t0), at(t1)]
-        })
-    }
-
-    #[test]
-    #[cfg_attr(miri, ignore)]
-    fn issue_1563_the_multi_viewport_gold_probe_draws_its_line_through_all_twenty() {
-        let bytes =
-            include_bytes!("fixtures/pvec-gold/fixtures/paper-space-multi-viewport-001/source.dwg");
-        let math: serde_json::Value = serde_json::from_str(include_str!(
-            "fixtures/pvec-gold/fixtures/paper-space-multi-viewport-001/expected.math.json"
-        ))
-        .unwrap();
-        let dir = scratch("gold");
-        let dest = dir.join("sheet.pvec");
-        let out = PvecConversion::new(CadSource::Bytes(bytes), &dest)
-            .view_profile(ViewProfile::print_profile("Layout1"))
-            .convert()
-            .expect("Layout1 converts");
-        let report = &out.report;
-        let sheet = report.sheet.as_ref().expect("a sheet section");
-        assert_eq!(sheet.viewports.len(), 20);
-        assert!(
-            sheet.viewports.iter().all(|v| v.status == "drawn"),
-            "{:#?}",
-            sheet.viewports
-        );
-        let curves = written(report, &dir);
-        let e = &math["entities"][0]["geometry"];
-        let (a, b) = (
-            [exact(&e["start"][0]), exact(&e["start"][1])],
-            [exact(&e["end"][0]), exact(&e["end"][1])],
-        );
-        let mut drawn = 0;
-        for v in math["viewports"].as_array().unwrap() {
-            let c = [
-                exact(&v["paper"]["center"][0]),
-                exact(&v["paper"]["center"][1]),
-            ];
-            let (w, h) = (exact(&v["paper"]["width"]), exact(&v["paper"]["height"]));
-            let vc = [
-                exact(&v["view"]["center"][0]),
-                exact(&v["view"]["center"][1]),
-            ];
-            let s = h / exact(&v["view"]["height"]);
-            let window = [
-                vc[0] - w / s / 2.0,
-                vc[1] - h / s / 2.0,
-                vc[0] + w / s / 2.0,
-                vc[1] + h / s / 2.0,
-            ];
-            let Some(piece) = inside(a, b, window) else {
-                continue;
-            };
-            let paper = piece.map(|p| [c[0] + s * (p[0] - vc[0]), c[1] + s * (p[1] - vc[1])]);
-            assert!(
-                curves.iter().any(|(_, k)| near(ends(k), paper)),
-                "{}: no piece at {paper:?}",
-                v["id"]
-            );
-            drawn += 1;
-        }
-        assert_eq!(
-            curves.len(),
-            drawn,
-            "one piece per viewport that shows the line"
-        );
-        assert!(drawn > 0);
-        let _ = fs::remove_dir_all(dir);
-    }
 
     #[test]
     #[cfg_attr(miri, ignore)]

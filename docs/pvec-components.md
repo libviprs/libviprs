@@ -14,7 +14,8 @@ provenance are separate streams a viewer may drop without changing a single coor
   and locked flags of the layer table. The provenance stream has one row per source entity, not per curve: an entity reached through
   an INSERT belongs to the outermost INSERT, so every curve one instance flattens into shares a row, written against the first of
   them. The row holds the source handle only, because that is all the stream has room for; block path, layer and warnings stay in the
-  conversion report.
+  conversion report. On a sheet a model entity is a source entity per viewport that shows it (issue #1563): its row is `source_kind` 2,
+  the 8 byte source handle followed by the 8 byte viewport handle; everything else stays kind 1.
 - **Rooms and corridors.** `pvec::regions` derives them from wall linework (see below) and `semantic_stream` writes them as the
   region records of PVec's semantic class stream.
 - **Text.** Not carried in v1: text is counted and reported, with the font outcome (embedded, missing SHX, unresolved) in

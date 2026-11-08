@@ -97,6 +97,7 @@ fn rows<'a>(f: &'a Fixture, styles: &'a [LineStyleComponent]) -> Vec<ComponentSo
             id: *id,
             stub,
             style: styles.get(i),
+            viewport: None,
         })
         .collect()
 }
