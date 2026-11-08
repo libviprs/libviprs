@@ -21,6 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use libviprs::cad::{CadSource, ItemHandle};
+use libviprs::pvec::PolicyReason;
 use libviprs::pvec::components::StreamSelection;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::{ConversionReport, EntityRow, SheetViewport};
@@ -622,6 +623,28 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     );
     // A viewport that is drawn is not refused any more.
     assert_ne!(row(&report, VP_A, None).fidelity, "Unsupported");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1582_the_paper_view_is_a_policy_reason_of_its_own() {
+    let paper_view = PolicyReason::ALL
+        .into_iter()
+        .find(|r| r.code() == "PAPER_VIEW")
+        .expect("a PolicyReason whose code is PAPER_VIEW");
+    assert_eq!(paper_view.field(), "space");
+    let (out, dir) = convert("paper-reason", drawing(false), |c| c);
+    let report = out.expect("the sheet converts").report;
+    let row = row(&report, PAPER_VIEW, None);
+    assert_eq!(row.fidelity, "IgnoredByPolicy");
+    assert_eq!(row.policy_field.as_deref(), Some(paper_view.field()));
+    assert!(
+        row.warnings
+            .iter()
+            .any(|w| w.starts_with(&format!("{}: ", paper_view.code()))),
+        "{row:?}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
