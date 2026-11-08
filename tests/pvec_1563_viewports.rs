@@ -25,10 +25,10 @@ use libviprs::pvec::components::StreamSelection;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::{ConversionReport, EntityRow, SheetViewport};
 use libviprs::pvec::{
-    Availability, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet, FacetSource,
-    InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot, LayoutState, ProvenanceStub,
-    ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact, SourceUnit,
-    ViewProfile, ViewportClip, ViewportEntity,
+    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet,
+    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot, LayoutState,
+    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
+    SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
 };
 use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput, PvecConvertError};
 use pvec_facade::Curve;
@@ -43,6 +43,8 @@ struct Mock {
     paper: Vec<RawEntity>,
     model: Vec<RawEntity>,
     viewports: Vec<ViewportEntity>,
+    /// The one block definition, `BLK`.
+    block: Vec<RawEntity>,
 }
 
 thread_local! {
@@ -115,6 +117,7 @@ impl DwgProvider for Mock {
             layer("Defpoints", false),
             layer("VP", true),
             layer("COLD", true),
+            layer("WALLS", true),
         ])
     }
     fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
@@ -127,6 +130,15 @@ impl DwgProvider for Mock {
         let list = match scope {
             EntityScope::Layout(LayoutId(0)) => self.model.clone(),
             EntityScope::Layout(LayoutId(1)) => self.paper.clone(),
+            EntityScope::BlockDefinition { name, reached_via } if name == "BLK" => self
+                .block
+                .iter()
+                .cloned()
+                .map(|mut e| {
+                    e.provenance.block_path = reached_via.clone();
+                    e
+                })
+                .collect(),
             other => return Err(ProviderError::NoSuchScope(format!("{other:?}"))),
         };
         Ok(Box::new(VecCursor(list.into_iter())))
@@ -266,6 +278,8 @@ const SMALL_RING: u64 = 0x43;
 const EDGE_RING: u64 = 0x44;
 const NO_PLOT_LINE: u64 = 0x45;
 const FAR: u64 = 0x46;
+const COLD_INSERT: u64 = 0x47;
+const IN_BLOCK: u64 = 0x48;
 
 fn viewports() -> Vec<ViewportEntity> {
     let elsewhere = |h: u64, id: i16| vp(h, id, [210.0, 250.0], [40.0, 30.0], [0.0, 0.0], 3.0);
@@ -342,8 +356,20 @@ fn drawing(draw_viewports_first: bool) -> Mock {
             circle(EDGE_RING, [10.0, 5.0], 2.0),
             line(NO_PLOT_LINE, "Defpoints", [1.0, 1.0], [2.0, 2.0]),
             line(FAR, "0", [100.0, 100.0], [101.0, 100.0]),
+            ent(
+                COLD_INSERT,
+                "INSERT",
+                "COLD",
+                RawGeometry::Insert(BlockRef {
+                    block_name: "BLK".into(),
+                    transform: SourceTransform::IDENTITY,
+                    normal: [0.0, 0.0, 1.0],
+                    grid: ArrayGrid::SINGLE,
+                }),
+            ),
         ],
         viewports: viewports(),
+        block: vec![line(IN_BLOCK, "WALLS", [3.0, 6.0], [4.0, 6.0])],
     }
 }
 
@@ -542,6 +568,22 @@ fn issue_1563_a_layer_frozen_in_a_viewport_is_dropped_there_and_drawn_elsewhere(
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn issue_1563_an_insert_on_a_layer_frozen_in_a_viewport_takes_its_whole_block_with_it() {
+    let (out, dir) = convert("insert-freeze", drawing(false), |c| c);
+    let report = out.expect("the sheet converts").report;
+    // The line inside is on WALLS, but its INSERT is on COLD, which A freezes.
+    let a = row(&report, IN_BLOCK, Some(VP_A));
+    assert_eq!(a.fidelity, "IgnoredByPolicy", "{a:?}");
+    assert_eq!(a.policy_field.as_deref(), Some("layers.frozen_in_viewport"));
+    assert_eq!(
+        ends(&curve_of(&report, &dir, IN_BLOCK, VP_B)),
+        [[290.0, 105.0], [295.0, 105.0]]
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     let (out, dir) = convert("rows", drawing(false), |c| c);
     let report = out.expect("the sheet converts").report;
@@ -572,6 +614,12 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     assert!(rows(&report, SHORT, Some(TWISTED)).is_empty());
     assert!(rows(&report, SHORT, Some(HIDDEN)).is_empty());
     assert!(rows(&report, SHORT, Some(PAPER_VIEW)).is_empty());
+    // The paper view is kept as a row under its own code, never dropped silently.
+    let paper = row(&report, PAPER_VIEW, None);
+    assert!(
+        paper.warnings.iter().any(|w| w.starts_with("PAPER_VIEW")),
+        "{paper:?}"
+    );
     // A viewport that is drawn is not refused any more.
     assert_ne!(row(&report, VP_A, None).fidelity, "Unsupported");
     let _ = fs::remove_dir_all(dir);

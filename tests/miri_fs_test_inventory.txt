@@ -987,6 +987,7 @@ annotated   not-detected tests/pvec_1562_paper_sheet.rs::issue_1562_the_sample_d
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_a_circle_is_scaled_exactly_and_one_crossing_the_edge_is_refused
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_a_layer_frozen_in_a_viewport_is_dropped_there_and_drawn_elsewhere
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_a_model_line_lands_on_the_sheet_through_each_viewport_that_shows_it
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_an_insert_on_a_layer_frozen_in_a_viewport_takes_its_whole_block_with_it
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_autocads_paper_view_is_told_apart_from_the_viewport_onto_the_model
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_draw_viewports_first_puts_what_they_show_under_the_sheet
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why
