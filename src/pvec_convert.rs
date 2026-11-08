@@ -119,7 +119,7 @@ use crate::pvec::{
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
-use pvec_geometry::{Curve, Curve2d, CurveKind, Line, Point2, Trimmed};
+use pvec_geometry::{Curve, Curve2d, CurveKind, Line, Point2, Polyline, Trimmed};
 
 /// Entities per batch: the cancel token is looked at, and a progress event is sent, once per batch.
 const BATCH: usize = 256;
@@ -1470,6 +1470,34 @@ impl<'a> PvecConversion<'a> {
                                                 next.extend(pieces);
                                             }
                                             Err(CurveClipError::Unsupported(kind)) => {
+                                                // Not cut exactly, but it may not need cutting: its
+                                                // own box (PVec's, enclosing it) as a closed outline
+                                                // tells wholly inside and wholly outside apart from
+                                                // crossing.
+                                                let outline = c.bounds().ok().and_then(|bx| {
+                                                    let (l, h) = (bx.min(), bx.max());
+                                                    let corners = [
+                                                        Point2::new(l.x, l.y),
+                                                        Point2::new(h.x, l.y),
+                                                        Point2::new(h.x, h.y),
+                                                        Point2::new(l.x, h.y),
+                                                        Point2::new(l.x, l.y),
+                                                    ];
+                                                    Polyline::new(corners.to_vec())
+                                                        .ok()
+                                                        .map(Curve::Polyline)
+                                                });
+                                                match outline.map(|o| clip_curve(&o, &points)) {
+                                                    Some(Ok(CurveClip::Inside)) => {
+                                                        next.push(c);
+                                                        continue;
+                                                    }
+                                                    Some(Ok(CurveClip::Outside)) => {
+                                                        split = true;
+                                                        continue;
+                                                    }
+                                                    _ => {}
+                                                }
                                                 let what = if kind == CurveKind::RationalBSpline {
                                                     "a rational spline".to_owned()
                                                 } else {
