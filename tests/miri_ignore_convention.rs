@@ -880,9 +880,11 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1564 adds 13: the `tests/pvec_1564_layout_set.rs` cells that convert a layout set into a temp dir and read its files and index back. It said 1084 before this line moved.
 /// #1563 adds 10: the `tests/pvec_1563_viewports.rs` cells that convert a sheet with viewports into a temp dir and read the artifact back. It said 1097 before this line moved.
 /// #1577 adds 1: `tests/pvec_1563_viewports.rs::issue_1577_a_viewport_on_a_no_plot_layer_draws_what_it_shows_and_hides_its_border`, which converts a sheet into a temp dir. It said 1107 before this line moved.
-/// #1579 adds 2: the `tests/pvec_1579_probe_viewports.rs` cells that convert the gold multi-viewport probe and its DXF twin into a temp dir and read the artifact back. It said 1108 before this line moved.
-/// #1584 adds 7: the `tests/pvec_1584_print_probes.rs` cells that read the gold print-profile probes from disk and convert them into a temp dir. It said 1110 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1117;
+/// #1580 adds 2: the `tests/pvec_1563_viewports.rs` cells that convert a sheet against a tight entity limit into a temp dir. It said 1108 before this line moved.
+/// #1581 adds 1: `tests/pvec_1563_viewports.rs::issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_is_inserted`, which converts a sheet into a temp dir. It said 1110 before this line moved.
+/// #1579 adds 2: the `tests/pvec_1579_probe_viewports.rs` cells that convert the gold multi-viewport probe and its DXF twin into a temp dir and read the artifact back. It said 1111 before this line moved.
+/// #1584 adds 7: the `tests/pvec_1584_print_probes.rs` cells that read the gold print-profile probes from disk and convert them into a temp dir. It said 1113 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1120;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
