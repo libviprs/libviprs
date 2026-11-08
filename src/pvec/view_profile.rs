@@ -177,6 +177,8 @@ pub enum Exclusion {
     LayerOff,
     /// Frozen layer.
     LayerFrozen,
+    /// No-plot layer, under `layers.no_plot = exclude` (P-3 of the print profile).
+    LayerNoPlot,
     /// Too deep.
     DepthLimit,
     /// Unresolved block.
@@ -666,9 +668,10 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
 
 impl Exclusion {
     /// Every way an entity can be excluded.
-    pub const ALL: [Exclusion; 4] = [
+    pub const ALL: [Exclusion; 5] = [
         Exclusion::LayerOff,
         Exclusion::LayerFrozen,
+        Exclusion::LayerNoPlot,
         Exclusion::DepthLimit,
         Exclusion::Unresolved,
     ];
@@ -695,6 +698,7 @@ impl Exclusion {
         match self {
             Exclusion::LayerOff => "layers.off",
             Exclusion::LayerFrozen => "layers.frozen",
+            Exclusion::LayerNoPlot => "layers.no_plot",
             Exclusion::DepthLimit => "nested_inserts.max_depth",
             Exclusion::Unresolved => "xrefs",
         }
@@ -705,7 +709,7 @@ impl Exclusion {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
-            Exclusion::LayerOff | Exclusion::LayerFrozen => "LAYER_HIDDEN",
+            Exclusion::LayerOff | Exclusion::LayerFrozen | Exclusion::LayerNoPlot => "LAYER_HIDDEN",
             Exclusion::DepthLimit => "BLOCK_DEPTH_EXCEEDED",
             Exclusion::Unresolved => "UNRESOLVED_BLOCK",
         }
@@ -719,9 +723,10 @@ impl Exclusion {
     pub fn fidelity(self) -> super::normalized::FidelityClass {
         use super::normalized::FidelityClass;
         match self {
-            Exclusion::LayerOff | Exclusion::LayerFrozen | Exclusion::DepthLimit => {
-                FidelityClass::IgnoredByPolicy
-            }
+            Exclusion::LayerOff
+            | Exclusion::LayerFrozen
+            | Exclusion::LayerNoPlot
+            | Exclusion::DepthLimit => FidelityClass::IgnoredByPolicy,
             Exclusion::Unresolved => FidelityClass::Unsupported,
         }
     }

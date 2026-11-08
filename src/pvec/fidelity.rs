@@ -176,11 +176,15 @@ pub enum ReasonCode {
     /// cannot store it exactly and deterministically). `RequiresPVecCapability`, and the rule is
     /// in the row's warnings.
     PvecCannotStore,
+    /// A view the print profile cannot draw yet (`VIEW_NOT_ENABLED`, 508): a viewport on a paper
+    /// sheet until model space through viewports lands (#1563), or a curve crossing the sheet edge
+    /// until curves are split (#1565). `Unsupported`.
+    ViewNotEnabled,
 }
 
 impl ReasonCode {
     /// Every code, in a fixed order.
-    pub const ALL: [ReasonCode; 25] = [
+    pub const ALL: [ReasonCode; 26] = [
         ReasonCode::SplineKnotsNotReported,
         ReasonCode::SplinePeriodicNotReported,
         ReasonCode::SplineWeightsNotReported,
@@ -206,6 +210,7 @@ impl ReasonCode {
         ReasonCode::TransformConicIllConditioned,
         ReasonCode::CapabilityNotAllowed,
         ReasonCode::PvecCannotStore,
+        ReasonCode::ViewNotEnabled,
     ];
 
     /// The stable machine-readable spelling.
@@ -237,6 +242,7 @@ impl ReasonCode {
             ReasonCode::TransformConicIllConditioned => "transform-conic-ill-conditioned",
             ReasonCode::CapabilityNotAllowed => "capability-not-allowed",
             ReasonCode::PvecCannotStore => "pvec-cannot-store",
+            ReasonCode::ViewNotEnabled => "view-not-enabled",
         }
     }
 
@@ -268,7 +274,8 @@ impl ReasonCode {
             | ReasonCode::UnresolvedBlock
             | ReasonCode::TransformNonFinite
             | ReasonCode::TransformSingular
-            | ReasonCode::TransformConicIllConditioned => FidelityClass::Unsupported,
+            | ReasonCode::TransformConicIllConditioned
+            | ReasonCode::ViewNotEnabled => FidelityClass::Unsupported,
         }
     }
 }
