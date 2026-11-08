@@ -23,13 +23,15 @@ use std::path::{Path, PathBuf};
 
 use libviprs::cad::{CadSource, ItemHandle};
 use libviprs::pvec::components::StreamSelection;
+use libviprs::pvec::diagnostics::DiagnosticCode;
+use libviprs::pvec::flatten::FlattenError;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::{ConversionReport, EntityRow, SheetViewport};
 use libviprs::pvec::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet,
-    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot, LayoutState,
+    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot, LayoutState, Limit,
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
-    SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
+    SourceLimits, SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
 };
 use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput, PvecConvertError};
 use pvec_facade::Curve;
@@ -633,6 +635,64 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     );
     // A viewport that is drawn is not refused any more.
     assert_ne!(row(&report, VP_A, None).fidelity, "Unsupported");
+    let _ = fs::remove_dir_all(dir);
+}
+
+// ---- limits ------------------------------------------------------------------------------
+
+/// The sheet with only the two viewports onto the model: its own items are the title line and two
+/// VIEWPORT entities, and the model has seven kept leaves and one no-plot line. What the
+/// conversion classifies is 3 + 7 * 2 + 1 = 18, while the sheet and the model each walk far fewer.
+fn two_viewports() -> Mock {
+    let mut mock = drawing(false);
+    let keep = |h: u64| h == VP_A || h == VP_B;
+    mock.viewports.retain(|v| keep(v.handle.get()));
+    mock.paper.retain(|e| {
+        e.provenance.class_name != "VIEWPORT" || e.provenance.handle.is_some_and(|h| keep(h.get()))
+    });
+    mock
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1580_viewports_times_model_entities_count_against_the_entity_limit() {
+    let mut tight = SourceLimits::default();
+    tight.max_entities = 17;
+    let (out, dir) = convert("limit", two_viewports(), |c| c.limits(tight));
+    let err = out.expect_err("18 entities to classify, the ceiling is 17");
+    match &err {
+        PvecConvertError::Flatten(FlattenError::Limit {
+            limit,
+            observed,
+            ceiling,
+            ..
+        }) => assert_eq!((*limit, *observed, *ceiling), (Limit::Entities, 18, 17)),
+        other => panic!("the entity limit, not {other:?}"),
+    }
+    let d = err.diagnostic();
+    assert_eq!(d.code, DiagnosticCode::BlocksFailed);
+    assert_eq!(d.message_id, "limit");
+    let source = std::error::Error::source(&err).map(ToString::to_string);
+    assert!(
+        source
+            .as_deref()
+            .is_some_and(|m| m.contains("max_entities")),
+        "{source:?}"
+    );
+    // Refused before anything is written.
+    assert!(!dir.join("sheet.pvec").exists());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1580_a_sheet_at_the_entity_limit_still_converts() {
+    let mut exact = SourceLimits::default();
+    exact.max_entities = 18;
+    let (out, dir) = convert("at-limit", two_viewports(), |c| c.limits(exact));
+    let report = out.expect("18 entities fit a ceiling of 18").report;
+    assert_eq!(rows(&report, SHORT, Some(VP_A)).len(), 1);
+    assert_eq!(rows(&report, SHORT, Some(VP_B)).len(), 1);
     let _ = fs::remove_dir_all(dir);
 }
 
