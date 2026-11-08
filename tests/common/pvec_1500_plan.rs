@@ -227,6 +227,7 @@ impl DwgProvider for Mock {
             off: false,
             frozen: false,
             locked,
+            plottable: true,
         };
         Ok(vec![l("0", true), l("A-WALL", false), l("A-DOOR", false)])
     }

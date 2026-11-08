@@ -126,9 +126,9 @@ pub use pdf_vector::{
 pub use provider::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
     EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState, LayoutId,
-    LayoutKind, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
-    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
-    SourceTransform, TextStyleRef, ViewportEntity, XrefAttachment,
+    LayoutKind, LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError,
+    RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
+    SourceTransform, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,
