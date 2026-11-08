@@ -275,6 +275,83 @@ pub struct RegionsSummary {
     pub refused: Option<String>,
 }
 
+/// What the print profile made of a paper layout (#1562): the sheet's frame, its unit, the plot
+/// settings as the drawing stores them, and what the sheet clip did. Optional and ignorable, like
+/// [`ComponentsSummary`]; absent for model space. Numbers the drawing stores as `f64` are written as
+/// their shortest round-trip decimal text, so the report keeps `Eq`.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SheetSummary {
+    /// The layout's name.
+    pub layout: String,
+    /// `paper` when the frame is the paper sheet, `extents` when it is the kept geometry's extent.
+    pub frame: String,
+    /// Why the frame is the extents: `plot-settings-absent`, `plot-settings-not-reportable`,
+    /// `paper-size-zero` or `unit-not-declarable` (the sheet unit is one PVec cannot declare).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_reason: Option<String>,
+    /// Where the paper frame's position came from: `unmeasured`, because the formula from the plot
+    /// origin and the margins has no measured fixture yet (the print profile ADR's open item).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<String>,
+    /// The sheet's unit, as `docs/pvec-units.md` names it.
+    pub unit: String,
+    /// Where the unit came from: `plot-paper-units`, or `drawing` (the unit the conversion already
+    /// had).
+    pub unit_source: String,
+    /// The paper sheet, `[min x, min y, max x, max y]` in the sheet unit, with the paper frame.
+    #[serde(rename = "box", default, skip_serializing_if = "Option::is_none")]
+    pub sheet_box: Option<[String; 4]>,
+    /// The plot settings as the drawing stores them, absent when it stores none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot: Option<SheetPlotSummary>,
+    /// The plot scale as written into the calibration record, `numerator:denominator`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<String>,
+    /// The artifact's calibration: `plot-scale`, `plot-scale-uncertain`, `caller` or `none`.
+    pub calibration: String,
+    /// Stroke widths were left out of the line-style stream because the layout does not print
+    /// lineweights.
+    pub widths_dropped: bool,
+    /// VIEWPORT entities on the sheet, each `Unsupported` with `view-not-enabled` until model space
+    /// through viewports lands.
+    pub viewports: u64,
+    /// What the sheet clip did, by key: `outside` (dropped, wholly outside), `crossing` (a curve
+    /// that crosses the edge, refused), `cut` (a line or polyline cut at the edge) and `pieces`
+    /// (what the cut ones became).
+    pub clip: BTreeMap<String, u64>,
+    /// What the drawing said that was reported and not applied, by key, in a fixed order.
+    pub notes: Vec<String>,
+}
+
+/// A layout's plot settings in the report's [`SheetSummary`], as the drawing stores them.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SheetPlotSummary {
+    /// The paper size's name.
+    pub paper_size: String,
+    /// The paper's width in millimetres.
+    pub paper_width: String,
+    /// The paper's height in millimetres.
+    pub paper_height: String,
+    /// The plot paper units code.
+    pub paper_units: i16,
+    /// The plot rotation code, reported and not applied.
+    pub rotation: i16,
+    /// The plot type code, reported and not applied.
+    pub plot_type: i16,
+    /// The plot scale's paper side, as stored.
+    pub scale_numerator: String,
+    /// The plot scale's drawing side, as stored.
+    pub scale_denominator: String,
+    /// The plot style table the layout names; the file is never read.
+    pub style_sheet: String,
+    /// Lineweights print.
+    pub print_lineweights: bool,
+    /// Lineweights scale with the plot scale; reported only.
+    pub scale_lineweights: bool,
+    /// Plot styles apply; reported only.
+    pub plot_plot_styles: bool,
+}
+
 /// The whole report.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversionReport {
@@ -309,6 +386,9 @@ pub struct ConversionReport {
     /// The images, fills and text of a PDF page. Absent for a DWG.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pdf: Option<PdfSummary>,
+    /// The paper sheet of a print-profile conversion (#1562). Absent for model space.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sheet: Option<SheetSummary>,
     /// One row per entity, in id order.
     pub entities: Vec<EntityRow>,
 }
@@ -459,6 +539,7 @@ impl ReportBuilder {
             components: None,
             regions: None,
             pdf: None,
+            sheet: None,
             entities: self.rows,
         })
     }

@@ -132,8 +132,9 @@ pub enum WriteError {
 }
 
 /// PVec's metres-per-unit for the units it can declare. The values are bit-equal to PVec's own,
-/// which `Manifest` checks when the writer is built and the tests pin on the read-back.
-fn metres_per_unit(unit: SourceUnit) -> Result<f64, WriteError> {
+/// which `Manifest` checks when the writer is built and the tests pin on the read-back. The sheet of
+/// a print-profile conversion reads it too, for its box and its calibration (#1562).
+pub(crate) fn metres_per_unit(unit: SourceUnit) -> Result<f64, WriteError> {
     match unit {
         SourceUnit::Meters => Ok(1.0),
         SourceUnit::Millimeters => Ok(0.001),

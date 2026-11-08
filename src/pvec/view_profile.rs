@@ -177,6 +177,8 @@ pub enum Exclusion {
     LayerOff,
     /// Frozen layer.
     LayerFrozen,
+    /// No-plot layer, under `layers.no_plot = exclude` (P-3 of the print profile).
+    LayerNoPlot,
     /// Too deep.
     DepthLimit,
     /// Unresolved block.
@@ -303,8 +305,8 @@ impl ViewProfile {
     ///
     /// The layout's own entities and model space seen through its viewports, nothing drawn
     /// outside a viewport or the sheet, no-plot layers excluded and viewport freezes applied. A
-    /// test pins every value. Until the sheet lands (#1562) [`apply`](Self::apply) refuses it with
-    /// [`ViewProfileError::PaperSpaceUnsupported`].
+    /// test pins every value. [`apply`](Self::apply) walks the layout's own block record (#1562);
+    /// model space through its viewports is not drawn yet, so each viewport is reported instead.
     #[must_use]
     pub fn print_profile(layout: impl Into<String>) -> Self {
         Self {
@@ -416,6 +418,13 @@ impl ViewProfile {
         if self.layers.frozen == LayerStateRule::Exclude {
             out.push(Exclusion::LayerFrozen.field());
         }
+        if self.layers.no_plot == LayerStateRule::Exclude {
+            out.push(Exclusion::LayerNoPlot.field());
+        }
+        // The sheet clip drops what lies wholly outside the sheet (P-7, #1562).
+        if self.viewport_clipping == ViewportClipping::Exact {
+            out.push("viewport_clipping");
+        }
         out.push(Exclusion::DepthLimit.field());
         out.push(Exclusion::Unresolved.field());
         out
@@ -425,18 +434,20 @@ impl ViewProfile {
     ///
     /// The provider's entities for the selected space are walked in the provider's own order,
     /// INSERTs are descended depth first (a visible INSERT is not itself a leaf), and every leaf
-    /// is checked against the layer rules (V1-2, V1-3). An INSERT that is excluded takes its
-    /// whole expansion with it and counts once.
+    /// is checked against the layer rules (V1-2, V1-3, and P-3's no-plot rule when
+    /// `layers.no_plot = exclude`). An INSERT that is excluded takes its whole expansion with it
+    /// and counts once. A paper layout is walked through its own block record when the profile
+    /// carries the print rules (`viewport_clipping = exact`, #1562).
     ///
     /// # Errors
     ///
     /// [`ViewProfileError::LayoutNotFound`] for a paper layout the drawing does not have,
-    /// [`ViewProfileError::PaperSpaceUnsupported`] for one it does (v1 draws model space only),
-    /// [`ViewProfileError::NoModelSpace`], [`ViewProfileError::RuleNotEnabled`] for
-    /// `layers.no_plot = exclude`, `layers.frozen_in_viewport = apply` and
-    /// `viewport_clipping = exact` until the slices that apply them land, and
-    /// [`ViewProfileError::Provider`] when the provider fails or cannot report layer state while
-    /// the profile acts on it.
+    /// [`ViewProfileError::PaperSpaceUnsupported`] for one it does under the default rules
+    /// (`viewport_clipping = unsupported`), [`ViewProfileError::NoModelSpace`],
+    /// [`ViewProfileError::RuleNotEnabled`] for `layers.frozen_in_viewport = apply` and
+    /// `viewport_clipping = exact` on model space, where there is no viewport for them to act on,
+    /// and [`ViewProfileError::Provider`] when the provider fails or cannot report layer state
+    /// while the profile acts on it.
     pub fn apply<P: DwgProvider + ?Sized>(
         &self,
         provider: &P,
@@ -450,55 +461,70 @@ impl ViewProfile {
                 .collect()
         };
         let model = match &self.space {
-            SpaceSelection::Model => layouts
-                .iter()
-                .find(|l| l.kind == LayoutKind::Model)
-                .ok_or_else(|| ViewProfileError::NoModelSpace {
-                    available: layouts.iter().map(|l| l.name.clone()).collect(),
-                })?,
+            SpaceSelection::Model => {
+                let model = layouts
+                    .iter()
+                    .find(|l| l.kind == LayoutKind::Model)
+                    .ok_or_else(|| ViewProfileError::NoModelSpace {
+                        available: layouts.iter().map(|l| l.name.clone()).collect(),
+                    })?;
+                // A viewport freeze and a viewport clip act on viewports, and model space has
+                // none: asking for them there is refused rather than ignored, so a knob never says
+                // something the drawing did not get.
+                for (asked, field) in [
+                    (
+                        self.layers.frozen_in_viewport == ViewportFreezeRule::Apply,
+                        "layers.frozen_in_viewport",
+                    ),
+                    (
+                        self.viewport_clipping == ViewportClipping::Exact,
+                        "viewport_clipping",
+                    ),
+                ] {
+                    if asked {
+                        return Err(ViewProfileError::RuleNotEnabled { field });
+                    }
+                }
+                model
+            }
             SpaceSelection::PaperLayout(wanted) => {
-                return Err(
-                    match layouts.iter().find(|l| {
-                        l.kind == LayoutKind::Paper && l.name.eq_ignore_ascii_case(wanted)
-                    }) {
-                        Some(l) => ViewProfileError::PaperSpaceUnsupported {
+                match layouts
+                    .iter()
+                    .find(|l| l.kind == LayoutKind::Paper && l.name.eq_ignore_ascii_case(wanted))
+                {
+                    // The sheet is drawn under the print rules only (P-1, #1562): the default
+                    // rules have no clip, and a sheet without one draws over its own title block.
+                    Some(l) if self.viewport_clipping == ViewportClipping::Exact => l,
+                    Some(l) => {
+                        return Err(ViewProfileError::PaperSpaceUnsupported {
                             layout: l.name.clone(),
-                        },
-                        None => ViewProfileError::LayoutNotFound {
+                        });
+                    }
+                    None => {
+                        return Err(ViewProfileError::LayoutNotFound {
                             requested: wanted.clone(),
                             available: names(LayoutKind::Paper),
-                        },
-                    },
-                );
+                        });
+                    }
+                }
             }
         };
 
-        // The print rules (P-3, P-7) land with the sheet and the viewports (#1562, #1563); the
-        // no-plot one also needs the plottable flag from the provider (#1560). Until then each is
-        // refused rather than dropped, so a knob never says something the drawing did not get.
-        for (asked, field) in [
-            (
-                self.layers.no_plot == LayerStateRule::Exclude,
-                "layers.no_plot",
-            ),
-            (
-                self.layers.frozen_in_viewport == ViewportFreezeRule::Apply,
-                "layers.frozen_in_viewport",
-            ),
-            (
-                self.viewport_clipping == ViewportClipping::Exact,
-                "viewport_clipping",
-            ),
-        ] {
-            if asked {
-                return Err(ViewProfileError::RuleNotEnabled { field });
-            }
-        }
-
         let needs_layers = self.layers.off == LayerStateRule::Exclude
-            || self.layers.frozen == LayerStateRule::Exclude;
+            || self.layers.frozen == LayerStateRule::Exclude
+            || self.layers.no_plot == LayerStateRule::Exclude;
         let layer_table: Vec<LayerState> = if needs_layers {
             provider.layers()?
+        } else {
+            Vec::new()
+        };
+        // P-3: the layers a print leaves out, from the provider's plottable flag (#1560).
+        let no_plot: Vec<String> = if self.layers.no_plot == LayerStateRule::Exclude {
+            layer_table
+                .iter()
+                .filter(|l| !l.plottable)
+                .map(|l| l.name.clone())
+                .collect()
         } else {
             Vec::new()
         };
@@ -506,6 +532,7 @@ impl ViewProfile {
         let mut walk = Walk {
             profile: self,
             provider,
+            no_plot,
             filter: VisibilityFilter::new(self, model.clone(), layer_table),
             included: Vec::new(),
             excluded: Vec::new(),
@@ -548,6 +575,8 @@ struct Walk<'a, P: ?Sized> {
     provider: &'a P,
     /// The one implementation of off and frozen (N4.6, #1077), shared with the filter.
     filter: VisibilityFilter,
+    /// Names of the no-plot layers the profile excludes; empty when it does not.
+    no_plot: Vec<String>,
     included: Vec<ViewedEntity>,
     excluded: Vec<ExcludedEntity>,
     /// N3.6's meter (issue #1439): every entity the walk visits is counted against the profile's
@@ -565,9 +594,13 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
             layer_override: Some(layer.to_string()),
             ..EntityState::default()
         };
-        match self.filter.decide(entity, &state).dropped? {
-            PolicyReason::LayerOff => Some(Exclusion::LayerOff),
-            PolicyReason::LayerFrozen => Some(Exclusion::LayerFrozen),
+        match self.filter.decide(entity, &state).dropped {
+            Some(PolicyReason::LayerOff) => Some(Exclusion::LayerOff),
+            Some(PolicyReason::LayerFrozen) => Some(Exclusion::LayerFrozen),
+            // Off and frozen come first, so a layer that is both off and no-plot counts as off.
+            _ if self.no_plot.iter().any(|n| n.eq_ignore_ascii_case(layer)) => {
+                Some(Exclusion::LayerNoPlot)
+            }
             _ => None,
         }
     }
@@ -666,9 +699,10 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
 
 impl Exclusion {
     /// Every way an entity can be excluded.
-    pub const ALL: [Exclusion; 4] = [
+    pub const ALL: [Exclusion; 5] = [
         Exclusion::LayerOff,
         Exclusion::LayerFrozen,
+        Exclusion::LayerNoPlot,
         Exclusion::DepthLimit,
         Exclusion::Unresolved,
     ];
@@ -695,6 +729,7 @@ impl Exclusion {
         match self {
             Exclusion::LayerOff => "layers.off",
             Exclusion::LayerFrozen => "layers.frozen",
+            Exclusion::LayerNoPlot => "layers.no_plot",
             Exclusion::DepthLimit => "nested_inserts.max_depth",
             Exclusion::Unresolved => "xrefs",
         }
@@ -705,7 +740,7 @@ impl Exclusion {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
-            Exclusion::LayerOff | Exclusion::LayerFrozen => "LAYER_HIDDEN",
+            Exclusion::LayerOff | Exclusion::LayerFrozen | Exclusion::LayerNoPlot => "LAYER_HIDDEN",
             Exclusion::DepthLimit => "BLOCK_DEPTH_EXCEEDED",
             Exclusion::Unresolved => "UNRESOLVED_BLOCK",
         }
@@ -719,9 +754,10 @@ impl Exclusion {
     pub fn fidelity(self) -> super::normalized::FidelityClass {
         use super::normalized::FidelityClass;
         match self {
-            Exclusion::LayerOff | Exclusion::LayerFrozen | Exclusion::DepthLimit => {
-                FidelityClass::IgnoredByPolicy
-            }
+            Exclusion::LayerOff
+            | Exclusion::LayerFrozen
+            | Exclusion::LayerNoPlot
+            | Exclusion::DepthLimit => FidelityClass::IgnoredByPolicy,
             Exclusion::Unresolved => FidelityClass::Unsupported,
         }
     }

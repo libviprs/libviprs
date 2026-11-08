@@ -35,6 +35,13 @@ nothing emits and on one that is emitted and not written down.
 | `PUBLISH_FAILED` | The artifact and report could not be published. | error | `publish` | `a_destination_that_is_a_directory` |
 | `CANCELLED` | The caller cancelled the run. | info | `cancelled` | `a_precancelled_run` |
 
+The print profile (#1562) uses `ENTITY_UNSUPPORTED` with the message id `view-not-enabled` for what
+it cannot draw yet, `VIEW_NOT_ENABLED` (508) in the row's warning: each VIEWPORT of a sheet, until
+model space through viewports lands (#1563), and a curve that crosses the sheet edge, until curves
+are split (#1565). An entity wholly outside the sheet is `ENTITY_IGNORED_BY_POLICY` with the message
+id `viewport_clipping` and an `OUTSIDE_VIEWPORT` warning, and one on a no-plot layer has
+`layers.no_plot`.
+
 ## Fields
 
 | field | meaning |

@@ -875,7 +875,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1559 adds 3: the `tests/pvec_1559_print_profile.rs` cells that read the print profile ADR, the spike and the unsupported policy. It said 1064 before this line moved.
 /// #1561 adds 2: the `tests/pvec_1561_dxf.rs` cells that list the DXF twins on disk and read the gate baselines. Its two other annotated cells read the twins through the provider, which the detector does not see. It said 1067 before this line moved.
 /// #1573 removes 1: `tests/pvec_drift.rs::n_1471_the_fixtures_whose_bits_differ_between_architectures_agree_within_the_numeric_policy` read the arm64 accepted dump, which is gone now both architectures agree. It said 1069 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1068;
+/// #1562 adds 15: the `tests/pvec_1562_paper_sheet.rs` cells that convert a sheet into a temp dir and read the artifact back. Two `tests/pvec_1559_print_profile.rs` cells are renamed, not added. It said 1068 before this line moved.
+/// #1562 adds 1 more: `tests/pvec_1562_paper_sheet.rs::issue_1562_a_decimal_ratio_that_is_not_a_binary_fraction_still_reduces`, which converts into a temp dir. It said 1083 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1084;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

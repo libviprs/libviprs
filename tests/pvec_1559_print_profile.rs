@@ -138,7 +138,9 @@ fn issue_1559_the_unsupported_policy_no_longer_refuses_paper_space_as_a_whole() 
 mod with_a_drawing {
     use libviprs::cad::CadSource;
     use libviprs::pvec::dwg_acadrust::AcadrustProvider;
-    use libviprs::pvec::{DwgProvider, LayerStateRule, LayoutKind, ViewProfile, ViewProfileError};
+    use libviprs::pvec::{
+        DwgProvider, Exclusion, LayerStateRule, LayoutKind, ViewProfile, ViewProfileError,
+    };
 
     fn sample() -> AcadrustProvider {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -146,9 +148,11 @@ mod with_a_drawing {
         AcadrustProvider::open(CadSource::Path(&path)).unwrap()
     }
 
+    /// Slice 3 (#1562) landed the sheet: the print profile walks the paper layout now, where
+    /// slice 1 refused it with `PaperSpaceUnsupported`.
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn issue_1559_the_print_profile_is_refused_until_the_sheet_lands() {
+    fn issue_1559_the_print_profile_is_applied_now_the_sheet_has_landed() {
         let provider = sample();
         let layout = provider
             .layouts()
@@ -157,22 +161,36 @@ mod with_a_drawing {
             .find(|l| l.kind == LayoutKind::Paper)
             .expect("sample_AC1018 has a paper layout")
             .name;
-        match ViewProfile::print_profile(layout.clone()).apply(&provider) {
-            Err(ViewProfileError::PaperSpaceUnsupported { layout: l }) => assert_eq!(l, layout),
-            other => panic!("a print must be refused until slice 3, got {other:?}"),
-        }
+        let out = ViewProfile::print_profile(layout.clone())
+            .apply(&provider)
+            .unwrap_or_else(|e| panic!("a print is applied since #1562, got {e:?}"));
+        assert_eq!(out.report.space_name, layout);
     }
 
+    /// Slice 3 (#1562) applies the no-plot rule from the provider's plottable flag, where slice 1
+    /// refused it with `RuleNotEnabled`.
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn issue_1559_excluding_no_plot_layers_is_refused_not_ignored() {
+    fn issue_1559_excluding_no_plot_layers_is_applied_not_refused() {
+        let provider = sample();
+        let no_plot: Vec<String> = provider
+            .layers()
+            .unwrap()
+            .into_iter()
+            .filter(|l| !l.plottable)
+            .map(|l| l.name)
+            .collect();
         let mut p = ViewProfile::default_profile();
         p.layers.no_plot = LayerStateRule::Exclude;
-        match p.apply(&sample()) {
-            Err(ViewProfileError::RuleNotEnabled { field }) => assert_eq!(field, "layers.no_plot"),
-            other => {
-                panic!("a no-plot exclusion must be refused until it is applied, got {other:?}")
-            }
+        let out = p
+            .apply(&provider)
+            .unwrap_or_else(|e| panic!("a no-plot exclusion is applied since #1562, got {e:?}"));
+        for x in out
+            .excluded
+            .iter()
+            .filter(|x| x.reason == Exclusion::LayerNoPlot)
+        {
+            assert!(no_plot.contains(&x.layer), "{x:?} is on a layer that plots");
         }
     }
 
