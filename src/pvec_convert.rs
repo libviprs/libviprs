@@ -529,11 +529,7 @@ impl<'a> PvecConversion<'a> {
                     .chain(v.view_center)
                     .chain(v.view_target)
                     .all(f64::is_finite);
-                let window = if v.id == 1 && v.center == v.view_center && v.height == v.view_height
-                {
-                    // AutoCAD's own paper view: number 1, showing paper space 1:1 centred on
-                    // itself (sample_AC1018). The reader numbers viewports, so the number alone
-                    // is not enough: the gold probes give 1 to a window onto the model.
+                let window = if paper_view(&v) {
                     Window::Paper
                 } else if !v.visible {
                     Window::Dropped("off")
@@ -1944,6 +1940,14 @@ struct Side {
     bad_style: bool,
     /// The viewport a model entity was drawn through on a sheet (#1563).
     viewport: Option<crate::cad::ItemHandle>,
+}
+
+/// AutoCAD's own paper view: number 1, showing paper space 1:1 centred on itself
+/// (`sample_AC1018`). The reader numbers viewports, so the number alone is not enough: the gold
+/// probes give 1 to a window onto the model (#1563). A sheet's conversion and the layout set's
+/// sheet test both decide it here (#1583).
+fn paper_view(v: &ViewportEntity) -> bool {
+    v.id == 1 && v.center == v.view_center && v.height == v.view_height
 }
 
 /// What the print profile makes of one viewport of a sheet (#1563).

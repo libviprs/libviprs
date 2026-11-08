@@ -67,8 +67,8 @@ zero padded to the width of their count and at least two digits; the slug is the
 required for bytes. `.sheets(|c| ...)` takes `PvecConversion`'s builder; the profile's space is the layout whatever it sets.
 
 A layout with nothing to print (no entity but its viewports, and no viewport that is on, plotted, on a plotting layer and has a view) is
-`SheetSkip::Empty`; one whose content is all excluded is `EmptyAfterView` (so is a layout holding only its paper view, until the print
-profile says which viewport that is); a file an earlier run left at either's path is removed. Any other failure of one sheet is `Failed`,
+`SheetSkip::Empty`; one whose content is all excluded is `EmptyAfterView` (so is a layout holding only its paper view, number 1 showing
+paper space 1:1 centred on itself, which is not converted at all, #1583); a file an earlier run left at either's path is removed. Any other failure of one sheet is `Failed`,
 its path is left as it was, and the rest go on. An index an earlier run left is removed before the first sheet.
 The whole set fails only when the destination is not a directory, the stem is missing, the drawing does not open, a selected layout does not
 exist, the index cannot be written, or the run is cancelled. Each sheet publishes atomically and the set does not: `<stem>.sheets.json`

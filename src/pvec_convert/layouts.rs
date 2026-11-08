@@ -14,9 +14,10 @@
 //!
 //! A layout with no paper-space entity other than its viewports, and no viewport that is on, plotted,
 //! on a plotting layer and has a view, is [`SheetSkip::Empty`]: listed, nothing written. One whose
-//! kept content writes nothing is [`SheetSkip::EmptyAfterView`]; until the print profile says which
-//! viewport is the paper view itself, a layout holding only that one comes out this way. Either way a
-//! file an earlier run left at that sheet's path is removed. Any other failure of one sheet is
+//! kept content writes nothing is [`SheetSkip::EmptyAfterView`], and so is a layout whose only such
+//! viewport is its paper view (number 1, showing paper space 1:1 centred on itself, the
+//! conversion's own rule), which is not converted at all (#1583). Either way a file an earlier run
+//! left at that sheet's path is removed. Any other failure of one sheet is
 //! [`SheetSkip::Failed`], its path is left as it was, and the others go on. A drawing with no paper
 //! layout writes nothing at all and does not fall back to model space: [`PvecConversion::convert`] is
 //! the call for that. An index an earlier run left is removed before the first sheet, so a run that
@@ -266,11 +267,11 @@ impl<'a> PvecLayoutSet<'a> {
         let width = paper.len().to_string().len().max(2);
 
         // A layout is a sheet (#1557, item 6) when it has an entity of its own other than a
-        // viewport, or a viewport that is on, not hidden when plotting, not on a no-plot layer and
-        // has a view height. Which viewport is the paper view itself is the print profile's call
-        // (#1560) and not made yet, so a layout holding only its paper view is a sheet that comes
-        // out `EmptyAfterView`, never one that is called empty when it shows the model. A provider
-        // that cannot list viewports, or layers, has none to show, or none that is no-plot.
+        // viewport, or a viewport onto the model that is on, not hidden when plotting, not on a
+        // no-plot layer and has a view height. One whose only such viewport is its paper view (the
+        // conversion's own rule, #1583) is a blank sheet, `EmptyAfterView` without being
+        // converted; one with neither is `Empty`. A provider that cannot list viewports, or
+        // layers, has none to show, or none that is no-plot.
         let facts = provider
             .viewports()
             .or_else(|e| match e {
@@ -289,20 +290,32 @@ impl<'a> PvecLayoutSet<'a> {
                 };
                 Ok((viewports, no_plot))
             });
-        let has_content = |layout: &LayoutState| -> Result<bool, ProviderError> {
+        // `None` for a sheet to convert, else why it is skipped.
+        let skip = |layout: &LayoutState| -> Result<Option<SheetSkip>, ProviderError> {
             let mut cursor = provider.entities(&EntityScope::Layout(layout.id))?;
             while let Some(e) = cursor.next_entity()? {
                 if e.provenance.class_name != "VIEWPORT" {
-                    return Ok(true);
+                    return Ok(None);
                 }
             }
             let (viewports, no_plot) = facts.as_ref().map_err(Clone::clone)?;
-            Ok(viewports.iter().any(|v| {
+            let mut blank = false;
+            for v in viewports.iter().filter(|v| {
                 v.layout == layout.id
                     && v.visible
                     && !v.hide_plot
                     && v.view_height > 0.0
                     && !no_plot.iter().any(|n| n.eq_ignore_ascii_case(&v.layer))
+            }) {
+                if !super::paper_view(v) {
+                    return Ok(None);
+                }
+                blank = true;
+            }
+            Ok(Some(if blank {
+                SheetSkip::EmptyAfterView
+            } else {
+                SheetSkip::Empty
             }))
         };
         // The layout name as a file name part: every byte outside `[A-Za-z0-9._-]` becomes `-`, runs
@@ -342,17 +355,16 @@ impl<'a> PvecLayoutSet<'a> {
                 return Err(LayoutSetError::Cancelled);
             }
             let observer = c.observer.clone();
-            let result = match has_content(layout) {
-                Ok(false) => Ok(None),
+            let result = match skip(layout) {
+                Ok(Some(skipped)) => Ok(Err(skipped)),
                 Err(e) => Err(PvecConvertError::View(e.into())),
-                Ok(true) => match c.unit.or(header_unit) {
-                    Some(unit) => c.run(provider, unit).map(Some),
+                Ok(None) => match c.unit.or(header_unit) {
+                    Some(unit) => c.run(provider, unit).map(Ok),
                     None => Err(PvecConvertError::UnitRequired),
                 },
             };
             let mut outcome = match report_failure(observer.as_deref(), result) {
-                Ok(Some(out)) => Ok(out),
-                Ok(None) => Err(SheetSkip::Empty),
+                Ok(done) => done,
                 Err(PvecConvertError::Cancelled) => return Err(LayoutSetError::Cancelled),
                 Err(
                     PvecConvertError::NothingStorable { .. }
