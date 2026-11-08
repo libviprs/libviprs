@@ -623,3 +623,95 @@ fn property_a_spline_keeps_exactly_what_is_inside() {
         .unwrap();
     assert_eq!(seen.load(Ordering::Relaxed), CASES);
 }
+
+// ---------------------------------------------------------------------------------------------
+// Review follow-up: crossings at or a hair off a polyline vertex, and trimmed arcs either way
+// ---------------------------------------------------------------------------------------------
+
+#[test]
+fn a_polyline_vertex_a_hair_inside_the_clip_does_not_fail_the_cut() {
+    // The crossing on the first segment lands within rounding of the second vertex, which sits
+    // 1e-13 inside the right edge: the piece must start there, not refuse a near-zero segment.
+    let source = Curve::Polyline(
+        Polyline::new(vec![p(15.0, 5.0), p(10.0 - 1e-13, 5.0), p(5.0, 5.0)]).unwrap(),
+    );
+    let (pieces, _, _) = split(clip_curve(&source, &square()).unwrap());
+    assert_eq!(pieces.len(), 1);
+    assert_pieces_sit_in(&square(), &source, &pieces, tol(&square()));
+}
+
+#[test]
+fn a_polyline_through_a_vertex_on_a_slanted_edge_does_not_fail_the_cut() {
+    let diamond = vec![p(5.0, 0.0), p(10.0, 5.0), p(5.0, 10.0), p(0.0, 5.0)];
+    // (7.3, 2.3) is on the edge from (5, 0) to (10, 5), where the crossing parameter rounds.
+    for v in [p(7.3, 2.3), p(8.1, 3.1), p(6.7, 1.7)] {
+        let source = Curve::Polyline(Polyline::new(vec![p(12.0, 0.5), v, p(5.0, 5.0)]).unwrap());
+        let (pieces, _, _) = split(clip_curve(&source, &diamond).unwrap());
+        assert_eq!(pieces.len(), 1, "through ({}, {})", v.x, v.y);
+        assert_pieces_sit_in(&diamond, &source, &pieces, tol(&diamond));
+    }
+}
+
+#[test]
+fn property_a_trimmed_arc_either_way_keeps_exactly_what_is_inside() {
+    let seen = AtomicU32::new(0);
+    let mut runner = TestRunner::new(Config {
+        cases: CASES,
+        ..Config::default()
+    });
+    let strategy = (
+        -4.0f64..14.0,
+        -4.0f64..14.0,
+        0.5f64..9.0,
+        0.0f64..TAU,
+        0.3f64..6.0,
+        proptest::bool::ANY,
+        quad(),
+    );
+    runner
+        .run(&strategy, |(cx, cy, r, t1, span, sense, ring)| {
+            seen.fetch_add(1, Ordering::Relaxed);
+            let basis = circle(cx, cy, r);
+            let t2 = if sense { t1 + span } else { t1 - span };
+            let source = Curve::Trimmed(Trimmed::new(basis.clone(), t1, t2, sense).unwrap());
+            let st = trim_of(&source);
+            let to_basis = |tau: f64| {
+                if st.reversed {
+                    st.start + st.span - tau
+                } else {
+                    st.start + tau
+                }
+            };
+            let intervals: Vec<(f64, f64)> = match clip_curve(&source, &ring).unwrap() {
+                CurveClip::Inside => vec![(st.start, st.start + st.span)],
+                CurveClip::Outside => vec![],
+                CurveClip::Split { pieces, .. } => {
+                    assert_pieces_sit_in(&ring, &source, &pieces, 1e3 * tol(&ring));
+                    pieces
+                        .iter()
+                        .map(|c| {
+                            let t = trim_of(c);
+                            assert_eq!(t.reversed, st.reversed, "a piece keeps the direction");
+                            assert!(matches!(c, Curve::Trimmed(x) if x.basis() == &basis));
+                            (t.start, t.start + t.span)
+                        })
+                        .collect()
+                }
+            };
+            for k in 0..128 {
+                let tau = st.span * (f64::from(k) + 0.5) / 128.0;
+                let q = source.eval(tau).unwrap();
+                if boundary_distance(&ring, q) <= 1e3 * tol(&ring) {
+                    continue;
+                }
+                assert_eq!(
+                    is_covered(&intervals, to_basis(tau), true),
+                    inside(&ring, q),
+                    "tau {tau}"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(seen.load(Ordering::Relaxed), CASES);
+}
