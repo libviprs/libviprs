@@ -854,7 +854,6 @@ impl<'a> PvecConversion<'a> {
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
         // What the sheet clip did: outside, crossing, cut and the pieces the cut ones became.
         let mut clipped = [0u64; 4];
-        let mut viewports = 0u64;
         // Ids are dense over what is written to the report, so a cut entity's pieces each take one.
         let mut next_id = 0u64;
         let consumed = std::thread::scope(|scope| {
@@ -904,7 +903,6 @@ impl<'a> PvecConversion<'a> {
                     && matches!(items[at], Item::Leaf(_))
                     && raw.provenance.class_name == "VIEWPORT"
                 {
-                    viewports += 1;
                     done = without_geometry(
                         Classification::refused(ReasonCode::ViewNotEnabled, "VIEWPORT"),
                         vec![
@@ -1135,7 +1133,6 @@ impl<'a> PvecConversion<'a> {
             {
                 s.summary.clip.insert(key.to_owned(), n);
             }
-            s.summary.viewports = viewports;
             s
         });
         let xrefs = XrefSummary {

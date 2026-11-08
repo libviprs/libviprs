@@ -542,6 +542,7 @@ impl<'a> PdfConversion<'a> {
             reason: e.classification.reason().map(|r| r.code().to_owned()),
             policy_field: e.classification.policy_field().map(str::to_owned),
             warnings: Vec::new(),
+            viewport: None,
         };
         for (n, e) in stored.iter().chain(&other).enumerate() {
             tally.record(&e.classification);

@@ -590,7 +590,7 @@ fn issue_1562_a_viewport_and_a_no_plot_line_never_vanish() {
     let r = row_of(&report, VIEWPORT);
     assert_eq!(r.fidelity, "Unsupported");
     assert_eq!(r.reason.as_deref(), Some("view-not-enabled"));
-    assert_eq!(report.sheet.as_ref().unwrap().viewports, 1);
+    assert_eq!(report.sheet.as_ref().unwrap().viewports.len(), 1);
     let r = row_of(&report, NO_PLOT_LINE);
     assert_eq!(r.fidelity, "IgnoredByPolicy");
     assert_eq!(r.policy_field.as_deref(), Some("layers.no_plot"));
@@ -910,7 +910,6 @@ mod with_a_drawing {
     use acadrust::objects::ObjectType;
     use acadrust::{CadDocument, DwgWriter, EntityType, Vector3};
     use libviprs::pvec::FidelityClass;
-    use libviprs::pvec::ReasonCode;
 
     /// An A3 sheet in millimetres plotted 1:1, holding a line over its left edge, a line on a
     /// no-plot layer and a viewport. Returns the bytes and the three handles.
@@ -1010,10 +1009,10 @@ mod with_a_drawing {
             .view_profile(ViewProfile::print_profile("Layout1"))
             .probe()
             .expect("Layout1 is walked");
-        assert_eq!(probed.encountered(), 20);
-        assert_eq!(probed.count(FidelityClass::Unsupported), 20);
-        let reasons: Vec<_> = probed.reasons().collect();
-        assert_eq!(reasons, [(ReasonCode::ViewNotEnabled, "VIEWPORT", 20)]);
+        // Since #1563 each viewport is drawn rather than refused, and none goes missing.
+        assert!(probed.encountered() >= 20);
+        assert_eq!(probed.count(FidelityClass::Unsupported), 0);
+        assert_eq!(probed.reasons().count(), 0);
     }
 
     #[test]
@@ -1027,11 +1026,12 @@ mod with_a_drawing {
                     .view_profile(ViewProfile::print_profile(layout))
                     .probe()
                     .unwrap_or_else(|e| panic!("{layout}: {e:?}"));
+            // Since #1563 the paper view and the viewport onto the model are both placed, so
+            // neither is refused.
             let reasons: Vec<_> = probed.reasons().collect();
-            assert_eq!(
-                reasons,
-                [(ReasonCode::ViewNotEnabled, "VIEWPORT", 2)],
-                "{layout}"
+            assert!(
+                !reasons.iter().any(|(_, class, _)| *class == "VIEWPORT"),
+                "{layout}: {reasons:?}"
             );
         }
     }

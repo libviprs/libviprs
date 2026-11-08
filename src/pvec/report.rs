@@ -53,6 +53,10 @@ pub struct EntityRow {
     pub policy_field: Option<String>,
     /// Warnings recorded against the entity.
     pub warnings: Vec<String>,
+    /// The viewport a model-space entity was drawn through on a sheet (#1563), by handle. Absent
+    /// for everything else.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewport: Option<u64>,
 }
 
 impl EntityRow {
@@ -74,6 +78,7 @@ impl EntityRow {
             reason: classification.reason().map(|r| r.code().to_owned()),
             policy_field: classification.policy_field().map(str::to_owned),
             warnings,
+            viewport: None,
         }
     }
 }
@@ -312,15 +317,41 @@ pub struct SheetSummary {
     /// Stroke widths were left out of the line-style stream because the layout does not print
     /// lineweights.
     pub widths_dropped: bool,
-    /// VIEWPORT entities on the sheet, each `Unsupported` with `view-not-enabled` until model space
-    /// through viewports lands.
-    pub viewports: u64,
+    /// One row per VIEWPORT entity on the sheet, in the drawing's order: what it did and why
+    /// (#1563).
+    pub viewports: Vec<SheetViewport>,
     /// What the sheet clip did, by key: `outside` (dropped, wholly outside), `crossing` (a curve
     /// that crosses the edge, refused), `cut` (a line or polyline cut at the edge) and `pieces`
     /// (what the cut ones became).
     pub clip: BTreeMap<String, u64>,
     /// What the drawing said that was reported and not applied, by key, in a fixed order.
     pub notes: Vec<String>,
+}
+
+/// One viewport of a sheet in the report's [`SheetSummary`] (#1563).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SheetViewport {
+    /// The VIEWPORT entity's handle.
+    pub handle: u64,
+    /// The viewport's number as the reader gives it; `0` when the provider reports no viewport for
+    /// the entity.
+    pub id: i16,
+    /// `drawn` (model space shows through it), `paper-view` (the sheet's own view, not a window
+    /// onto the model), `off`, `hide-plot`, `no-plot-layer`, or `refused`.
+    pub status: String,
+    /// Why a refused viewport is refused: `non-plan`, `perspective`, `view-height`, `twist`,
+    /// `clip-polygon`, `clip-circle`, `clip-ellipse`, `clip-spline`, `clip-other` or
+    /// `not-reported`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// For a drawn viewport, its scale as `1:N`: one paper unit shows `N` model units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scale: Option<String>,
+    /// For a drawn viewport, its rectangle on the sheet, `[min x, min y, max x, max y]`.
+    #[serde(rename = "box", default, skip_serializing_if = "Option::is_none")]
+    pub paper_box: Option<[String; 4]>,
+    /// For a drawn viewport, the rows written through it.
+    pub entities: u64,
 }
 
 /// A layout's plot settings in the report's [`SheetSummary`], as the drawing stores them.
