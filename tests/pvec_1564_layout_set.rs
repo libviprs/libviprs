@@ -652,12 +652,7 @@ fn issue_1564_a_viewport_makes_a_sheet_only_when_it_would_print() {
             .unwrap()
             .outcome
     };
-    for name in [
-        "VP off",
-        "VP hide plot",
-        "VP no-plot layer",
-        "VP zero height",
-    ] {
+    for name in ["VP off", "VP hide plot", "VP zero height"] {
         assert!(
             matches!(outcome(name), Err(SheetSkip::Empty)),
             "{name}: {:?}",
@@ -666,7 +661,8 @@ fn issue_1564_a_viewport_makes_a_sheet_only_when_it_would_print() {
     }
     // A viewport that would print makes the layout a sheet, whatever its number: the set does not
     // guess which one is the paper view, so it never calls a layout that shows the model empty.
-    for name in ["VP paper view", "VP model"] {
+    // A viewport on a no-plot layer prints what it shows; only its border is hidden (#1577).
+    for name in ["VP paper view", "VP model", "VP no-plot layer"] {
         assert!(
             !matches!(outcome(name), Err(SheetSkip::Empty | SheetSkip::Failed(_))),
             "{name}: {:?}",
