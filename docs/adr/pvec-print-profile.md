@@ -127,7 +127,8 @@ Known truth that exists, vendored under `tests/fixtures/pvec-gold/` from
 `libviprs/pvec-gold-fixtures` r3-open, writer-authored, none with a twist, a freeze or a non-plan
 view:
 
-- `paper-space-multi-viewport-001`: twenty rectangular viewports on `Layout1`, slice 4.
+- `paper-space-multi-viewport-001`: twenty rectangular viewports on `Layout1`, slice 4. Its targets
+  are at the origin since pvec-gold-fixtures#102, and it draws through the print profile since #1579.
 - `viewport-clipped-001`: one polygon-clipped viewport, slice 6.
 - `viewport-clipped-bounded-001`: the same clip recorded as bounded only, slice 6.
 
