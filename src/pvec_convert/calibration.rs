@@ -346,6 +346,9 @@ impl Calibration {
         let mut georeference = georeference;
         if let Some(s) = &mut scale {
             s.metres_per_source_unit += 0.0;
+            if let Some(u) = &mut s.uncertainty {
+                *u += 0.0;
+            }
             match &mut s.provenance {
                 ScaleProvenance::PlanScale {
                     paper_metres_per_unit,
