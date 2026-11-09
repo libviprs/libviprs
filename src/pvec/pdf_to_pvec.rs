@@ -22,7 +22,11 @@ use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_
 use super::pdf_clip_stream::{build as build_clip_stream, general_clips};
 use super::pdf_image::{PdfImageOptions, bake_page_images};
 use super::pdf_paint::PaintLog;
-use super::pdf_vector::{PdfPathEntity, PdfPathSegment, PdfVectorPage};
+use super::pdf_shading::PdfFillPattern;
+use super::pdf_vector::{
+    PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfProvenance, PdfStrokeParams,
+    PdfVectorPage,
+};
 use pvec_capabilities::Registry;
 use pvec_components::{RASTER_CAPABILITY, RasterId, TextRecord, TextStream, encode_rasters};
 use pvec_container::{
@@ -179,7 +183,9 @@ pub fn pdf_page_to_pvec_with(
 
         // The viewer paints the page white, so a white fill adds nothing. One that is also stroked
         // keeps its outline.
-        let fills = entity.paint.fill.is_some() && entity.fill_colour.iter().any(|&c| c < 250);
+        // A shading fill is not white whatever the last plain colour was.
+        let fills = entity.paint.fill.is_some()
+            && (entity.fill_pattern.is_some() || entity.fill_colour.iter().any(|&c| c < 250));
         let strokes = entity.paint.stroke;
         let mut runs = Vec::new();
         for (mut points, closed) in subpaths(entity) {
@@ -276,10 +282,83 @@ pub fn pdf_page_to_pvec_with(
         .flat_map(|clips| &clips.clips)
         .filter_map(|clip| Some((clip.sequence, clip.rect?)))
         .collect();
-    for entity in &page.entities {
+    // An `sh` paints a shading over the clip in force: a fill of the page rectangle with that
+    // shading, in the place the PDF painted it (`sequence` is the number of entities before it).
+    let shading_fills: Vec<PdfPathEntity> = page
+        .shading_ops
+        .iter()
+        .map(|op| PdfPathEntity {
+            segments: [
+                [0.0, 0.0],
+                [page.width, 0.0],
+                [page.width, page.height],
+                [0.0, page.height],
+            ]
+            .into_iter()
+            .enumerate()
+            .map(|(corner, point)| match corner {
+                0 => PdfPathSegment::MoveTo(point),
+                _ => PdfPathSegment::LineTo(point),
+            })
+            .chain([PdfPathSegment::Close])
+            .collect(),
+            paint: PdfPaintIntent {
+                fill: Some(PdfFillRule::NonZero),
+                stroke: false,
+                close: false,
+            },
+            clip: None,
+            fill_colour: [0, 0, 0],
+            fill_pattern: Some(PdfFillPattern::Shading(op.shading)),
+            stroke_colour: [0, 0, 0],
+            fill_alpha: 255,
+            stroke_alpha: 255,
+            ctm_scale: 1.0,
+            ctm_anisotropy: 1.0,
+            active_clips: op.active_clips.clone(),
+            soft_masked: op.soft_masked,
+            text_clipped: false,
+            stroke_params: PdfStrokeParams::default(),
+            provenance: PdfProvenance {
+                sequence: op.provenance.sequence,
+                ..op.provenance.clone()
+            },
+        })
+        .collect();
+    let mut painted: Vec<(&PdfPathEntity, bool)> = page
+        .entities
+        .iter()
+        .map(|entity| (entity, false))
+        .chain(shading_fills.iter().map(|entity| (entity, true)))
+        .collect();
+    // An `sh` goes before the entity that had its sequence number, and after one painted earlier.
+    painted.sort_by_key(|&(entity, is_sh)| (entity.provenance.sequence, !is_sh));
+    for (entity, is_sh) in painted {
         let mut clip = None;
         let mut chain: Vec<u64> = Vec::new();
-        if let Some(clips) = &clips {
+        if is_sh {
+            // Clips in force at the `sh`: the rectangles cut it, the others are its clip chain.
+            chain = entity
+                .active_clips
+                .iter()
+                .copied()
+                .filter(|sequence| general.contains_key(sequence))
+                .take(8)
+                .collect();
+            clip = entity
+                .active_clips
+                .iter()
+                .filter_map(|sequence| rectangles.get(sequence).copied())
+                .fold(None, |both: Option<ExactBounds>, rect| {
+                    Some(both.map_or(rect, |both| ExactBounds {
+                        min: [both.min[0].max(rect.min[0]), both.min[1].max(rect.min[1])],
+                        max: [both.max[0].min(rect.max[0]), both.max[1].min(rect.max[1])],
+                    }))
+                });
+            if clip.is_some_and(|clip| clip.min[0] > clip.max[0] || clip.min[1] > clip.max[1]) {
+                continue;
+            }
+        } else if let Some(clips) = &clips {
             let Some(decision) = decisions.get(&entity.provenance.sequence) else {
                 continue;
             };
@@ -391,7 +470,19 @@ pub fn pdf_page_to_pvec_with(
             }
         }
         if let (false, Some(rule)) = (rings.is_empty(), entity.paint.fill) {
-            let hatches = log.fill(&rings, rule, entity.fill_colour);
+            let shading = match entity.fill_pattern {
+                Some(PdfFillPattern::Shading(index)) => page
+                    .shadings
+                    .get(index)
+                    .map(|shading| (shading, page.height)),
+                None => None,
+            };
+            let hatches = log.fill(
+                &rings,
+                rule,
+                (entity.fill_colour, entity.fill_alpha),
+                shading,
+            );
             if !chain.is_empty() {
                 filled.extend(hatches.map(|hatch| (hatch, chain.clone())));
             }

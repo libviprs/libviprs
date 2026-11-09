@@ -213,12 +213,18 @@ fn sh_without_a_clip_covers_the_page() {
 
 #[test]
 fn sh_follows_the_paths_painted_before_it_in_the_paint_order() {
-    let (_, _, order, _) = convert(
+    let (fills, _, order, _) = convert(
         sh_resources(axial()),
-        "0 0 10 10 re f 20 20 30 30 re W n /Sh1 sh 0 0 5 5 re f",
+        "0 0 10 10 re f q 20 20 30 30 re W n /Sh1 sh Q 0 0 5 5 re f",
     );
     let kinds: Vec<_> = order.unwrap().items().map(|(k, _)| k).collect();
     assert_eq!(kinds, [ItemKind::Fill, ItemKind::Fill, ItemKind::Fill]);
+    // The second hatch record is the shading, so it was written between the two paths.
+    let sources: Vec<_> = fills.unwrap().assignments.iter().map(|a| a.paint).collect();
+    assert_eq!(
+        sources,
+        [FillSource::Own, FillSource::Gradient(0), FillSource::Own]
+    );
 }
 
 #[test]
