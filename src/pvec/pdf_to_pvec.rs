@@ -39,6 +39,218 @@ pub fn pdf_page_to_pvec(
     producer_id: &str,
     producer_version: &str,
 ) -> Result<Vec<u8>, PdfToPvecError> {
+    /// The polylines one PDF path becomes, as (style, points in inches). Style 2 is a closed fill
+    /// polygon the viewer can fill, style 1 a stroke. `clip` is the page-space rectangle the path is
+    /// drawn inside, when there is one.
+    ///
+    /// Limits: every filled subpath is its own solid polygon, so holes in a compound path (rings,
+    /// letter counters) fill solid. A fill colour set through a pattern or an unknown colour space is
+    /// not tracked by libviprs, so the last plain colour decides whether it counts as white.
+    fn entity_runs(
+        entity: &PdfPathEntity,
+        clip: Option<ExactBounds>,
+        page_height: f64,
+    ) -> Vec<(u32, Vec<[f64; 2]>)> {
+        /// The pieces of a polyline that lie inside the rectangle, each continuous.
+        fn clip_polyline(points: &[[f64; 2]], rect: ExactBounds) -> Vec<Vec<[f64; 2]>> {
+            /// Liang-Barsky: the part of the segment inside the rectangle.
+            fn clip_segment(
+                a: [f64; 2],
+                b: [f64; 2],
+                rect: ExactBounds,
+            ) -> Option<([f64; 2], [f64; 2])> {
+                let (mut t0, mut t1) = (0.0f64, 1.0f64);
+                let d = [b[0] - a[0], b[1] - a[1]];
+                for (p, q) in [
+                    (-d[0], a[0] - rect.min[0]),
+                    (d[0], rect.max[0] - a[0]),
+                    (-d[1], a[1] - rect.min[1]),
+                    (d[1], rect.max[1] - a[1]),
+                ] {
+                    if p == 0.0 {
+                        if q < 0.0 {
+                            return None;
+                        }
+                    } else {
+                        let t = q / p;
+                        if p < 0.0 {
+                            if t > t1 {
+                                return None;
+                            }
+                            t0 = t0.max(t);
+                        } else {
+                            if t < t0 {
+                                return None;
+                            }
+                            t1 = t1.min(t);
+                        }
+                    }
+                }
+                let at = |t: f64| [a[0] + t * d[0], a[1] + t * d[1]];
+                Some((
+                    if t0 == 0.0 { a } else { at(t0) },
+                    if t1 == 1.0 { b } else { at(t1) },
+                ))
+            }
+            let mut pieces: Vec<Vec<[f64; 2]>> = Vec::new();
+            for pair in points.windows(2) {
+                match clip_segment(pair[0], pair[1], rect) {
+                    Some((start, end)) => match pieces.last_mut() {
+                        Some(piece) if piece.last() == Some(&start) => piece.push(end),
+                        _ => pieces.push(vec![start, end]),
+                    },
+                    None => pieces.push(Vec::new()),
+                }
+            }
+            pieces.retain(|piece| !piece.is_empty());
+            pieces
+        }
+
+        /// Sutherland-Hodgman against the rectangle. The ring comes in closed and goes out closed, or
+        /// empty when nothing is left.
+        fn clip_polygon(ring: &[[f64; 2]], rect: ExactBounds) -> Vec<[f64; 2]> {
+            let mut out = ring[..ring.len() - 1].to_vec();
+            for (axis, value, keep_above) in [
+                (0, rect.min[0], true),
+                (0, rect.max[0], false),
+                (1, rect.min[1], true),
+                (1, rect.max[1], false),
+            ] {
+                let inside = |p: [f64; 2]| {
+                    if keep_above {
+                        p[axis] >= value
+                    } else {
+                        p[axis] <= value
+                    }
+                };
+                let input = std::mem::take(&mut out);
+                for (index, &current) in input.iter().enumerate() {
+                    let previous = input[(index + input.len() - 1) % input.len()];
+                    let crossing = || {
+                        let t = (value - previous[axis]) / (current[axis] - previous[axis]);
+                        let mut point = [0.0; 2];
+                        point[axis] = value;
+                        point[1 - axis] =
+                            previous[1 - axis] + t * (current[1 - axis] - previous[1 - axis]);
+                        point
+                    };
+                    if inside(current) {
+                        if !inside(previous) {
+                            out.push(crossing());
+                        }
+                        out.push(current);
+                    } else if inside(previous) {
+                        out.push(crossing());
+                    }
+                }
+                if out.is_empty() {
+                    return out;
+                }
+            }
+            out.push(out[0]);
+            out
+        }
+
+        // The viewer paints the page white, so a white fill adds nothing. One that is also stroked
+        // keeps its outline.
+        let fills = entity.paint.fill.is_some() && entity.fill_colour.iter().any(|&c| c < 250);
+        let strokes = entity.paint.stroke;
+        let mut subpaths: Vec<(Vec<[f64; 2]>, bool)> = Vec::new();
+        for segment in &entity.segments {
+            match *segment {
+                PdfPathSegment::MoveTo(point) => subpaths.push((vec![point], false)),
+                PdfPathSegment::LineTo(point) => {
+                    if let Some((points, _)) = subpaths.last_mut() {
+                        points.push(point);
+                    }
+                }
+                PdfPathSegment::CurveTo { c1, c2, end } => {
+                    if let Some((points, _)) = subpaths.last_mut() {
+                        if let Some(&start) = points.last() {
+                            points.extend(cubic_points(start, c1, c2, end).into_iter().skip(1));
+                        }
+                    }
+                }
+                PdfPathSegment::Close => {
+                    if let Some((_, closed)) = subpaths.last_mut() {
+                        *closed = true;
+                    }
+                }
+            }
+        }
+        let mut runs = Vec::new();
+        for (mut points, closed) in subpaths {
+            points.dedup();
+            // A fill closes its subpath implicitly, so three distinct points are a polygon whether or
+            // not it has an `h`. A trailing point equal to the first is the closing edge already.
+            let mut ring = points.clone();
+            if ring.len() > 1 && ring.first() == ring.last() {
+                ring.pop();
+            }
+            let filled = fills && ring.len() >= 3;
+            if filled {
+                ring.push(ring[0]);
+                if let Some(clip) = clip {
+                    ring = clip_polygon(&ring, clip);
+                }
+                if ring.len() >= 4 {
+                    runs.push((
+                        2,
+                        ring.iter().map(|&p| source_point(p, page_height)).collect(),
+                    ));
+                }
+            }
+            // A stroked fill (`B`) keeps its outline as well as its polygon.
+            if strokes {
+                if closed && points.first() != points.last() {
+                    points.push(points[0]);
+                }
+                let pieces = match clip {
+                    Some(clip) => clip_polyline(&points, clip),
+                    None => vec![points],
+                };
+                for piece in pieces.into_iter().filter(|piece| piece.len() >= 2) {
+                    runs.push((
+                        1,
+                        piece
+                            .iter()
+                            .map(|&p| source_point(p, page_height))
+                            .collect(),
+                    ));
+                }
+            }
+        }
+        fn source_point(point: [f64; 2], page_height: f64) -> [f64; 2] {
+            [point[0] / 72.0, (page_height - point[1]) / 72.0]
+        }
+
+        fn cubic_points(
+            start: [f64; 2],
+            c1: [f64; 2],
+            c2: [f64; 2],
+            end: [f64; 2],
+        ) -> Vec<[f64; 2]> {
+            (0..=16)
+                .map(|step| {
+                    let t = step as f64 / 16.0;
+                    let u = 1.0 - t;
+                    [
+                        u * u * u * start[0]
+                            + 3.0 * u * u * t * c1[0]
+                            + 3.0 * u * t * t * c2[0]
+                            + t * t * t * end[0],
+                        u * u * u * start[1]
+                            + 3.0 * u * u * t * c1[1]
+                            + 3.0 * u * t * t * c2[1]
+                            + t * t * t * end[1],
+                    ]
+                })
+                .collect()
+        }
+
+        runs
+    }
+
     let bounds = Bounds {
         min: [0.0, 0.0],
         max: [page.width / 72.0, page.height / 72.0],
@@ -154,212 +366,4 @@ pub fn pdf_page_to_pvec(
     writer
         .finish()
         .map_err(|error| PdfToPvecError::Write(error.to_string()))
-}
-
-/// The polylines one PDF path becomes, as (style, points in inches). Style 2 is a closed fill
-/// polygon the viewer can fill, style 1 a stroke. `clip` is the page-space rectangle the path is
-/// drawn inside, when there is one.
-///
-/// Limits: every filled subpath is its own solid polygon, so holes in a compound path (rings,
-/// letter counters) fill solid. A fill colour set through a pattern or an unknown colour space is
-/// not tracked by libviprs, so the last plain colour decides whether it counts as white.
-fn entity_runs(
-    entity: &PdfPathEntity,
-    clip: Option<ExactBounds>,
-    page_height: f64,
-) -> Vec<(u32, Vec<[f64; 2]>)> {
-    /// The pieces of a polyline that lie inside the rectangle, each continuous.
-    fn clip_polyline(points: &[[f64; 2]], rect: ExactBounds) -> Vec<Vec<[f64; 2]>> {
-        /// Liang-Barsky: the part of the segment inside the rectangle.
-        fn clip_segment(
-            a: [f64; 2],
-            b: [f64; 2],
-            rect: ExactBounds,
-        ) -> Option<([f64; 2], [f64; 2])> {
-            let (mut t0, mut t1) = (0.0f64, 1.0f64);
-            let d = [b[0] - a[0], b[1] - a[1]];
-            for (p, q) in [
-                (-d[0], a[0] - rect.min[0]),
-                (d[0], rect.max[0] - a[0]),
-                (-d[1], a[1] - rect.min[1]),
-                (d[1], rect.max[1] - a[1]),
-            ] {
-                if p == 0.0 {
-                    if q < 0.0 {
-                        return None;
-                    }
-                } else {
-                    let t = q / p;
-                    if p < 0.0 {
-                        if t > t1 {
-                            return None;
-                        }
-                        t0 = t0.max(t);
-                    } else {
-                        if t < t0 {
-                            return None;
-                        }
-                        t1 = t1.min(t);
-                    }
-                }
-            }
-            let at = |t: f64| [a[0] + t * d[0], a[1] + t * d[1]];
-            Some((
-                if t0 == 0.0 { a } else { at(t0) },
-                if t1 == 1.0 { b } else { at(t1) },
-            ))
-        }
-        let mut pieces: Vec<Vec<[f64; 2]>> = Vec::new();
-        for pair in points.windows(2) {
-            match clip_segment(pair[0], pair[1], rect) {
-                Some((start, end)) => match pieces.last_mut() {
-                    Some(piece) if piece.last() == Some(&start) => piece.push(end),
-                    _ => pieces.push(vec![start, end]),
-                },
-                None => pieces.push(Vec::new()),
-            }
-        }
-        pieces.retain(|piece| !piece.is_empty());
-        pieces
-    }
-
-    /// Sutherland-Hodgman against the rectangle. The ring comes in closed and goes out closed, or
-    /// empty when nothing is left.
-    fn clip_polygon(ring: &[[f64; 2]], rect: ExactBounds) -> Vec<[f64; 2]> {
-        let mut out = ring[..ring.len() - 1].to_vec();
-        for (axis, value, keep_above) in [
-            (0, rect.min[0], true),
-            (0, rect.max[0], false),
-            (1, rect.min[1], true),
-            (1, rect.max[1], false),
-        ] {
-            let inside = |p: [f64; 2]| {
-                if keep_above {
-                    p[axis] >= value
-                } else {
-                    p[axis] <= value
-                }
-            };
-            let input = std::mem::take(&mut out);
-            for (index, &current) in input.iter().enumerate() {
-                let previous = input[(index + input.len() - 1) % input.len()];
-                let crossing = || {
-                    let t = (value - previous[axis]) / (current[axis] - previous[axis]);
-                    let mut point = [0.0; 2];
-                    point[axis] = value;
-                    point[1 - axis] =
-                        previous[1 - axis] + t * (current[1 - axis] - previous[1 - axis]);
-                    point
-                };
-                if inside(current) {
-                    if !inside(previous) {
-                        out.push(crossing());
-                    }
-                    out.push(current);
-                } else if inside(previous) {
-                    out.push(crossing());
-                }
-            }
-            if out.is_empty() {
-                return out;
-            }
-        }
-        out.push(out[0]);
-        out
-    }
-
-    // The viewer paints the page white, so a white fill adds nothing. One that is also stroked
-    // keeps its outline.
-    let fills = entity.paint.fill.is_some() && entity.fill_colour.iter().any(|&c| c < 250);
-    let strokes = entity.paint.stroke;
-    let mut subpaths: Vec<(Vec<[f64; 2]>, bool)> = Vec::new();
-    for segment in &entity.segments {
-        match *segment {
-            PdfPathSegment::MoveTo(point) => subpaths.push((vec![point], false)),
-            PdfPathSegment::LineTo(point) => {
-                if let Some((points, _)) = subpaths.last_mut() {
-                    points.push(point);
-                }
-            }
-            PdfPathSegment::CurveTo { c1, c2, end } => {
-                if let Some((points, _)) = subpaths.last_mut() {
-                    if let Some(&start) = points.last() {
-                        points.extend(cubic_points(start, c1, c2, end).into_iter().skip(1));
-                    }
-                }
-            }
-            PdfPathSegment::Close => {
-                if let Some((_, closed)) = subpaths.last_mut() {
-                    *closed = true;
-                }
-            }
-            _ => {}
-        }
-    }
-    let mut runs = Vec::new();
-    for (mut points, closed) in subpaths {
-        points.dedup();
-        // A fill closes its subpath implicitly, so three distinct points are a polygon whether or
-        // not it has an `h`. A trailing point equal to the first is the closing edge already.
-        let mut ring = points.clone();
-        if ring.len() > 1 && ring.first() == ring.last() {
-            ring.pop();
-        }
-        let filled = fills && ring.len() >= 3;
-        if filled {
-            ring.push(ring[0]);
-            if let Some(clip) = clip {
-                ring = clip_polygon(&ring, clip);
-            }
-            if ring.len() >= 4 {
-                runs.push((
-                    2,
-                    ring.iter().map(|&p| source_point(p, page_height)).collect(),
-                ));
-            }
-        }
-        // A stroked fill (`B`) keeps its outline as well as its polygon.
-        if strokes {
-            if closed && points.first() != points.last() {
-                points.push(points[0]);
-            }
-            let pieces = match clip {
-                Some(clip) => clip_polyline(&points, clip),
-                None => vec![points],
-            };
-            for piece in pieces.into_iter().filter(|piece| piece.len() >= 2) {
-                runs.push((
-                    1,
-                    piece
-                        .iter()
-                        .map(|&p| source_point(p, page_height))
-                        .collect(),
-                ));
-            }
-        }
-    }
-    runs
-}
-
-fn source_point(point: [f64; 2], page_height: f64) -> [f64; 2] {
-    [point[0] / 72.0, (page_height - point[1]) / 72.0]
-}
-
-fn cubic_points(start: [f64; 2], c1: [f64; 2], c2: [f64; 2], end: [f64; 2]) -> Vec<[f64; 2]> {
-    (0..=16)
-        .map(|step| {
-            let t = step as f64 / 16.0;
-            let u = 1.0 - t;
-            [
-                u * u * u * start[0]
-                    + 3.0 * u * u * t * c1[0]
-                    + 3.0 * u * t * t * c2[0]
-                    + t * t * t * end[0],
-                u * u * u * start[1]
-                    + 3.0 * u * u * t * c1[1]
-                    + 3.0 * u * t * t * c2[1]
-                    + t * t * t * end[1],
-            ]
-        })
-        .collect()
 }
