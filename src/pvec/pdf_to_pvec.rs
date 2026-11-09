@@ -7,6 +7,12 @@
 //! dropped (a stroked one keeps its outline), and a path inside a rectangular clip is cut to it
 //! through `apply_clip_policy`. `tests/pvec_1578_pdf_page_to_pvec.rs` pins the bytes on
 //! `blueprint-mix.pdf`. Nothing from the paint design's new streams is written here yet.
+//!
+//! This module flattens curves and compares coordinates exactly, which ADR NG-10 (NG-B2, NG-B6)
+//! keeps out of normalization and which `pdf_vector` and `pdf_bezier` say they never do. It is
+//! allowed here because the output has to match the bytes the server already writes, so the
+//! flattening and the clip cuts are copied as they are. It is a stopgap, and it goes away with L4
+//! (#1578), when the stream work replaces this mapping.
 
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
