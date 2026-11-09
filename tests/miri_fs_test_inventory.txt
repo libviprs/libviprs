@@ -724,8 +724,9 @@ annotated   fs-detected  tests/pvec_1578_e_text_images.rs::every_text_anchor_is_
 annotated   fs-detected  tests/pvec_1578_e_text_images.rs::the_baked_images_are_rasters_placed_where_the_pdf_paints_them
 annotated   fs-detected  tests/pvec_1578_e_text_images.rs::the_title_block_is_a_text_record_on_a_hidden_anchor
 annotated   fs-detected  tests/pvec_1578_l2_stroke_paint.rs::blueprint_mix_every_stroke_carries_the_colour_and_width_the_pdf_painted_it_with
+annotated   fs-detected  tests/pvec_1578_l3_paint_order.rs::blueprint_mix_paint_order_names_every_stroke_in_the_pdfs_order
 annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::a_page_with_nothing_painted_is_refused_with_the_servers_message
-annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::blueprint_mix_bytes_are_pinned_with_the_stroke_streams
+annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::blueprint_mix_bytes_are_pinned_with_the_stroke_and_paint_streams
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs

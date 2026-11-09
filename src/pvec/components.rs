@@ -23,9 +23,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use pvec_capabilities::Registry;
 use pvec_facade::EntityId as PvecEntityId;
+// Also reached by `pdf_to_pvec` and `pdf_clip_stream`, which write streams of their own (#1578).
 pub(super) use pvec_facade::components::{
-    LAYER_FROZEN, LAYER_LOCKED, LAYER_OFF, LayerStream, LineStyleDef, LineStyleStream,
-    ProvenanceRecord, ProvenanceStream, Stream, StrokePaintStream, StrokeWidth,
+    ClipRecord, ClipRun, ClipStream, Fill, FillAssignment, FillPaintStream, FillRule, FillSource,
+    HatchStream, ItemKind, LAYER_FROZEN, LAYER_LOCKED, LAYER_OFF, LayerStream, LineStyleDef,
+    LineStyleStream, PaintOrderStream, PaintRun, ProvenanceRecord, ProvenanceStream, Stream,
+    StrokePaintStream, StrokeWidth,
 };
 use thiserror::Error;
 

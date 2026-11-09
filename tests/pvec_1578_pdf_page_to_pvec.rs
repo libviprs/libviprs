@@ -96,7 +96,7 @@ fn blueprint_mix() -> Option<PathBuf> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn blueprint_mix_bytes_are_pinned_with_the_stroke_streams() {
+fn blueprint_mix_bytes_are_pinned_with_the_stroke_and_paint_streams() {
     let Some(path) = blueprint_mix() else { return };
     let mut page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
     // The paths alone: server main writes no text and no rasters (#1578 L6 and L7 add them, and
@@ -104,14 +104,14 @@ fn blueprint_mix_bytes_are_pinned_with_the_stroke_streams() {
     page.texts.clear();
     page.images.clear();
     let bytes = pdf_page_to_pvec(&page, "iasbuilt-server", "1.0.3").unwrap();
-    assert_eq!(bytes.len(), 16400);
+    assert_eq!(bytes.len(), 16448);
     let hex: String = Sha256::digest(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(
         hex,
-        "3e94b62fd975928c65d38b875d1ab9e41aa27abd0b4b32e3019e77bed3c4855c"
+        "d7f0e5268926be226defcf9115c0e6b315f39864642e5575ea4ac374eb7674a4"
     );
 }
 
