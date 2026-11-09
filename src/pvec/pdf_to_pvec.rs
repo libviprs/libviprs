@@ -6,10 +6,9 @@
 //! (style 2 for a filled polygon, 1 for a stroke), curves flattened to 16 steps. A white fill is
 //! dropped (a stroked one keeps its outline), and a path inside a rectangular clip is cut to it
 //! through `apply_clip_policy`. `tests/pvec_1578_pdf_page_to_pvec.rs` pins the bytes on
-//! `blueprint-mix.pdf`. A clip that is not a rectangle is written as capability 26 for the strokes
-//! under it (L4, `pdf_clip_stream`); the other new streams are not written here yet.
+//! `blueprint-mix.pdf`. The stroke colour and alpha (stream 24) and the stroke width and dashes (the line style stream) are written for every stroke (L2). A clip that is not a rectangle is written as capability 26 for the strokes under it (L4, `pdf_clip_stream`). The test pins the whole file.
 
-use super::components::{LineStyleDef, LineStyleStream, StrokeWidth};
+use super::components::{LineStyleDef, LineStyleStream, StrokePaintStream, StrokeWidth};
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
 use super::pdf_clip_stream::{build as build_clip_stream, general_clips};
@@ -58,6 +57,11 @@ pub fn pdf_page_to_pvec(
         capabilities: vec![],
     });
     let mut next_id = 1u32;
+    // What each stroke entity says about its paint: a colour word (`0xRRGGBBAA`, the alpha byte is
+    // the stroke alpha), and its line style (width and dashes in inches, the PDF's own `w` and `d`
+    // times the scale of the CTM it was painted under).
+    let mut stroke_colours: Vec<(EntityId, u32)> = Vec::new();
+    let mut stroke_styles: Vec<(EntityId, LineStyleDef)> = Vec::new();
     // A clip that is a plain rectangle is applied to the geometry. A general clip path is kept
     // unclipped (display fidelity only), as the clip policy records. When clip analysis fails
     // (more clips in force at once than the policy allows), the page still converts, unclipped.
@@ -139,6 +143,39 @@ pub fn pdf_page_to_pvec(
             let (entity_bounds, cell) = bounds_and_cell(&points, bounds);
             let id = EntityId::new(next_id)
                 .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+            if style == 1 {
+                let [r, g, b] = entity.stroke_colour;
+                stroke_colours.push((id, u32::from_be_bytes([r, g, b, entity.stroke_alpha])));
+                // PDF user space is 1/72 inch by the scale of the CTM. A width of 0 is the thinnest
+                // line the output can draw.
+                let to_inches = entity.ctm_scale / 72.0;
+                let width = entity.stroke_params.width.unwrap_or(1.0) * to_inches;
+                let (dashes, phase) = entity.stroke_params.dash.as_ref().map_or_else(
+                    || (Vec::new(), 0.0),
+                    |dash| {
+                        (
+                            dash.array.iter().map(|d| d * to_inches).collect::<Vec<_>>(),
+                            dash.phase * to_inches,
+                        )
+                    },
+                );
+                // An all-zero or negative array draws solid in a PDF viewer, as no array does.
+                let solid = dashes.len() > 16 || dashes.iter().all(|d| *d <= 0.0);
+                stroke_styles.push((
+                    id,
+                    LineStyleDef {
+                        name: "pdf-stroke".into(),
+                        dashes: if solid { Vec::new() } else { dashes },
+                        width: Some(if width > 0.0 {
+                            StrokeWidth::Width(width)
+                        } else {
+                            StrokeWidth::Thinnest
+                        }),
+                        phase: if solid { 0.0 } else { phase },
+                        visible: true,
+                    },
+                ));
+            }
             writer
                 .push_polyline(
                     EntityMeta {
@@ -159,47 +196,95 @@ pub fn pdf_page_to_pvec(
     if next_id == 1 {
         return Err(PdfToPvecError::NoPaths);
     }
-    if !stroked.is_empty() {
+    if !stroke_colours.is_empty() {
         let registry = Registry::v1();
         let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
-        // The rings are hidden closed polylines, written after the page's own entities.
+        // The rings of the general clips are hidden closed polylines, written after the page's
+        // own entities, with the clip stream that names them.
         let mut hidden: Vec<(EntityId, u32)> = Vec::new();
-        let stream = build_clip_stream(&stroked, |sequence| {
-            let clip = &general[&sequence];
-            let mut boundary = Vec::new();
-            for ring in &clip.rings {
-                let id = EntityId::new(next_id)
-                    .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
-                let (ring_bounds, cell) = bounds_and_cell(ring, bounds);
-                writer
-                    .push_polyline(
-                        EntityMeta {
-                            id,
-                            style: 1,
-                            cell,
-                            bounds: ring_bounds,
-                        },
-                        ring,
-                    )
-                    .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
-                hidden.push((id, 0));
-                boundary.push(id);
-                next_id += 1;
-            }
-            Ok((clip.rule, boundary))
-        })?;
+        if !stroked.is_empty() {
+            let stream = build_clip_stream(&stroked, |sequence| {
+                let clip = &general[&sequence];
+                let mut boundary = Vec::new();
+                for ring in &clip.rings {
+                    let id = EntityId::new(next_id)
+                        .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+                    let (ring_bounds, cell) = bounds_and_cell(ring, bounds);
+                    writer
+                        .push_polyline(
+                            EntityMeta {
+                                id,
+                                style: 1,
+                                cell,
+                                bounds: ring_bounds,
+                            },
+                            ring,
+                        )
+                        .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+                    hidden.push((id, 0));
+                    boundary.push(id);
+                    next_id += 1;
+                }
+                Ok((clip.rule, boundary))
+            })?;
+            writer
+                .push_stream(stream.into_stream(&registry).map_err(|e| refused(&e))?)
+                .map_err(|e| refused(&e))?;
+        }
+        // The colour table, one entry per distinct word, in first-seen order.
+        let mut colours: Vec<u32> = Vec::new();
+        let mut colour_index: BTreeMap<u32, u32> = BTreeMap::new();
+        let assignments = stroke_colours
+            .iter()
+            .map(|&(id, word)| {
+                let index = *colour_index.entry(word).or_insert_with(|| {
+                    colours.push(word);
+                    (colours.len() - 1) as u32
+                });
+                (id, index)
+            })
+            .collect();
+        let paint = StrokePaintStream {
+            colours,
+            assignments,
+        };
         writer
-            .push_stream(stream.into_stream(&registry).map_err(|e| refused(&e))?)
+            .push_stream(paint.into_stream(&registry).map_err(|e| refused(&e))?)
             .map_err(|e| refused(&e))?;
-        let line_style = LineStyleStream {
-            styles: vec![LineStyleDef {
+        let mut styles: Vec<LineStyleDef> = Vec::new();
+        let mut style_index: BTreeMap<Vec<u64>, u32> = BTreeMap::new();
+        let mut assignments: Vec<(EntityId, u32)> = stroke_styles
+            .into_iter()
+            .map(|(id, def)| {
+                let key = std::iter::once(match def.width {
+                    Some(StrokeWidth::Width(w)) => w.to_bits(),
+                    _ => 0,
+                })
+                .chain(std::iter::once(def.phase.to_bits()))
+                .chain(def.dashes.iter().map(|d| d.to_bits()))
+                .collect();
+                let index = *style_index.entry(key).or_insert_with(|| {
+                    styles.push(def);
+                    (styles.len() - 1) as u32
+                });
+                (id, index)
+            })
+            .collect();
+        // The clip rings share one hidden style, after the stroke styles.
+        if !hidden.is_empty() {
+            let ring_style = styles.len() as u32;
+            styles.push(LineStyleDef {
                 name: "pdf-clip-ring".into(),
                 dashes: Vec::new(),
                 width: Some(StrokeWidth::Thinnest),
                 phase: 0.0,
                 visible: false,
-            }],
-            assignments: hidden,
+            });
+            assignments.extend(hidden.into_iter().map(|(id, _)| (id, ring_style)));
+        }
+        let line_style = LineStyleStream {
+            styles,
+            assignments,
         };
         writer
             .push_stream(line_style.into_stream(&registry).map_err(|e| refused(&e))?)
