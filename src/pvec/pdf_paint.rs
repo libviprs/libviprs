@@ -5,7 +5,7 @@
 
 use super::components::{
     Fill, FillAssignment, FillPaintStream, FillRule, FillSource, HatchStream, ItemKind,
-    LineStyleDef, LineStyleStream, PaintOrderStream, PaintRun, Stream,
+    PaintOrderStream, PaintRun, Stream,
 };
 use super::pdf_vector::PdfFillRule;
 use pvec_capabilities::Registry;
@@ -72,24 +72,17 @@ impl PaintLog {
         self.items.push((ItemKind::Stroke, entity.index()));
     }
 
-    /// The streams to push: hatch (17), the hidden line style of the fill rings (15), fill paint
-    /// (25) and paint order (23). Nothing for a page with no paint.
+    /// The rings of every fill, which `pdf_page_to_pvec` hides through the one line style stream.
+    pub(super) fn hidden_rings(&self) -> &[EntityId] {
+        &self.hidden
+    }
+
+    /// The streams to push: hatch (17), fill paint (25) and paint order (23). Nothing for a page with no paint.
     pub(super) fn streams(self, registry: &Registry) -> Result<Vec<Stream>, String> {
         let refused = |error: &dyn std::fmt::Display| error.to_string();
         let mut out = Vec::new();
         if !self.hatch.records.is_empty() {
             out.push(self.hatch.into_stream(registry).map_err(|e| refused(&e))?);
-            let line_style = LineStyleStream {
-                styles: vec![LineStyleDef {
-                    name: "pdf-fill-ring".into(),
-                    dashes: Vec::new(),
-                    width: None,
-                    phase: 0.0,
-                    visible: false,
-                }],
-                assignments: self.hidden.iter().map(|&id| (id, 0)).collect(),
-            };
-            out.push(line_style.into_stream(registry).map_err(|e| refused(&e))?);
             let fill_paint = FillPaintStream {
                 gradients: Vec::new(),
                 tilings: Vec::new(),
