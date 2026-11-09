@@ -8,6 +8,7 @@
 //! through `apply_clip_policy`. `tests/pvec_1578_pdf_page_to_pvec.rs` pins the bytes on
 //! `blueprint-mix.pdf`. The stroke colour and alpha (stream 24) and the stroke width and dashes (the line style stream) are written for every stroke (L2); the geometry blocks are the ones server main writes, the test pins the whole file.
 
+use super::components::{LineStyleDef, LineStyleStream, StrokePaintStream, StrokeWidth};
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
 use super::pdf_vector::{PdfPathEntity, PdfPathSegment, PdfVectorPage};
@@ -17,7 +18,6 @@ use pvec_container::{
     writer::{ContainerWriter, EntityMeta, WriterConfig},
 };
 use pvec_entity::EntityId;
-use pvec_facade::components::{LineStyleDef, LineStyleStream, StrokePaintStream, StrokeWidth};
 use std::collections::BTreeMap;
 use thiserror::Error;
 
