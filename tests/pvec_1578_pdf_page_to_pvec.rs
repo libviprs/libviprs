@@ -1,8 +1,9 @@
-//! Issue #1578 (the L4 mapping, the part that needs none of the new streams; L1 to L7 stay open): `pvec::pdf_page_to_pvec` is the
-//! mapping the server's `convert_pdf` has always carried, moved into the library. The bytes it
-//! writes for `blueprint-mix.pdf` are pinned to what that mapping wrote before the move (taken
-//! with `pvec-container` at the facade's pin and at the server's, which agree). Needs
-//! `--features pvec-write`.
+//! Issue #1578 (the L4 mapping, the part that needs none of the new streams; L1 to L3 and L5 to
+//! L7 stay open): `pvec::pdf_page_to_pvec` is the mapping iasbuilt/server main's `convert_pdf`
+//! runs since server #336 (white fills dropped, closed fills as polygons, rectangular clips
+//! applied), moved into the library. The bytes it writes for `blueprint-mix.pdf` are pinned to
+//! what server main's `convert_pdf` writes for the same page, producer `iasbuilt-server` 1.0.3
+//! (server commit 33e48f5). Needs `--features pvec-write`.
 
 #![cfg(feature = "pvec-write")]
 
@@ -30,18 +31,18 @@ fn blueprint_mix() -> Option<PathBuf> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn blueprint_mix_bytes_match_the_mapping_the_server_had() {
+fn blueprint_mix_bytes_match_server_main() {
     let Some(path) = blueprint_mix() else { return };
     let page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
-    let bytes = pdf_page_to_pvec(&page, "iasbuilt-server", "0.0.0").unwrap();
-    assert_eq!(bytes.len(), 14336);
+    let bytes = pdf_page_to_pvec(&page, "iasbuilt-server", "1.0.3").unwrap();
+    assert_eq!(bytes.len(), 12896);
     let hex: String = Sha256::digest(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(
         hex,
-        "ed21b32641dd385c5170247766299f0a31c216e4d71ec944a2ec849299a6b802"
+        "cb8da922d5562db37745b47a7e1d9e37e4016f804773b4f89a96d649a8ee3c8f"
     );
 }
 
