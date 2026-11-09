@@ -6,11 +6,15 @@
 //! (style 2 for a filled polygon, 1 for a stroke), curves flattened to 16 steps. A white fill is
 //! dropped (a stroked one keeps its outline), and a path inside a rectangular clip is cut to it
 //! through `apply_clip_policy`. `tests/pvec_1578_pdf_page_to_pvec.rs` pins the bytes on
-//! `blueprint-mix.pdf`. Nothing from the paint design's new streams is written here yet.
+//! `blueprint-mix.pdf`. A clip that is not a rectangle is written as capability 26 for the strokes
+//! under it (L4, `pdf_clip_stream`); the other new streams are not written here yet.
 
+use super::components::{LineStyleDef, LineStyleStream, StrokeWidth};
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
+use super::pdf_clip_stream::{build as build_clip_stream, general_clips};
 use super::pdf_vector::{PdfPathEntity, PdfPathSegment, PdfVectorPage};
+use pvec_capabilities::Registry;
 use pvec_container::{
     Bounds, LengthUnit, Metadata,
     writer::{ContainerWriter, EntityMeta, WriterConfig},
@@ -63,6 +67,13 @@ pub fn pdf_page_to_pvec(
         &LinesOnlyBounds,
     )
     .ok();
+    let general = clips
+        .as_ref()
+        .map(|clips| general_clips(page, clips))
+        .unwrap_or_default();
+    // Each stroke written under general clips, with the clips in force (outermost first, cut off
+    // at eight, the depth a clip stream allows).
+    let mut stroked: Vec<(EntityId, Vec<u64>)> = Vec::new();
     let decisions: BTreeMap<u64, _> = clips
         .iter()
         .flat_map(|clips| &clips.decisions)
@@ -75,6 +86,7 @@ pub fn pdf_page_to_pvec(
         .collect();
     for entity in &page.entities {
         let mut clip = None;
+        let mut chain: Vec<u64> = Vec::new();
         if let Some(clips) = &clips {
             let Some(decision) = decisions.get(&entity.provenance.sequence) else {
                 continue;
@@ -82,6 +94,13 @@ pub fn pdf_page_to_pvec(
             if decision.case == ClipCase::FullyClipped {
                 continue;
             }
+            chain = decision
+                .clips
+                .iter()
+                .copied()
+                .filter(|sequence| general.contains_key(sequence))
+                .take(8)
+                .collect();
             let rects = decision
                 .clips
                 .iter()
@@ -117,21 +136,7 @@ pub fn pdf_page_to_pvec(
             if points.len() < 2 {
                 continue;
             }
-            let first = points[0];
-            let entity_bounds = points.iter().fold(
-                Bounds {
-                    min: first,
-                    max: first,
-                },
-                |bounds, point| Bounds {
-                    min: [bounds.min[0].min(point[0]), bounds.min[1].min(point[1])],
-                    max: [bounds.max[0].max(point[0]), bounds.max[1].max(point[1])],
-                },
-            );
-            let center_x = (entity_bounds.min[0] + entity_bounds.max[0]) / 2.0;
-            let center_y = (entity_bounds.min[1] + entity_bounds.max[1]) / 2.0;
-            let column = (center_x / bounds.max[0] * 16.0).floor().clamp(0.0, 15.0) as u32;
-            let row = (center_y / bounds.max[1] * 16.0).floor().clamp(0.0, 15.0) as u32;
+            let (entity_bounds, cell) = bounds_and_cell(&points, bounds);
             let id = EntityId::new(next_id)
                 .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
             writer
@@ -139,17 +144,66 @@ pub fn pdf_page_to_pvec(
                     EntityMeta {
                         id,
                         style,
-                        cell: row * 16 + column + 1,
+                        cell,
                         bounds: entity_bounds,
                     },
                     &points,
                 )
                 .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+            if style == 1 && !chain.is_empty() {
+                stroked.push((id, chain.clone()));
+            }
             next_id += 1;
         }
     }
     if next_id == 1 {
         return Err(PdfToPvecError::NoPaths);
+    }
+    if !stroked.is_empty() {
+        let registry = Registry::v1();
+        let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
+        // The rings are hidden closed polylines, written after the page's own entities.
+        let mut hidden: Vec<(EntityId, u32)> = Vec::new();
+        let stream = build_clip_stream(&stroked, |sequence| {
+            let clip = &general[&sequence];
+            let mut boundary = Vec::new();
+            for ring in &clip.rings {
+                let id = EntityId::new(next_id)
+                    .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+                let (ring_bounds, cell) = bounds_and_cell(ring, bounds);
+                writer
+                    .push_polyline(
+                        EntityMeta {
+                            id,
+                            style: 1,
+                            cell,
+                            bounds: ring_bounds,
+                        },
+                        ring,
+                    )
+                    .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+                hidden.push((id, 0));
+                boundary.push(id);
+                next_id += 1;
+            }
+            Ok((clip.rule, boundary))
+        })?;
+        writer
+            .push_stream(stream.into_stream(&registry).map_err(|e| refused(&e))?)
+            .map_err(|e| refused(&e))?;
+        let line_style = LineStyleStream {
+            styles: vec![LineStyleDef {
+                name: "pdf-clip-ring".into(),
+                dashes: Vec::new(),
+                width: Some(StrokeWidth::Thinnest),
+                phase: 0.0,
+                visible: false,
+            }],
+            assignments: hidden,
+        };
+        writer
+            .push_stream(line_style.into_stream(&registry).map_err(|e| refused(&e))?)
+            .map_err(|e| refused(&e))?;
     }
     writer
         .finish()
@@ -272,32 +326,8 @@ fn entity_runs(
     // keeps its outline.
     let fills = entity.paint.fill.is_some() && entity.fill_colour.iter().any(|&c| c < 250);
     let strokes = entity.paint.stroke;
-    let mut subpaths: Vec<(Vec<[f64; 2]>, bool)> = Vec::new();
-    for segment in &entity.segments {
-        match *segment {
-            PdfPathSegment::MoveTo(point) => subpaths.push((vec![point], false)),
-            PdfPathSegment::LineTo(point) => {
-                if let Some((points, _)) = subpaths.last_mut() {
-                    points.push(point);
-                }
-            }
-            PdfPathSegment::CurveTo { c1, c2, end } => {
-                if let Some((points, _)) = subpaths.last_mut() {
-                    if let Some(&start) = points.last() {
-                        points.extend(cubic_points(start, c1, c2, end).into_iter().skip(1));
-                    }
-                }
-            }
-            PdfPathSegment::Close => {
-                if let Some((_, closed)) = subpaths.last_mut() {
-                    *closed = true;
-                }
-            }
-            _ => {}
-        }
-    }
     let mut runs = Vec::new();
-    for (mut points, closed) in subpaths {
+    for (mut points, closed) in subpaths(entity) {
         points.dedup();
         // A fill closes its subpath implicitly, so three distinct points are a polygon whether or
         // not it has an `h`. A trailing point equal to the first is the closing edge already.
@@ -341,7 +371,57 @@ fn entity_runs(
     runs
 }
 
-fn source_point(point: [f64; 2], page_height: f64) -> [f64; 2] {
+/// The subpaths of a path in PDF points, curves flattened to 16 steps, each with whether an `h`
+/// closed it.
+pub(super) fn subpaths(entity: &PdfPathEntity) -> Vec<(Vec<[f64; 2]>, bool)> {
+    let mut subpaths: Vec<(Vec<[f64; 2]>, bool)> = Vec::new();
+    for segment in &entity.segments {
+        match *segment {
+            PdfPathSegment::MoveTo(point) => subpaths.push((vec![point], false)),
+            PdfPathSegment::LineTo(point) => {
+                if let Some((points, _)) = subpaths.last_mut() {
+                    points.push(point);
+                }
+            }
+            PdfPathSegment::CurveTo { c1, c2, end } => {
+                if let Some((points, _)) = subpaths.last_mut() {
+                    if let Some(&start) = points.last() {
+                        points.extend(cubic_points(start, c1, c2, end).into_iter().skip(1));
+                    }
+                }
+            }
+            PdfPathSegment::Close => {
+                if let Some((_, closed)) = subpaths.last_mut() {
+                    *closed = true;
+                }
+            }
+        }
+    }
+    subpaths
+}
+
+/// The bounds of a polyline and the cell the centre of its bounds falls in on a 16 by 16 grid over
+/// the page.
+fn bounds_and_cell(points: &[[f64; 2]], page: Bounds) -> (Bounds, u32) {
+    let first = points[0];
+    let entity_bounds = points.iter().fold(
+        Bounds {
+            min: first,
+            max: first,
+        },
+        |bounds, point| Bounds {
+            min: [bounds.min[0].min(point[0]), bounds.min[1].min(point[1])],
+            max: [bounds.max[0].max(point[0]), bounds.max[1].max(point[1])],
+        },
+    );
+    let center_x = (entity_bounds.min[0] + entity_bounds.max[0]) / 2.0;
+    let center_y = (entity_bounds.min[1] + entity_bounds.max[1]) / 2.0;
+    let column = (center_x / page.max[0] * 16.0).floor().clamp(0.0, 15.0) as u32;
+    let row = (center_y / page.max[1] * 16.0).floor().clamp(0.0, 15.0) as u32;
+    (entity_bounds, row * 16 + column + 1)
+}
+
+pub(super) fn source_point(point: [f64; 2], page_height: f64) -> [f64; 2] {
     [point[0] / 72.0, (page_height - point[1]) / 72.0]
 }
 
