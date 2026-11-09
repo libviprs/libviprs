@@ -40,7 +40,6 @@ fn convert(body: &str) -> Result<Vec<u8>, PdfToPvecError> {
     pdf_page_to_pvec(&page, "test", "0.0.0")
 }
 
-const STROKE: &str = "0 50 m 100 50 l S";
 const BOX: &str = "10 10 m 60 10 l 60 60 l 10 60 l h";
 
 #[test]
@@ -59,7 +58,7 @@ fn a_stroked_white_fill_keeps_only_its_outline() {
 
 #[test]
 fn a_rectangular_clip_cuts_a_stroke_to_the_rectangle() {
-    let clipped = convert(&format!("q 25 0 50 100 re W n {STROKE} Q")).unwrap();
+    let clipped = convert("q 25 0 50 100 re W n 0 50 m 100 50 l S Q").unwrap();
     let direct = convert("25 50 m 75 50 l S").unwrap();
     assert_eq!(clipped, direct);
 }
@@ -68,7 +67,7 @@ fn a_rectangular_clip_cuts_a_stroke_to_the_rectangle() {
 fn a_rectangular_clip_cuts_a_fill_to_the_rectangle() {
     let clipped = convert("q 0 0 50 100 re W n 0 g 25 25 m 75 25 l 75 75 l 25 75 l h f Q").unwrap();
     let direct = convert("0 g 25 25 m 50 25 l 50 75 l 25 75 l h f").unwrap();
-    assert_eq!(clipped.len(), direct.len());
+    assert_eq!(clipped, direct);
 }
 
 #[test]
