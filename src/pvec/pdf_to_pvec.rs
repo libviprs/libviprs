@@ -6,12 +6,21 @@
 //! (style 2 for a filled polygon, 1 for a stroke), curves flattened to 16 steps. A white fill is
 //! dropped (a stroked one keeps its outline), and a path inside a rectangular clip is cut to it
 //! through `apply_clip_policy`. `tests/pvec_1578_pdf_page_to_pvec.rs` pins the bytes on
-//! `blueprint-mix.pdf`. The stroke colour and alpha (stream 24) and the stroke width and dashes (the line style stream) are written for every stroke (L2). A clip that is not a rectangle is written as capability 26 for the strokes under it (L4, `pdf_clip_stream`). The test pins the whole file.
+//! `blueprint-mix.pdf`. The stroke colour and alpha (stream 24) and the stroke width and dashes (the line style stream) are written for every stroke (L2); the geometry blocks are the ones server main writes, the test pins the whole file.
+//!
+//! This module flattens curves and compares coordinates exactly, which ADR NG-10 (NG-B2, NG-B6)
+//! keeps out of normalization and which `pdf_vector` and `pdf_bezier` say they never do. It is
+//! allowed here because the output has to match the bytes the server already writes, so the
+//! flattening and the clip cuts are copied as they are. It is a stopgap, and it goes away with L4
+//! (#1578), when the stream work replaces this mapping.
+//!
+//! The paint order (stream 23), the fill rule (stream 25) and the hatch record of every fill come from `pdf_paint` (L3). A clip that is not a rectangle is written as capability 26 for the strokes under it (L4, `pdf_clip_stream`).
 
 use super::components::{LineStyleDef, LineStyleStream, StrokePaintStream, StrokeWidth};
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
 use super::pdf_clip_stream::{build as build_clip_stream, general_clips};
+use super::pdf_paint::PaintLog;
 use super::pdf_vector::{PdfPathEntity, PdfPathSegment, PdfVectorPage};
 use pvec_capabilities::Registry;
 use pvec_container::{
@@ -42,6 +51,167 @@ pub fn pdf_page_to_pvec(
     producer_id: &str,
     producer_version: &str,
 ) -> Result<Vec<u8>, PdfToPvecError> {
+    /// The polylines one PDF path becomes, as (style, points in inches). Style 2 is a closed fill
+    /// polygon the viewer can fill, style 1 a stroke. `clip` is the page-space rectangle the path is
+    /// drawn inside, when there is one.
+    ///
+    /// Limits: every filled subpath is its own solid polygon, so holes in a compound path (rings,
+    /// letter counters) fill solid. A fill colour set through a pattern or an unknown colour space is
+    /// not tracked by libviprs, so the last plain colour decides whether it counts as white.
+    fn entity_runs(
+        entity: &PdfPathEntity,
+        clip: Option<ExactBounds>,
+        page_height: f64,
+    ) -> Vec<(u32, Vec<[f64; 2]>)> {
+        /// The pieces of a polyline that lie inside the rectangle, each continuous.
+        fn clip_polyline(points: &[[f64; 2]], rect: ExactBounds) -> Vec<Vec<[f64; 2]>> {
+            /// Liang-Barsky: the part of the segment inside the rectangle.
+            fn clip_segment(
+                a: [f64; 2],
+                b: [f64; 2],
+                rect: ExactBounds,
+            ) -> Option<([f64; 2], [f64; 2])> {
+                let (mut t0, mut t1) = (0.0f64, 1.0f64);
+                let d = [b[0] - a[0], b[1] - a[1]];
+                for (p, q) in [
+                    (-d[0], a[0] - rect.min[0]),
+                    (d[0], rect.max[0] - a[0]),
+                    (-d[1], a[1] - rect.min[1]),
+                    (d[1], rect.max[1] - a[1]),
+                ] {
+                    if p == 0.0 {
+                        if q < 0.0 {
+                            return None;
+                        }
+                    } else {
+                        let t = q / p;
+                        if p < 0.0 {
+                            if t > t1 {
+                                return None;
+                            }
+                            t0 = t0.max(t);
+                        } else {
+                            if t < t0 {
+                                return None;
+                            }
+                            t1 = t1.min(t);
+                        }
+                    }
+                }
+                let at = |t: f64| [a[0] + t * d[0], a[1] + t * d[1]];
+                Some((
+                    if t0 == 0.0 { a } else { at(t0) },
+                    if t1 == 1.0 { b } else { at(t1) },
+                ))
+            }
+            let mut pieces: Vec<Vec<[f64; 2]>> = Vec::new();
+            for pair in points.windows(2) {
+                match clip_segment(pair[0], pair[1], rect) {
+                    Some((start, end)) => match pieces.last_mut() {
+                        Some(piece) if piece.last() == Some(&start) => piece.push(end),
+                        _ => pieces.push(vec![start, end]),
+                    },
+                    None => pieces.push(Vec::new()),
+                }
+            }
+            pieces.retain(|piece| !piece.is_empty());
+            pieces
+        }
+
+        /// Sutherland-Hodgman against the rectangle. The ring comes in closed and goes out closed, or
+        /// empty when nothing is left.
+        fn clip_polygon(ring: &[[f64; 2]], rect: ExactBounds) -> Vec<[f64; 2]> {
+            let mut out = ring[..ring.len() - 1].to_vec();
+            for (axis, value, keep_above) in [
+                (0, rect.min[0], true),
+                (0, rect.max[0], false),
+                (1, rect.min[1], true),
+                (1, rect.max[1], false),
+            ] {
+                let inside = |p: [f64; 2]| {
+                    if keep_above {
+                        p[axis] >= value
+                    } else {
+                        p[axis] <= value
+                    }
+                };
+                let input = std::mem::take(&mut out);
+                for (index, &current) in input.iter().enumerate() {
+                    let previous = input[(index + input.len() - 1) % input.len()];
+                    let crossing = || {
+                        let t = (value - previous[axis]) / (current[axis] - previous[axis]);
+                        let mut point = [0.0; 2];
+                        point[axis] = value;
+                        point[1 - axis] =
+                            previous[1 - axis] + t * (current[1 - axis] - previous[1 - axis]);
+                        point
+                    };
+                    if inside(current) {
+                        if !inside(previous) {
+                            out.push(crossing());
+                        }
+                        out.push(current);
+                    } else if inside(previous) {
+                        out.push(crossing());
+                    }
+                }
+                if out.is_empty() {
+                    return out;
+                }
+            }
+            out.push(out[0]);
+            out
+        }
+
+        // The viewer paints the page white, so a white fill adds nothing. One that is also stroked
+        // keeps its outline.
+        let fills = entity.paint.fill.is_some() && entity.fill_colour.iter().any(|&c| c < 250);
+        let strokes = entity.paint.stroke;
+        let mut runs = Vec::new();
+        for (mut points, closed) in subpaths(entity) {
+            points.dedup();
+            // A fill closes its subpath implicitly, so three distinct points are a polygon whether or
+            // not it has an `h`. A trailing point equal to the first is the closing edge already.
+            let mut ring = points.clone();
+            if ring.len() > 1 && ring.first() == ring.last() {
+                ring.pop();
+            }
+            let filled = fills && ring.len() >= 3;
+            if filled {
+                ring.push(ring[0]);
+                if let Some(clip) = clip {
+                    ring = clip_polygon(&ring, clip);
+                }
+                if ring.len() >= 4 {
+                    runs.push((
+                        2,
+                        ring.iter().map(|&p| source_point(p, page_height)).collect(),
+                    ));
+                }
+            }
+            // A stroked fill (`B`) keeps its outline as well as its polygon.
+            if strokes {
+                if closed && points.first() != points.last() {
+                    points.push(points[0]);
+                }
+                let pieces = match clip {
+                    Some(clip) => clip_polyline(&points, clip),
+                    None => vec![points],
+                };
+                for piece in pieces.into_iter().filter(|piece| piece.len() >= 2) {
+                    runs.push((
+                        1,
+                        piece
+                            .iter()
+                            .map(|&p| source_point(p, page_height))
+                            .collect(),
+                    ));
+                }
+            }
+        }
+        runs
+    }
+
     let bounds = Bounds {
         min: [0.0, 0.0],
         max: [page.width / 72.0, page.height / 72.0],
@@ -57,6 +227,8 @@ pub fn pdf_page_to_pvec(
         capabilities: vec![],
     });
     let mut next_id = 1u32;
+    // What was painted, in the PDF's own order: the hatch records, the fill rules and stream 23.
+    let mut log = PaintLog::new();
     // What each stroke entity says about its paint: a colour word (`0xRRGGBBAA`, the alpha byte is
     // the stroke alpha), and its line style (width and dashes in inches, the PDF's own `w` and `d`
     // times the scale of the CTM it was painted under).
@@ -125,7 +297,12 @@ pub fn pdf_page_to_pvec(
                 continue;
             }
         }
-        for (style, points) in entity_runs(entity, clip, page.height) {
+        // The PDF paints a path's fill and then its stroke, so the rings come first.
+        let mut runs = entity_runs(entity, clip, page.height);
+        runs.sort_by_key(|(style, _)| std::cmp::Reverse(*style));
+        let mut rings = Vec::new();
+        let mut strokes = Vec::new();
+        for (style, points) in runs {
             // One polyline entity: repeated points dropped, a single point (or none) skipped, the
             // cell the centre of its bounds falls in on a 16 by 16 grid over the page.
             let points = points
@@ -191,46 +368,65 @@ pub fn pdf_page_to_pvec(
                 stroked.push((id, chain.clone()));
             }
             next_id += 1;
+            if style == 2 {
+                rings.push(id);
+            } else {
+                strokes.push(id);
+            }
+        }
+        if let (false, Some(rule)) = (rings.is_empty(), entity.paint.fill) {
+            log.fill(&rings, rule, entity.fill_colour);
+        }
+        for id in strokes {
+            log.stroke(id);
         }
     }
     if next_id == 1 {
         return Err(PdfToPvecError::NoPaths);
     }
+    let registry = Registry::v1();
+    let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
+    // The rings of the general clips are hidden closed polylines, written after the page's own
+    // entities, with the clip stream that names them.
+    if !stroked.is_empty() {
+        let stream = build_clip_stream(&stroked, |sequence| {
+            let clip = &general[&sequence];
+            let mut boundary = Vec::new();
+            for ring in &clip.rings {
+                let id = EntityId::new(next_id)
+                    .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+                let (ring_bounds, cell) = bounds_and_cell(ring, bounds);
+                writer
+                    .push_polyline(
+                        EntityMeta {
+                            id,
+                            style: 1,
+                            cell,
+                            bounds: ring_bounds,
+                        },
+                        ring,
+                    )
+                    .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+                stroke_styles.push((
+                    id,
+                    LineStyleDef {
+                        name: "pdf-clip-ring".into(),
+                        dashes: Vec::new(),
+                        width: Some(StrokeWidth::Thinnest),
+                        phase: 0.0,
+                        visible: false,
+                    },
+                ));
+                boundary.push(id);
+                next_id += 1;
+            }
+            Ok((clip.rule, boundary))
+        })?;
+        writer
+            .push_stream(stream.into_stream(&registry).map_err(|e| refused(&e))?)
+            .map_err(|e| refused(&e))?;
+    }
     if !stroke_colours.is_empty() {
-        let registry = Registry::v1();
-        let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
-        // The rings of the general clips are hidden closed polylines, written after the page's
-        // own entities, with the clip stream that names them.
-        let mut hidden: Vec<(EntityId, u32)> = Vec::new();
-        if !stroked.is_empty() {
-            let stream = build_clip_stream(&stroked, |sequence| {
-                let clip = &general[&sequence];
-                let mut boundary = Vec::new();
-                for ring in &clip.rings {
-                    let id = EntityId::new(next_id)
-                        .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
-                    let (ring_bounds, cell) = bounds_and_cell(ring, bounds);
-                    writer
-                        .push_polyline(
-                            EntityMeta {
-                                id,
-                                style: 1,
-                                cell,
-                                bounds: ring_bounds,
-                            },
-                            ring,
-                        )
-                        .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
-                    hidden.push((id, 0));
-                    boundary.push(id);
-                    next_id += 1;
-                }
-                Ok((clip.rule, boundary))
-            })?;
-            writer
-                .push_stream(stream.into_stream(&registry).map_err(|e| refused(&e))?)
-                .map_err(|e| refused(&e))?;
-        }
         // The colour table, one entry per distinct word, in first-seen order.
         let mut colours: Vec<u32> = Vec::new();
         let mut colour_index: BTreeMap<u32, u32> = BTreeMap::new();
@@ -251,18 +447,35 @@ pub fn pdf_page_to_pvec(
         writer
             .push_stream(paint.into_stream(&registry).map_err(|e| refused(&e))?)
             .map_err(|e| refused(&e))?;
+    }
+    // One line style stream: the stroke widths and dashes, and the hidden style of the fill rings.
+    stroke_styles.extend(log.hidden_rings().iter().map(|&id| {
+        (
+            id,
+            LineStyleDef {
+                name: "pdf-fill-ring".into(),
+                dashes: Vec::new(),
+                width: None,
+                phase: 0.0,
+                visible: false,
+            },
+        )
+    }));
+    if !stroke_styles.is_empty() {
         let mut styles: Vec<LineStyleDef> = Vec::new();
         let mut style_index: BTreeMap<Vec<u64>, u32> = BTreeMap::new();
-        let mut assignments: Vec<(EntityId, u32)> = stroke_styles
+        let assignments: Vec<(EntityId, u32)> = stroke_styles
             .into_iter()
             .map(|(id, def)| {
-                let key = std::iter::once(match def.width {
-                    Some(StrokeWidth::Width(w)) => w.to_bits(),
-                    _ => 0,
-                })
-                .chain(std::iter::once(def.phase.to_bits()))
-                .chain(def.dashes.iter().map(|d| d.to_bits()))
-                .collect();
+                let key = [u64::from(def.visible), u64::from(def.width.is_some())]
+                    .into_iter()
+                    .chain(std::iter::once(match def.width {
+                        Some(StrokeWidth::Width(w)) => w.to_bits(),
+                        _ => 0,
+                    }))
+                    .chain(std::iter::once(def.phase.to_bits()))
+                    .chain(def.dashes.iter().map(|d| d.to_bits()))
+                    .collect();
                 let index = *style_index.entry(key).or_insert_with(|| {
                     styles.push(def);
                     (styles.len() - 1) as u32
@@ -270,18 +483,6 @@ pub fn pdf_page_to_pvec(
                 (id, index)
             })
             .collect();
-        // The clip rings share one hidden style, after the stroke styles.
-        if !hidden.is_empty() {
-            let ring_style = styles.len() as u32;
-            styles.push(LineStyleDef {
-                name: "pdf-clip-ring".into(),
-                dashes: Vec::new(),
-                width: Some(StrokeWidth::Thinnest),
-                phase: 0.0,
-                visible: false,
-            });
-            assignments.extend(hidden.into_iter().map(|(id, _)| (id, ring_style)));
-        }
         let line_style = LineStyleStream {
             styles,
             assignments,
@@ -290,175 +491,38 @@ pub fn pdf_page_to_pvec(
             .push_stream(line_style.into_stream(&registry).map_err(|e| refused(&e))?)
             .map_err(|e| refused(&e))?;
     }
+    for stream in log.streams(&registry).map_err(PdfToPvecError::Write)? {
+        writer
+            .push_stream(stream)
+            .map_err(|error| PdfToPvecError::Write(error.to_string()))?;
+    }
     writer
         .finish()
         .map_err(|error| PdfToPvecError::Write(error.to_string()))
 }
 
-/// The polylines one PDF path becomes, as (style, points in inches). Style 2 is a closed fill
-/// polygon the viewer can fill, style 1 a stroke. `clip` is the page-space rectangle the path is
-/// drawn inside, when there is one.
-///
-/// Limits: every filled subpath is its own solid polygon, so holes in a compound path (rings,
-/// letter counters) fill solid. A fill colour set through a pattern or an unknown colour space is
-/// not tracked by libviprs, so the last plain colour decides whether it counts as white.
-fn entity_runs(
-    entity: &PdfPathEntity,
-    clip: Option<ExactBounds>,
-    page_height: f64,
-) -> Vec<(u32, Vec<[f64; 2]>)> {
-    /// The pieces of a polyline that lie inside the rectangle, each continuous.
-    fn clip_polyline(points: &[[f64; 2]], rect: ExactBounds) -> Vec<Vec<[f64; 2]>> {
-        /// Liang-Barsky: the part of the segment inside the rectangle.
-        fn clip_segment(
-            a: [f64; 2],
-            b: [f64; 2],
-            rect: ExactBounds,
-        ) -> Option<([f64; 2], [f64; 2])> {
-            let (mut t0, mut t1) = (0.0f64, 1.0f64);
-            let d = [b[0] - a[0], b[1] - a[1]];
-            for (p, q) in [
-                (-d[0], a[0] - rect.min[0]),
-                (d[0], rect.max[0] - a[0]),
-                (-d[1], a[1] - rect.min[1]),
-                (d[1], rect.max[1] - a[1]),
-            ] {
-                if p == 0.0 {
-                    if q < 0.0 {
-                        return None;
-                    }
-                } else {
-                    let t = q / p;
-                    if p < 0.0 {
-                        if t > t1 {
-                            return None;
-                        }
-                        t0 = t0.max(t);
-                    } else {
-                        if t < t0 {
-                            return None;
-                        }
-                        t1 = t1.min(t);
-                    }
-                }
-            }
-            let at = |t: f64| [a[0] + t * d[0], a[1] + t * d[1]];
-            Some((
-                if t0 == 0.0 { a } else { at(t0) },
-                if t1 == 1.0 { b } else { at(t1) },
-            ))
-        }
-        let mut pieces: Vec<Vec<[f64; 2]>> = Vec::new();
-        for pair in points.windows(2) {
-            match clip_segment(pair[0], pair[1], rect) {
-                Some((start, end)) => match pieces.last_mut() {
-                    Some(piece) if piece.last() == Some(&start) => piece.push(end),
-                    _ => pieces.push(vec![start, end]),
-                },
-                None => pieces.push(Vec::new()),
-            }
-        }
-        pieces.retain(|piece| !piece.is_empty());
-        pieces
-    }
-
-    /// Sutherland-Hodgman against the rectangle. The ring comes in closed and goes out closed, or
-    /// empty when nothing is left.
-    fn clip_polygon(ring: &[[f64; 2]], rect: ExactBounds) -> Vec<[f64; 2]> {
-        let mut out = ring[..ring.len() - 1].to_vec();
-        for (axis, value, keep_above) in [
-            (0, rect.min[0], true),
-            (0, rect.max[0], false),
-            (1, rect.min[1], true),
-            (1, rect.max[1], false),
-        ] {
-            let inside = |p: [f64; 2]| {
-                if keep_above {
-                    p[axis] >= value
-                } else {
-                    p[axis] <= value
-                }
-            };
-            let input = std::mem::take(&mut out);
-            for (index, &current) in input.iter().enumerate() {
-                let previous = input[(index + input.len() - 1) % input.len()];
-                let crossing = || {
-                    let t = (value - previous[axis]) / (current[axis] - previous[axis]);
-                    let mut point = [0.0; 2];
-                    point[axis] = value;
-                    point[1 - axis] =
-                        previous[1 - axis] + t * (current[1 - axis] - previous[1 - axis]);
-                    point
-                };
-                if inside(current) {
-                    if !inside(previous) {
-                        out.push(crossing());
-                    }
-                    out.push(current);
-                } else if inside(previous) {
-                    out.push(crossing());
-                }
-            }
-            if out.is_empty() {
-                return out;
-            }
-        }
-        out.push(out[0]);
-        out
-    }
-
-    // The viewer paints the page white, so a white fill adds nothing. One that is also stroked
-    // keeps its outline.
-    let fills = entity.paint.fill.is_some() && entity.fill_colour.iter().any(|&c| c < 250);
-    let strokes = entity.paint.stroke;
-    let mut runs = Vec::new();
-    for (mut points, closed) in subpaths(entity) {
-        points.dedup();
-        // A fill closes its subpath implicitly, so three distinct points are a polygon whether or
-        // not it has an `h`. A trailing point equal to the first is the closing edge already.
-        let mut ring = points.clone();
-        if ring.len() > 1 && ring.first() == ring.last() {
-            ring.pop();
-        }
-        let filled = fills && ring.len() >= 3;
-        if filled {
-            ring.push(ring[0]);
-            if let Some(clip) = clip {
-                ring = clip_polygon(&ring, clip);
-            }
-            if ring.len() >= 4 {
-                runs.push((
-                    2,
-                    ring.iter().map(|&p| source_point(p, page_height)).collect(),
-                ));
-            }
-        }
-        // A stroked fill (`B`) keeps its outline as well as its polygon.
-        if strokes {
-            if closed && points.first() != points.last() {
-                points.push(points[0]);
-            }
-            let pieces = match clip {
-                Some(clip) => clip_polyline(&points, clip),
-                None => vec![points],
-            };
-            for piece in pieces.into_iter().filter(|piece| piece.len() >= 2) {
-                runs.push((
-                    1,
-                    piece
-                        .iter()
-                        .map(|&p| source_point(p, page_height))
-                        .collect(),
-                ));
-            }
-        }
-    }
-    runs
-}
-
 /// The subpaths of a path in PDF points, curves flattened to 16 steps, each with whether an `h`
 /// closed it.
 pub(super) fn subpaths(entity: &PdfPathEntity) -> Vec<(Vec<[f64; 2]>, bool)> {
+    fn cubic_points(start: [f64; 2], c1: [f64; 2], c2: [f64; 2], end: [f64; 2]) -> Vec<[f64; 2]> {
+        (0..=16)
+            .map(|step| {
+                let t = step as f64 / 16.0;
+                let u = 1.0 - t;
+                [
+                    u * u * u * start[0]
+                        + 3.0 * u * u * t * c1[0]
+                        + 3.0 * u * t * t * c2[0]
+                        + t * t * t * end[0],
+                    u * u * u * start[1]
+                        + 3.0 * u * u * t * c1[1]
+                        + 3.0 * u * t * t * c2[1]
+                        + t * t * t * end[1],
+                ]
+            })
+            .collect()
+    }
+
     let mut subpaths: Vec<(Vec<[f64; 2]>, bool)> = Vec::new();
     for segment in &entity.segments {
         match *segment {
@@ -508,23 +572,4 @@ fn bounds_and_cell(points: &[[f64; 2]], page: Bounds) -> (Bounds, u32) {
 
 pub(super) fn source_point(point: [f64; 2], page_height: f64) -> [f64; 2] {
     [point[0] / 72.0, (page_height - point[1]) / 72.0]
-}
-
-fn cubic_points(start: [f64; 2], c1: [f64; 2], c2: [f64; 2], end: [f64; 2]) -> Vec<[f64; 2]> {
-    (0..=16)
-        .map(|step| {
-            let t = step as f64 / 16.0;
-            let u = 1.0 - t;
-            [
-                u * u * u * start[0]
-                    + 3.0 * u * u * t * c1[0]
-                    + 3.0 * u * t * t * c2[0]
-                    + t * t * t * end[0],
-                u * u * u * start[1]
-                    + 3.0 * u * u * t * c1[1]
-                    + 3.0 * u * t * t * c2[1]
-                    + t * t * t * end[1],
-            ]
-        })
-        .collect()
 }
