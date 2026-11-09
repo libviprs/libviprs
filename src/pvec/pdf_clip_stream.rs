@@ -4,13 +4,12 @@
 //! A clip that is an axis-aligned rectangle is cut into the geometry by `pdf_page_to_pvec`. Any
 //! other `W` or `W*` path is kept whole: its subpaths are written as hidden closed ring entities
 //! and a clip record names them with the winding rule. Clips nest through the parent of a record,
-//! so a chain of clips in force is the chain of records, outermost first, and a stroke is assigned
+//! so a chain of clips in force is the chain of records, outermost first, and a stroke or fill is assigned
 //! to the record of its innermost clip. A chain is cut off at eight records (the stencil bits a
 //! renderer has), so the items under a deeper clip are drawn with the first eight.
 //!
-//! Only strokes are assigned so far. A fill is a style 2 polygon in the geometry until the hatch
-//! stream carries it, and a hatch record is the item a clip run would name. Text and rasters
-//! follow the same way once they are written. A clip whose path has no ring of three distinct
+//! Strokes (by entity id) and fills (by hatch record number, from `pdf_paint`) are assigned. Text
+//! and rasters follow the same way once they are written. A clip whose path has no ring of three distinct
 //! points (a line, a point) is left unapplied, like a clip this module does not know.
 
 use super::components::{ClipRecord, ClipRun, ClipStream, FillRule, ItemKind};
@@ -76,18 +75,27 @@ pub(super) fn general_clips(
     found
 }
 
-/// The clip stream for the strokes in `stroked` (an entity id and its chain, ascending by id).
-/// `write_rings` writes the hidden rings of one clip, once per clip, and returns the rule and the
+/// The clip stream for the strokes in `stroked` (an entity id and its chain, ascending by id) and
+/// the fills in `filled` (a hatch record number and its chain, ascending). `write_rings` writes the hidden rings of one clip, once per clip, and returns the rule and the
 /// ids of the ring entities.
 pub(super) fn build<E>(
     stroked: &[(EntityId, Vec<u64>)],
+    filled: &[(u32, Vec<u64>)],
     mut write_rings: impl FnMut(u64) -> Result<(FillRule, Vec<EntityId>), E>,
 ) -> Result<ClipStream, E> {
     let mut rings: BTreeMap<u64, (FillRule, Vec<EntityId>)> = BTreeMap::new();
     let mut index: BTreeMap<&[u64], u32> = BTreeMap::new();
     let mut clips: Vec<ClipRecord> = Vec::new();
     let mut runs: Vec<ClipRun> = Vec::new();
-    for (id, chain) in stroked {
+    let items = stroked
+        .iter()
+        .map(|(id, chain)| (ItemKind::Stroke, id.index(), chain))
+        .chain(
+            filled
+                .iter()
+                .map(|(hatch, chain)| (ItemKind::Fill, *hatch, chain)),
+        );
+    for (kind, number, chain) in items {
         for end in 1..=chain.len() {
             let prefix = &chain[..end];
             if index.contains_key(prefix) {
@@ -107,10 +115,14 @@ pub(super) fn build<E>(
         }
         let clip = index[chain.as_slice()];
         match runs.last_mut() {
-            Some(run) if run.clip == clip && run.first + run.count == id.index() => run.count += 1,
+            Some(run)
+                if run.kind == kind && run.clip == clip && run.first + run.count == number =>
+            {
+                run.count += 1
+            }
             _ => runs.push(ClipRun {
-                kind: ItemKind::Stroke,
-                first: id.index(),
+                kind,
+                first: number,
                 count: 1,
                 clip,
             }),

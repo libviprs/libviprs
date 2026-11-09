@@ -35,7 +35,14 @@ impl PaintLog {
     }
 
     /// A filled path: `rings` are the polygon entities written for it, `rgb` its fill colour.
-    pub(super) fn fill(&mut self, rings: &[EntityId], rule: PdfFillRule, rgb: [u8; 3]) {
+    /// Returns the numbers of the hatch records it became.
+    pub(super) fn fill(
+        &mut self,
+        rings: &[EntityId],
+        rule: PdfFillRule,
+        rgb: [u8; 3],
+    ) -> std::ops::Range<u32> {
+        let first = self.hatch.records.len() as u32;
         let rule = match rule {
             PdfFillRule::EvenOdd => FillRule::EvenOdd,
             _ => FillRule::NonZero,
@@ -65,6 +72,7 @@ impl PaintLog {
             self.items.push((ItemKind::Fill, hatch));
         }
         self.hidden.extend_from_slice(rings);
+        first..self.hatch.records.len() as u32
     }
 
     /// A stroke entity, painted after everything logged before it.

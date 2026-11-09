@@ -11,10 +11,10 @@
 //! This module flattens curves and compares coordinates exactly, which ADR NG-10 (NG-B2, NG-B6)
 //! keeps out of normalization and which `pdf_vector` and `pdf_bezier` say they never do. It is
 //! allowed here because the output has to match the bytes the server already writes, so the
-//! flattening and the clip cuts are copied as they are. It is a stopgap, and it goes away with L4
-//! (#1578), when the stream work replaces this mapping.
+//! flattening and the clip cuts are copied as they are. It is a stopgap, and it goes away when the
+//! stream work of #1578 replaces this mapping.
 //!
-//! The paint order (stream 23), the fill rule (stream 25) and the hatch record of every fill come from `pdf_paint` (L3). A clip that is not a rectangle is written as capability 26 for the strokes under it (L4, `pdf_clip_stream`).
+//! The paint order (stream 23), the fill rule (stream 25) and the hatch record of every fill come from `pdf_paint` (L3). A clip that is not a rectangle is written as capability 26 for the strokes and fills under it (L4, `pdf_clip_stream`).
 
 use super::components::{LineStyleDef, LineStyleStream, StrokePaintStream, StrokeWidth};
 use super::limits::SourceLimits;
@@ -247,9 +247,11 @@ pub fn pdf_page_to_pvec(
         .as_ref()
         .map(|clips| general_clips(page, clips))
         .unwrap_or_default();
-    // Each stroke written under general clips, with the clips in force (outermost first, cut off
-    // at eight, the depth a clip stream allows).
+    // Each stroke (by entity id) and each fill (by hatch record number) written under general
+    // clips, with the clips in force (outermost first, cut off at eight, the depth a clip stream
+    // allows).
     let mut stroked: Vec<(EntityId, Vec<u64>)> = Vec::new();
+    let mut filled: Vec<(u32, Vec<u64>)> = Vec::new();
     let decisions: BTreeMap<u64, _> = clips
         .iter()
         .flat_map(|clips| &clips.decisions)
@@ -375,7 +377,10 @@ pub fn pdf_page_to_pvec(
             }
         }
         if let (false, Some(rule)) = (rings.is_empty(), entity.paint.fill) {
-            log.fill(&rings, rule, entity.fill_colour);
+            let hatches = log.fill(&rings, rule, entity.fill_colour);
+            if !chain.is_empty() {
+                filled.extend(hatches.map(|hatch| (hatch, chain.clone())));
+            }
         }
         for id in strokes {
             log.stroke(id);
@@ -388,8 +393,8 @@ pub fn pdf_page_to_pvec(
     let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
     // The rings of the general clips are hidden closed polylines, written after the page's own
     // entities, with the clip stream that names them.
-    if !stroked.is_empty() {
-        let stream = build_clip_stream(&stroked, |sequence| {
+    if !stroked.is_empty() || !filled.is_empty() {
+        let stream = build_clip_stream(&stroked, &filled, |sequence| {
             let clip = &general[&sequence];
             let mut boundary = Vec::new();
             for ring in &clip.rings {
