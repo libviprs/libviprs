@@ -13,10 +13,13 @@
 //! allowed here because the output has to match the bytes the server already writes, so the
 //! flattening and the clip cuts are copied as they are. It is a stopgap, and it goes away with L4
 //! (#1578), when the stream work replaces this mapping.
+//!
+//! The paint order (stream 23), the fill rule (stream 25) and the hatch record of every fill come from `pdf_paint` (L3).
 
 use super::components::{LineStyleDef, LineStyleStream, StrokePaintStream, StrokeWidth};
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
+use super::pdf_paint::PaintLog;
 use super::pdf_vector::{PdfPathEntity, PdfPathSegment, PdfVectorPage};
 use pvec_capabilities::Registry;
 use pvec_container::{
@@ -274,6 +277,8 @@ pub fn pdf_page_to_pvec(
         capabilities: vec![],
     });
     let mut next_id = 1u32;
+    // What was painted, in the PDF's own order: the hatch records, the fill rules and stream 23.
+    let mut log = PaintLog::new();
     // What each stroke entity says about its paint: a colour word (`0xRRGGBBAA`, the alpha byte is
     // the stroke alpha), and its line style (width and dashes in inches, the PDF's own `w` and `d`
     // times the scale of the CTM it was painted under).
@@ -327,7 +332,12 @@ pub fn pdf_page_to_pvec(
                 continue;
             }
         }
-        for (style, points) in entity_runs(entity, clip, page.height) {
+        // The PDF paints a path's fill and then its stroke, so the rings come first.
+        let mut runs = entity_runs(entity, clip, page.height);
+        runs.sort_by_key(|(style, _)| std::cmp::Reverse(*style));
+        let mut rings = Vec::new();
+        let mut strokes = Vec::new();
+        for (style, points) in runs {
             // One polyline entity: repeated points dropped, a single point (or none) skipped, the
             // cell the centre of its bounds falls in on a 16 by 16 grid over the page.
             let points = points
@@ -404,14 +414,25 @@ pub fn pdf_page_to_pvec(
                 )
                 .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
             next_id += 1;
+            if style == 2 {
+                rings.push(id);
+            } else {
+                strokes.push(id);
+            }
+        }
+        if let (false, Some(rule)) = (rings.is_empty(), entity.paint.fill) {
+            log.fill(&rings, rule, entity.fill_colour);
+        }
+        for id in strokes {
+            log.stroke(id);
         }
     }
     if next_id == 1 {
         return Err(PdfToPvecError::NoPaths);
     }
+    let registry = Registry::v1();
+    let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
     if !stroke_colours.is_empty() {
-        let registry = Registry::v1();
-        let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
         // The colour table, one entry per distinct word, in first-seen order.
         let mut colours: Vec<u32> = Vec::new();
         let mut colour_index: BTreeMap<u32, u32> = BTreeMap::new();
@@ -432,18 +453,35 @@ pub fn pdf_page_to_pvec(
         writer
             .push_stream(paint.into_stream(&registry).map_err(|e| refused(&e))?)
             .map_err(|e| refused(&e))?;
+    }
+    // One line style stream: the stroke widths and dashes, and the hidden style of the fill rings.
+    stroke_styles.extend(log.hidden_rings().iter().map(|&id| {
+        (
+            id,
+            LineStyleDef {
+                name: "pdf-fill-ring".into(),
+                dashes: Vec::new(),
+                width: None,
+                phase: 0.0,
+                visible: false,
+            },
+        )
+    }));
+    if !stroke_styles.is_empty() {
         let mut styles: Vec<LineStyleDef> = Vec::new();
         let mut style_index: BTreeMap<Vec<u64>, u32> = BTreeMap::new();
         let assignments = stroke_styles
             .into_iter()
             .map(|(id, def)| {
-                let key = std::iter::once(match def.width {
-                    Some(StrokeWidth::Width(w)) => w.to_bits(),
-                    _ => 0,
-                })
-                .chain(std::iter::once(def.phase.to_bits()))
-                .chain(def.dashes.iter().map(|d| d.to_bits()))
-                .collect();
+                let key = [u64::from(def.visible), u64::from(def.width.is_some())]
+                    .into_iter()
+                    .chain(std::iter::once(match def.width {
+                        Some(StrokeWidth::Width(w)) => w.to_bits(),
+                        _ => 0,
+                    }))
+                    .chain(std::iter::once(def.phase.to_bits()))
+                    .chain(def.dashes.iter().map(|d| d.to_bits()))
+                    .collect();
                 let index = *style_index.entry(key).or_insert_with(|| {
                     styles.push(def);
                     (styles.len() - 1) as u32
@@ -458,6 +496,11 @@ pub fn pdf_page_to_pvec(
         writer
             .push_stream(line_style.into_stream(&registry).map_err(|e| refused(&e))?)
             .map_err(|e| refused(&e))?;
+    }
+    for stream in log.streams(&registry).map_err(PdfToPvecError::Write)? {
+        writer
+            .push_stream(stream)
+            .map_err(|error| PdfToPvecError::Write(error.to_string()))?;
     }
     writer
         .finish()

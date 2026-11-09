@@ -107,9 +107,12 @@ fn dashes_and_their_phase_are_scaled_like_the_width() {
 }
 
 #[test]
-fn a_fill_only_page_writes_neither_stream() {
+fn a_fill_only_page_writes_no_stroke_colour_and_only_the_hidden_ring_style() {
     let (paint, styles) = convert("1 0 0 rg 0 0 10 10 re f");
-    assert!(paint.is_none() && styles.is_none());
+    assert!(paint.is_none());
+    let styles = styles.unwrap().styles;
+    assert_eq!(styles.len(), 1);
+    assert!(!styles[0].visible);
 }
 
 #[test]

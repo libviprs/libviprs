@@ -24,8 +24,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use pvec_capabilities::Registry;
 use pvec_facade::EntityId as PvecEntityId;
 pub(super) use pvec_facade::components::{
+    Fill, FillAssignment, FillPaintStream, FillRule, FillSource, HatchStream, ItemKind,
     LAYER_FROZEN, LAYER_LOCKED, LAYER_OFF, LayerStream, LineStyleDef, LineStyleStream,
-    ProvenanceRecord, ProvenanceStream, Stream, StrokePaintStream, StrokeWidth,
+    PaintOrderStream, PaintRun, ProvenanceRecord, ProvenanceStream, Stream, StrokePaintStream,
+    StrokeWidth,
 };
 use thiserror::Error;
 
