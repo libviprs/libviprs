@@ -7,15 +7,22 @@
 
 /// Cuts the closed `ring` (first point equal to last) to the convex closed `clip` ring, either
 /// winding. Returns the cut ring, closed, or an empty vector when nothing is left. Returns `None`
-/// when `clip` is not convex, or is not a closed ring of three or more corners: the caller keeps
-/// the fill uncut then, as display fidelity.
+/// when any coordinate is not finite, when `clip` is not convex, or when it is not a closed ring of
+/// three or more corners: the caller keeps the fill uncut then, as display fidelity.
 #[must_use]
 pub fn cut_ring(ring: &[[f64; 2]], clip: &[[f64; 2]]) -> Option<Vec<[f64; 2]>> {
+    if ring
+        .iter()
+        .chain(clip)
+        .any(|p| !p[0].is_finite() || !p[1].is_finite())
+    {
+        return None;
+    }
     let mut corners = clip.to_vec();
-    if corners.len() > 1 && corners.first() == corners.last() {
+    corners.dedup();
+    while corners.len() > 1 && corners.first() == corners.last() {
         corners.pop();
     }
-    corners.dedup();
     let n = corners.len();
     if n < 3 {
         return None;

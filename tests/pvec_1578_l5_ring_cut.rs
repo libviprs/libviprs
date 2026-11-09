@@ -150,3 +150,41 @@ fn a_ring_crossing_a_clip_corner_keeps_one_ring_not_two_pieces() {
     assert!((area(&cut) - 3.5).abs() < 1e-9, "got {cut:?}");
     assert!(cut.iter().all(|p| p[0] + p[1] <= 20.0 + 1e-9));
 }
+
+#[test]
+fn a_clip_that_goes_round_twice_is_refused() {
+    // A pentagram turns the same way at every corner but winds twice, so it is not convex.
+    let pentagram: Vec<[f64; 2]> = (0..=5)
+        .map(|k| {
+            let a = (k * 2) as f64 * std::f64::consts::TAU / 5.0;
+            [10.0 * a.cos(), 10.0 * a.sin()]
+        })
+        .collect();
+    assert_eq!(cut_ring(&SQUARE, &pentagram), None);
+}
+
+#[test]
+fn non_finite_input_is_refused() {
+    let mut ring = SQUARE.to_vec();
+    ring[1][0] = f64::NAN;
+    assert_eq!(cut_ring(&ring, &triangle()), None);
+    let mut ring = SQUARE.to_vec();
+    ring[2][1] = f64::INFINITY;
+    assert_eq!(cut_ring(&ring, &triangle()), None);
+    let mut clip = triangle();
+    clip[1][0] = f64::NAN;
+    assert_eq!(cut_ring(&SQUARE, &clip), None);
+    let mut clip = triangle();
+    clip[1][1] = f64::NEG_INFINITY;
+    assert_eq!(cut_ring(&SQUARE, &clip), None);
+}
+
+#[test]
+fn a_clip_with_a_repeated_closing_point_is_accepted() {
+    let mut clip = triangle();
+    clip.push(clip[0]);
+    clip.push(clip[0]);
+    let cut = cut_ring(&SQUARE, &clip).expect("repeated closing point is still convex");
+    let plain = cut_ring(&SQUARE, &triangle()).expect("plain triangle");
+    assert!((area(&cut) - area(&plain)).abs() < 1e-9);
+}
