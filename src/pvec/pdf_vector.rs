@@ -798,10 +798,10 @@ pub fn extract_page_paths_from_bytes(
         pattern_base: base,
         shading_defs: Vec::new(),
         shading_ops: Vec::new(),
-        shading_cache: std::collections::HashMap::new(),
+        shading_cache: std::collections::BTreeMap::new(),
         shadings_not_sampled: 0,
         tiling_defs: Vec::new(),
-        tiling_cache: std::collections::HashMap::new(),
+        tiling_cache: std::collections::BTreeMap::new(),
         tilings_not_read: 0,
         image_bytes: 0,
     };
@@ -1594,11 +1594,11 @@ struct Run<'a> {
     shading_defs: Vec<PdfShading>,
     shading_ops: Vec<PdfShadingPaint>,
     /// Shadings already read, by object and matrix, so a pattern used by many paths is one entry.
-    shading_cache: std::collections::HashMap<(lopdf::ObjectId, [u64; 6]), Option<usize>>,
+    shading_cache: std::collections::BTreeMap<(lopdf::ObjectId, [u64; 6]), Option<usize>>,
     shadings_not_sampled: u32,
     tiling_defs: Vec<PdfTiling>,
     /// Tilings already read, by object and matrix.
-    tiling_cache: std::collections::HashMap<(lopdf::ObjectId, [u64; 6]), Option<usize>>,
+    tiling_cache: std::collections::BTreeMap<(lopdf::ObjectId, [u64; 6]), Option<usize>>,
     tilings_not_read: u32,
     /// Encoded image bytes kept so far, for `max_image_bytes`.
     image_bytes: u64,
