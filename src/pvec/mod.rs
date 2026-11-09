@@ -70,6 +70,7 @@ pub mod pdf_clip;
 mod pdf_filters;
 pub mod pdf_image;
 mod pdf_image_decode;
+mod pdf_text;
 #[cfg(feature = "pvec-write")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
 pub mod pdf_to_pvec;
@@ -123,6 +124,7 @@ pub use ordering::{
     EntityId, OrderedEntity, OrderedSource, OrderingBasis, OrderingPolicy, OrderingReport,
     canonical_cmp, order_entities,
 };
+pub use pdf_text::PdfTextRun;
 #[cfg(feature = "pvec-write")]
 pub use pdf_to_pvec::{PdfToPvecError, pdf_page_to_pvec};
 pub use pdf_vector::{

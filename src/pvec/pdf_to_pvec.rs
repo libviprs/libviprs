@@ -8,9 +8,13 @@
 //! through `apply_clip_policy`. `tests/pvec_1578_pdf_page_to_pvec.rs` pins the bytes on
 //! `blueprint-mix.pdf`. Nothing from the paint design's new streams is written here yet.
 
+use super::components::{LineStyleDef, LineStyleStream, Stream, StrokePaintStream, StrokeWidth};
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
+use super::pdf_image::{PdfImageOptions, bake_page_images};
 use super::pdf_vector::{PdfPathEntity, PdfPathSegment, PdfVectorPage};
+use pvec_capabilities::Registry;
+use pvec_components::{RASTER_CAPABILITY, RasterId, TextRecord, TextStream, encode_rasters};
 use pvec_container::{
     Bounds, LengthUnit, Metadata,
     writer::{ContainerWriter, EntityMeta, WriterConfig},
@@ -54,6 +58,12 @@ pub fn pdf_page_to_pvec(
         capabilities: vec![],
     });
     let mut next_id = 1u32;
+    // What each stroke entity says about its paint: a colour word (`0xRRGGBBAA`, the alpha byte is
+    // the stroke alpha), and its line style (width and dashes in inches, the PDF's own `w` and `d`
+    // times the scale of the CTM it was painted under). The anchor entity of a text record is in
+    // both: the text colour, and a hidden line.
+    let mut stroke_colours: Vec<(EntityId, u32)> = Vec::new();
+    let mut stroke_styles: Vec<(EntityId, LineStyleDef)> = Vec::new();
     // A clip that is a plain rectangle is applied to the geometry. A general clip path is kept
     // unclipped (display fidelity only), as the clip policy records. When clip analysis fails
     // (more clips in force at once than the policy allows), the page still converts, unclipped.
@@ -128,10 +138,6 @@ pub fn pdf_page_to_pvec(
                     max: [bounds.max[0].max(point[0]), bounds.max[1].max(point[1])],
                 },
             );
-            let center_x = (entity_bounds.min[0] + entity_bounds.max[0]) / 2.0;
-            let center_y = (entity_bounds.min[1] + entity_bounds.max[1]) / 2.0;
-            let column = (center_x / bounds.max[0] * 16.0).floor().clamp(0.0, 15.0) as u32;
-            let row = (center_y / bounds.max[1] * 16.0).floor().clamp(0.0, 15.0) as u32;
             let id = EntityId::new(next_id)
                 .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
             writer
@@ -139,7 +145,7 @@ pub fn pdf_page_to_pvec(
                     EntityMeta {
                         id,
                         style,
-                        cell: row * 16 + column + 1,
+                        cell: grid_cell(entity_bounds, bounds),
                         bounds: entity_bounds,
                     },
                     &points,
@@ -150,6 +156,164 @@ pub fn pdf_page_to_pvec(
     }
     if next_id == 1 {
         return Err(PdfToPvecError::NoPaths);
+    }
+    let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
+    let registry = Registry::v1();
+    // Text (L7): a record per run, on a hidden two point polyline along its baseline, which gives
+    // the text its bounds and the colour of stream 24 something to hang on. The rotation is the
+    // direction of the baseline in source space, which has y down.
+    let mut records = Vec::new();
+    for run in &page.texts {
+        let start = source_point(run.start, page.height);
+        let end = source_point(run.end, page.height);
+        let height = run.cap_height / 72.0;
+        if start == end || height <= 0.0 || !height.is_finite() {
+            continue;
+        }
+        let anchor_bounds = Bounds {
+            min: [start[0].min(end[0]), start[1].min(end[1])],
+            max: [start[0].max(end[0]), start[1].max(end[1])],
+        };
+        let id =
+            EntityId::new(next_id).map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+        writer
+            .push_polyline(
+                EntityMeta {
+                    id,
+                    style: 1,
+                    cell: grid_cell(anchor_bounds, bounds),
+                    bounds: anchor_bounds,
+                },
+                &[start, end],
+            )
+            .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+        next_id += 1;
+        let [r, g, b] = run.fill_colour;
+        stroke_colours.push((id, u32::from_be_bytes([r, g, b, 255])));
+        stroke_styles.push((
+            id,
+            LineStyleDef {
+                name: "pdf-text-anchor".into(),
+                dashes: Vec::new(),
+                width: Some(StrokeWidth::Thinnest),
+                phase: 0.0,
+                visible: false,
+            },
+        ));
+        let mut text = run.text.as_str();
+        while text.len() > 4096 {
+            text = &text[..text.floor_char_boundary(4096)];
+        }
+        records.push(TextRecord {
+            entity: id,
+            x: start[0],
+            y: start[1],
+            height,
+            rotation: (end[1] - start[1]).atan2(end[0] - start[0]),
+            text: text.to_owned(),
+        });
+    }
+    if !records.is_empty() {
+        let stream = TextStream { records }
+            .into_stream(&registry)
+            .map_err(|e| refused(&e))?;
+        writer.push_stream(stream).map_err(|e| refused(&e))?;
+    }
+    // Images (L6): the page's images baked into the raster capability, in content-stream order,
+    // each placed by its CTM. The pyramid of the whole page stays the first picture under them.
+    let bake = bake_page_images(
+        page,
+        &PdfImageOptions {
+            page_to_source: [1.0 / 72.0, 0.0, 0.0, -1.0 / 72.0, 0.0, page.height / 72.0],
+            ..PdfImageOptions::default()
+        },
+    );
+    if !bake.written.is_empty() {
+        let placements = bake
+            .written
+            .iter()
+            .map(|baked| crate::raster_pvec::container::placement(&baked.pyramid))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| refused(&e))?;
+        let payload = encode_rasters(&placements).map_err(|e| refused(&e))?;
+        let version = registry
+            .get(RASTER_CAPABILITY)
+            .map(|c| c.version)
+            .ok_or_else(|| refused(&"the registry has no raster capability"))?;
+        writer
+            .push_stream(Stream {
+                capability: RASTER_CAPABILITY,
+                version,
+                payload,
+            })
+            .map_err(|e| refused(&e))?;
+        for (index, baked) in bake.written.iter().enumerate() {
+            let raster = RasterId::new(index as u32).map_err(|e| refused(&e))?;
+            let tiles = baked
+                .pyramid
+                .tiles()
+                .map(
+                    |(level, col, row, bytes)| pvec_container::blocks::raster::TileIn {
+                        level,
+                        col,
+                        row,
+                        bytes: bytes.to_vec(),
+                    },
+                )
+                .collect();
+            writer
+                .push_raster_tiles(raster, tiles)
+                .map_err(|e| refused(&e))?;
+        }
+    }
+    if !stroke_colours.is_empty() {
+        // The colour table, one entry per distinct word, in first-seen order.
+        let mut colours: Vec<u32> = Vec::new();
+        let mut colour_index: BTreeMap<u32, u32> = BTreeMap::new();
+        let assignments = stroke_colours
+            .iter()
+            .map(|&(id, word)| {
+                let index = *colour_index.entry(word).or_insert_with(|| {
+                    colours.push(word);
+                    (colours.len() - 1) as u32
+                });
+                (id, index)
+            })
+            .collect();
+        let paint = StrokePaintStream {
+            colours,
+            assignments,
+        };
+        writer
+            .push_stream(paint.into_stream(&registry).map_err(|e| refused(&e))?)
+            .map_err(|e| refused(&e))?;
+        let mut styles: Vec<LineStyleDef> = Vec::new();
+        let mut style_index: BTreeMap<Vec<u64>, u32> = BTreeMap::new();
+        let assignments = stroke_styles
+            .into_iter()
+            .map(|(id, def)| {
+                let key = std::iter::once(match def.width {
+                    Some(StrokeWidth::Width(w)) => w.to_bits(),
+                    _ => 0,
+                })
+                .chain(std::iter::once(def.phase.to_bits()))
+                .chain(std::iter::once(u64::from(def.visible)))
+                .chain(def.dashes.iter().map(|d| d.to_bits()))
+                .collect();
+                let index = *style_index.entry(key).or_insert_with(|| {
+                    styles.push(def);
+                    (styles.len() - 1) as u32
+                });
+                (id, index)
+            })
+            .collect();
+        let line_style = LineStyleStream {
+            styles,
+            assignments,
+        };
+        writer
+            .push_stream(line_style.into_stream(&registry).map_err(|e| refused(&e))?)
+            .map_err(|e| refused(&e))?;
     }
     writer
         .finish()
@@ -339,6 +503,15 @@ fn entity_runs(
         }
     }
     runs
+}
+
+/// The cell (1 to 256) of a 16 by 16 grid over the page that the centre of `bounds` falls in.
+fn grid_cell(bounds: Bounds, page: Bounds) -> u32 {
+    let center_x = (bounds.min[0] + bounds.max[0]) / 2.0;
+    let center_y = (bounds.min[1] + bounds.max[1]) / 2.0;
+    let column = (center_x / page.max[0] * 16.0).floor().clamp(0.0, 15.0) as u32;
+    let row = (center_y / page.max[1] * 16.0).floor().clamp(0.0, 15.0) as u32;
+    row * 16 + column + 1
 }
 
 fn source_point(point: [f64; 2], page_height: f64) -> [f64; 2] {
