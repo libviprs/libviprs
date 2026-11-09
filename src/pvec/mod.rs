@@ -70,6 +70,7 @@ pub mod pdf_clip;
 mod pdf_filters;
 pub mod pdf_image;
 mod pdf_image_decode;
+pub mod pdf_ring_cut;
 mod pdf_text;
 #[cfg(feature = "pvec-write")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
