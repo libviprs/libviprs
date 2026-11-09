@@ -47,11 +47,23 @@ pub enum PdfToPvecError {
     Write(String),
 }
 
-/// Writes `page` as a PVec artifact and returns its bytes. The bounds are the page in inches.
+/// Writes `page` as a PVec artifact, with its text but without its images, and returns its bytes.
+/// The bounds are the page in inches. See [`pdf_page_to_pvec_with`] to bake the images as well.
 pub fn pdf_page_to_pvec(
     page: &PdfVectorPage,
     producer_id: &str,
     producer_version: &str,
+) -> Result<Vec<u8>, PdfToPvecError> {
+    pdf_page_to_pvec_with(page, producer_id, producer_version, false)
+}
+
+/// [`pdf_page_to_pvec`], and with `bake_images` the page's images baked into the raster capability
+/// as well. Baking decodes and tiles every image, so a scanned sheet takes minutes in a debug build.
+pub fn pdf_page_to_pvec_with(
+    page: &PdfVectorPage,
+    producer_id: &str,
+    producer_version: &str,
+    bake_images: bool,
 ) -> Result<Vec<u8>, PdfToPvecError> {
     /// The polylines one PDF path becomes, as (style, points in inches). Style 2 is a closed fill
     /// polygon the viewer can fill, style 1 a stroke. `clip` is the page-space rectangle the path is
@@ -488,15 +500,18 @@ pub fn pdf_page_to_pvec(
             .map_err(|e| refused(&e))?;
         writer.push_stream(stream).map_err(|e| refused(&e))?;
     }
-    // Images (L6): the page's images baked into the raster capability, in content-stream order,
-    // each placed by its CTM. The pyramid of the whole page stays the first picture under them.
-    let bake = Some(bake_page_images(
-        page,
-        &PdfImageOptions {
-            page_to_source: [1.0 / 72.0, 0.0, 0.0, -1.0 / 72.0, 0.0, page.height / 72.0],
-            ..PdfImageOptions::default()
-        },
-    ));
+    // Images (L6), only when the caller asks: baking decodes and tiles every image, which takes
+    // minutes on a scanned sheet. They go into the raster capability in content-stream order, each
+    // placed by its CTM. The pyramid of the whole page stays the first picture under them.
+    let bake = bake_images.then(|| {
+        bake_page_images(
+            page,
+            &PdfImageOptions {
+                page_to_source: [1.0 / 72.0, 0.0, 0.0, -1.0 / 72.0, 0.0, page.height / 72.0],
+                ..PdfImageOptions::default()
+            },
+        )
+    });
     if let Some(bake) = bake.filter(|bake| !bake.written.is_empty()) {
         let placements = bake
             .written
@@ -572,10 +587,12 @@ pub fn pdf_page_to_pvec(
     }));
     if !stroke_styles.is_empty() {
         let mut styles: Vec<LineStyleDef> = Vec::new();
-        let mut style_index: BTreeMap<Vec<u64>, u32> = BTreeMap::new();
+        let mut style_index: BTreeMap<(String, Vec<u64>), u32> = BTreeMap::new();
         let assignments: Vec<(EntityId, u32)> = stroke_styles
             .into_iter()
             .map(|(id, def)| {
+                // The name is part of the key, so the text anchors, the clip rings and the fill rings
+                // (all hidden) each keep a style of their own.
                 let key = [u64::from(def.visible), u64::from(def.width.is_some())]
                     .into_iter()
                     .chain(std::iter::once(match def.width {
@@ -584,11 +601,13 @@ pub fn pdf_page_to_pvec(
                     }))
                     .chain(std::iter::once(def.phase.to_bits()))
                     .chain(def.dashes.iter().map(|d| d.to_bits()))
-                    .collect();
-                let index = *style_index.entry(key).or_insert_with(|| {
-                    styles.push(def);
-                    (styles.len() - 1) as u32
-                });
+                    .collect::<Vec<u64>>();
+                let index = *style_index
+                    .entry((def.name.clone(), key))
+                    .or_insert_with(|| {
+                        styles.push(def);
+                        (styles.len() - 1) as u32
+                    });
                 (id, index)
             })
             .collect();

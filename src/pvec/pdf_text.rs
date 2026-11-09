@@ -74,11 +74,10 @@ pub(crate) struct TextContext {
     pub(crate) sequence: u64,
 }
 
-/// The text state of a content stream and the runs it has shown.
-#[derive(Default)]
-pub(crate) struct TextTracker {
-    tm: Matrix,
-    tlm: Matrix,
+/// The text parameters that `q` saves and `Q` restores (`Tc`, `Tw`, `Tz`, `TL`, `Tf` and its size,
+/// `Ts`). `Tm` and the line matrix are not part of the graphics state.
+#[derive(Clone)]
+pub(crate) struct TextParams {
     size: f64,
     char_space: f64,
     word_space: f64,
@@ -86,6 +85,27 @@ pub(crate) struct TextTracker {
     leading: f64,
     rise: f64,
     font: Option<Rc<Font>>,
+}
+
+impl Default for TextParams {
+    fn default() -> Self {
+        Self {
+            size: 0.0,
+            char_space: 0.0,
+            word_space: 0.0,
+            scale: 1.0,
+            leading: 0.0,
+            rise: 0.0,
+            font: None,
+        }
+    }
+}
+
+/// The text state of a content stream and the runs it has shown.
+pub(crate) struct TextTracker {
+    tm: Matrix,
+    tlm: Matrix,
+    params: TextParams,
     cache: BTreeMap<(u32, u16), Rc<Font>>,
     /// The runs shown so far, in content-stream order.
     pub(crate) runs: Vec<PdfTextRun>,
@@ -96,9 +116,20 @@ impl TextTracker {
         Self {
             tm: IDENTITY,
             tlm: IDENTITY,
-            scale: 1.0,
-            ..Self::default()
+            params: TextParams::default(),
+            cache: BTreeMap::new(),
+            runs: Vec::new(),
         }
+    }
+
+    /// What `q` saves.
+    pub(crate) fn save(&self) -> TextParams {
+        self.params.clone()
+    }
+
+    /// What `Q` brings back.
+    pub(crate) fn restore(&mut self, saved: TextParams) {
+        self.params = saved;
     }
 
     /// Follows one operator.
@@ -116,19 +147,19 @@ impl TextTracker {
                 self.tm = IDENTITY;
                 self.tlm = IDENTITY;
             }
-            "Tc" => self.char_space = num(0).unwrap_or(0.0),
-            "Tw" => self.word_space = num(0).unwrap_or(0.0),
-            "Tz" => self.scale = num(0).unwrap_or(100.0) / 100.0,
-            "TL" => self.leading = num(0).unwrap_or(0.0),
-            "Ts" => self.rise = num(0).unwrap_or(0.0),
+            "Tc" => self.params.char_space = num(0).unwrap_or(0.0),
+            "Tw" => self.params.word_space = num(0).unwrap_or(0.0),
+            "Tz" => self.params.scale = num(0).unwrap_or(100.0) / 100.0,
+            "TL" => self.params.leading = num(0).unwrap_or(0.0),
+            "Ts" => self.params.rise = num(0).unwrap_or(0.0),
             "Tf" => {
-                self.size = num(1).unwrap_or(0.0);
-                self.font = self.load_font(doc, resources, operands.first());
+                self.params.size = num(1).unwrap_or(0.0);
+                self.params.font = self.load_font(doc, resources, operands.first());
             }
             "Td" | "TD" => {
                 let (tx, ty) = (num(0).unwrap_or(0.0), num(1).unwrap_or(0.0));
                 if operator == "TD" {
-                    self.leading = -ty;
+                    self.params.leading = -ty;
                 }
                 self.move_line(tx, ty);
             }
@@ -141,14 +172,14 @@ impl TextTracker {
                     }
                 }
             }
-            "T*" => self.move_line(0.0, -self.leading),
+            "T*" => self.move_line(0.0, -self.params.leading),
             "Tj" | "TJ" | "'" | "\"" => {
                 if operator == "'" || operator == "\"" {
                     if operator == "\"" {
-                        self.word_space = num(0).unwrap_or(self.word_space);
-                        self.char_space = num(1).unwrap_or(self.char_space);
+                        self.params.word_space = num(0).unwrap_or(self.params.word_space);
+                        self.params.char_space = num(1).unwrap_or(self.params.char_space);
                     }
-                    self.move_line(0.0, -self.leading);
+                    self.move_line(0.0, -self.params.leading);
                 }
                 self.show(operator, operands, context);
             }
@@ -168,7 +199,7 @@ impl TextTracker {
             fill,
             sequence,
         } = *context;
-        let Some(font) = self.font.clone() else {
+        let Some(font) = self.params.font.clone() else {
             return;
         };
         let mut pieces: Vec<(&[u8], f64)> = Vec::new();
@@ -196,7 +227,7 @@ impl TextTracker {
         }
         let mut text = String::new();
         let mut advance = 0.0;
-        let (fs, th) = (self.size, self.scale);
+        let (fs, th) = (self.params.size, self.params.scale);
         for (bytes, kern) in pieces {
             advance -= kern / 1000.0 * fs * th;
             for code in bytes.chunks(font.code_bytes) {
@@ -210,19 +241,19 @@ impl TextTracker {
                 }
                 let width = font.width(code);
                 let space = if font.code_bytes == 1 && code == 32 {
-                    self.word_space
+                    self.params.word_space
                 } else {
                     0.0
                 };
-                advance += (width / 1000.0 * fs + self.char_space + space) * th;
+                advance += (width / 1000.0 * fs + self.params.char_space + space) * th;
             }
         }
         let visible = render_mode == 0 || render_mode == 2;
         let text = text.trim().to_owned();
         let trm = then(&self.tm, &ctm);
         if visible && !text.is_empty() && fs > 0.0 && advance.is_finite() {
-            let start = apply(&trm, [0.0, self.rise]);
-            let end = apply(&trm, [advance, self.rise]);
+            let start = apply(&trm, [0.0, self.params.rise]);
+            let end = apply(&trm, [advance, self.params.rise]);
             // Basic arithmetic and `sqrt`, not libm `hypot`, which differs in the last bit by architecture.
             let scale = (trm[2] * trm[2] + trm[3] * trm[3]).sqrt();
             self.runs.push(PdfTextRun {
@@ -299,7 +330,79 @@ impl Font {
             .and_then(|o| doc.dereference(o).ok())
             .and_then(|(_, o)| o.as_stream().ok())
             .and_then(|s| s.decompressed_content().ok())
-            .map(|bytes| parse_to_unicode(&bytes))
+            .map(|bytes| {
+                // The `bfchar` and `bfrange` entries of the CMap.
+                let text = String::from_utf8_lossy(&bytes);
+                let hex = |t: &str| u32::from_str_radix(t, 16).ok();
+                let utf16 = |t: &str| {
+                    let units: Vec<u16> = (0..t.len() / 4)
+                        .filter_map(|k| u16::from_str_radix(t.get(k * 4..k * 4 + 4)?, 16).ok())
+                        .collect();
+                    String::from_utf16_lossy(&units)
+                };
+                let mut map = BTreeMap::new();
+                for (begin, end, range) in [
+                    ("beginbfchar", "endbfchar", false),
+                    ("beginbfrange", "endbfrange", true),
+                ] {
+                    let mut rest = text.as_ref();
+                    while let Some(at) = rest.find(begin) {
+                        rest = &rest[at + begin.len()..];
+                        let stop = rest.find(end).unwrap_or(rest.len());
+                        // Tokens: the hex strings between `<` and `>` (not always separated by white space),
+                        // and the brackets of a destination array.
+                        let mut tokens: Vec<String> = Vec::new();
+                        let mut chars = rest[..stop].chars();
+                        while let Some(c) = chars.next() {
+                            match c {
+                                '<' => {
+                                    tokens.push(chars.by_ref().take_while(|c| *c != '>').collect())
+                                }
+                                '[' | ']' => tokens.push(c.to_string()),
+                                _ => {}
+                            }
+                        }
+                        let mut k = 0;
+                        while k < tokens.len() {
+                            if !range {
+                                let Some(dest) = tokens.get(k + 1) else { break };
+                                if let Some(code) = hex(&tokens[k]) {
+                                    map.insert(code, utf16(dest));
+                                }
+                                k += 2;
+                                continue;
+                            }
+                            let (Some(lo), Some(hi), Some(dest)) = (
+                                tokens.get(k).and_then(|t| hex(t)),
+                                tokens.get(k + 1).and_then(|t| hex(t)),
+                                tokens.get(k + 2),
+                            ) else {
+                                break;
+                            };
+                            let hi = hi.min(lo.saturating_add(65_535));
+                            if dest == "[" {
+                                let list: Vec<&String> =
+                                    tokens[k + 3..].iter().take_while(|t| *t != "]").collect();
+                                for (code, item) in (lo..=hi).zip(&list) {
+                                    map.insert(code, utf16(item));
+                                }
+                                k += 4 + list.len();
+                            } else {
+                                for code in lo..=hi {
+                                    let mut units = utf16(dest);
+                                    if let Some(last) = units.pop() {
+                                        units.extend(char::from_u32(u32::from(last) + (code - lo)));
+                                    }
+                                    map.insert(code, units);
+                                }
+                                k += 3;
+                            }
+                        }
+                        rest = &rest[stop..];
+                    }
+                }
+                map
+            })
             .unwrap_or_default();
         let mut out = Font {
             code_bytes: 1,
@@ -342,7 +445,42 @@ impl Font {
                 .and_then(|o| doc.dereference(o).ok())
                 .map(|(_, o)| o)
             {
-                read_cid_widths(doc, w, &mut out.cid_widths);
+                // `/W` of a CID font: `c [w1 w2 ...]` and `c_first c_last w`.
+                'widths: {
+                    let mut i = 0;
+                    while i < w.len() {
+                        let Some(first) = number(&w[i]).map(|n| n as u32) else {
+                            break 'widths;
+                        };
+                        match w
+                            .get(i + 1)
+                            .and_then(|o| doc.dereference(o).ok())
+                            .map(|(_, o)| o)
+                        {
+                            Some(Object::Array(list)) => {
+                                for (k, width) in list.iter().enumerate() {
+                                    if let Some(width) = number(width) {
+                                        out.cid_widths.insert(first + k as u32, width);
+                                    }
+                                }
+                                i += 2;
+                            }
+                            Some(last) => {
+                                let (Some(last), Some(width)) = (
+                                    number(last).map(|n| n as u32),
+                                    w.get(i + 2).and_then(number),
+                                ) else {
+                                    break 'widths;
+                                };
+                                for cid in first..=last.min(first.saturating_add(65_535)) {
+                                    out.cid_widths.insert(cid, width);
+                                }
+                                i += 3;
+                            }
+                            None => break 'widths,
+                        }
+                    }
+                }
             }
         } else {
             out.first_char = font
@@ -379,113 +517,4 @@ fn number(o: &Object) -> Option<f64> {
         Object::Real(r) => Some(f64::from(*r)),
         _ => None,
     }
-}
-
-/// `/W` of a CID font: `c [w1 w2 ...]` and `c_first c_last w`.
-fn read_cid_widths(doc: &Document, w: &[Object], out: &mut BTreeMap<u32, f64>) {
-    let mut i = 0;
-    while i < w.len() {
-        let Some(first) = number(&w[i]).map(|n| n as u32) else {
-            return;
-        };
-        match w
-            .get(i + 1)
-            .and_then(|o| doc.dereference(o).ok())
-            .map(|(_, o)| o)
-        {
-            Some(Object::Array(list)) => {
-                for (k, width) in list.iter().enumerate() {
-                    if let Some(width) = number(width) {
-                        out.insert(first + k as u32, width);
-                    }
-                }
-                i += 2;
-            }
-            Some(last) => {
-                let (Some(last), Some(width)) = (
-                    number(last).map(|n| n as u32),
-                    w.get(i + 2).and_then(number),
-                ) else {
-                    return;
-                };
-                for cid in first..=last.min(first.saturating_add(65_535)) {
-                    out.insert(cid, width);
-                }
-                i += 3;
-            }
-            None => return,
-        }
-    }
-}
-
-/// The `bfchar` and `bfrange` entries of a `/ToUnicode` CMap.
-fn parse_to_unicode(bytes: &[u8]) -> BTreeMap<u32, String> {
-    let text = String::from_utf8_lossy(bytes);
-    let hex = |t: &str| u32::from_str_radix(t, 16).ok();
-    let utf16 = |t: &str| {
-        let units: Vec<u16> = (0..t.len() / 4)
-            .filter_map(|k| u16::from_str_radix(t.get(k * 4..k * 4 + 4)?, 16).ok())
-            .collect();
-        String::from_utf16_lossy(&units)
-    };
-    let mut map = BTreeMap::new();
-    for (begin, end, range) in [
-        ("beginbfchar", "endbfchar", false),
-        ("beginbfrange", "endbfrange", true),
-    ] {
-        let mut rest = text.as_ref();
-        while let Some(at) = rest.find(begin) {
-            rest = &rest[at + begin.len()..];
-            let stop = rest.find(end).unwrap_or(rest.len());
-            // Tokens: the hex strings between `<` and `>` (not always separated by white space),
-            // and the brackets of a destination array.
-            let mut tokens: Vec<String> = Vec::new();
-            let mut chars = rest[..stop].chars();
-            while let Some(c) = chars.next() {
-                match c {
-                    '<' => tokens.push(chars.by_ref().take_while(|c| *c != '>').collect()),
-                    '[' | ']' => tokens.push(c.to_string()),
-                    _ => {}
-                }
-            }
-            let mut k = 0;
-            while k < tokens.len() {
-                if !range {
-                    let Some(dest) = tokens.get(k + 1) else { break };
-                    if let Some(code) = hex(&tokens[k]) {
-                        map.insert(code, utf16(dest));
-                    }
-                    k += 2;
-                    continue;
-                }
-                let (Some(lo), Some(hi), Some(dest)) = (
-                    tokens.get(k).and_then(|t| hex(t)),
-                    tokens.get(k + 1).and_then(|t| hex(t)),
-                    tokens.get(k + 2),
-                ) else {
-                    break;
-                };
-                let hi = hi.min(lo.saturating_add(65_535));
-                if dest == "[" {
-                    let list: Vec<&String> =
-                        tokens[k + 3..].iter().take_while(|t| *t != "]").collect();
-                    for (code, item) in (lo..=hi).zip(&list) {
-                        map.insert(code, utf16(item));
-                    }
-                    k += 4 + list.len();
-                } else {
-                    for code in lo..=hi {
-                        let mut units = utf16(dest);
-                        if let Some(last) = units.pop() {
-                            units.extend(char::from_u32(u32::from(last) + (code - lo)));
-                        }
-                        map.insert(code, units);
-                    }
-                    k += 3;
-                }
-            }
-            rest = &rest[stop..];
-        }
-    }
-    map
 }

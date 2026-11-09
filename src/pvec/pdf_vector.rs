@@ -44,7 +44,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object};
 use thiserror::Error;
 
-use super::pdf_text::{PdfTextRun, TextContext, TextTracker};
+use super::pdf_text::{PdfTextRun, TextContext, TextParams, TextTracker};
 use super::text_policy::{TextFontOutcome, TextReport, font_outcome};
 use crate::pdf::{PageRotation, PdfError, page_object_id, page_rotation_of, page_visible_box};
 
@@ -1568,6 +1568,8 @@ struct Saved {
     render_mode: i64,
     stroke: PdfStrokeParams,
     font: TextFontOutcome,
+    /// `Tc`, `Tw`, `Tz`, `TL`, `Tf` and `Ts`, which are part of the graphics state.
+    text: TextParams,
 }
 
 /// The path being built by one stream, in page space, plus the user-space current
@@ -1649,6 +1651,7 @@ impl Run<'_> {
                         render_mode: self.render_mode,
                         stroke: self.stroke.clone(),
                         font: self.font,
+                        text: self.tracker.save(),
                         fill: self.fill,
                         stroke_colour: self.stroke_colour,
                         fill_alpha: self.fill_alpha,
@@ -1665,6 +1668,7 @@ impl Run<'_> {
                             self.render_mode = saved.render_mode;
                             self.stroke = saved.stroke;
                             self.font = saved.font;
+                            self.tracker.restore(saved.text);
                             self.fill = saved.fill;
                             self.stroke_colour = saved.stroke_colour;
                             self.fill_alpha = saved.fill_alpha;

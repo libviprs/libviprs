@@ -5,8 +5,8 @@
 
 #![cfg(all(feature = "pvec-write", feature = "pvec-raster"))]
 
-use libviprs::pvec::pdf_page_to_pvec;
 use libviprs::pvec::pdf_vector::{PdfVectorLimits, PdfVectorPage, extract_page_paths_from_bytes};
+use libviprs::pvec::{pdf_page_to_pvec, pdf_page_to_pvec_with};
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
 use pvec_facade::PvecReader;
 use pvec_facade::components::{ClipStream, LineStyleStream, TextStream};
@@ -127,4 +127,30 @@ fn a_conversion_bakes_no_image_unless_it_is_asked_to() {
         "{} rasters were baked",
         placements.len()
     );
+}
+
+#[test]
+fn asked_to_bake_the_image_is_a_raster_placed_where_the_pdf_paints_it() {
+    let page = page(&format!("{RULE}q 100 0 0 50 50 200 cm /Im1 Do Q"));
+    let bytes = pdf_page_to_pvec_with(&page, "test", "0", true).unwrap();
+    let placements = PvecReader::open(bytes)
+        .unwrap()
+        .raster_placements()
+        .unwrap();
+    assert_eq!(placements.len(), 1);
+    // Pixel (0, 0) is the top left of the image, (0, 1) in its unit square, and the far corner is
+    // (1, 0). Source space is inches with the origin at the top left of the page.
+    let [a, b, c, d, e, f] = page.images[0].ctm;
+    let placement = &placements[0];
+    let (w, h) = (f64::from(placement.width), f64::from(placement.height));
+    for (px, py, u, v) in [(0.0, 0.0, 0.0, 1.0), (w, h, 1.0, 0.0)] {
+        let [pa, pb, pc, pd, ptx, pty] = placement.pixel_to_source;
+        let got = [pa * px + pb * py + ptx, pc * px + pd * py + pty];
+        let want = [
+            (a * u + c * v + e) / 72.0,
+            (page.height - (b * u + d * v + f)) / 72.0,
+        ];
+        assert!((got[0] - want[0]).abs() < 1e-6, "{got:?} against {want:?}");
+        assert!((got[1] - want[1]).abs() < 1e-6, "{got:?} against {want:?}");
+    }
 }

@@ -83,38 +83,3 @@ fn every_text_anchor_is_an_entity_with_the_text_colour() {
         );
     }
 }
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn the_baked_images_are_rasters_placed_where_the_pdf_paints_them() {
-    let Some((page, bytes)) = written() else {
-        return;
-    };
-    let reader = PvecReader::open(bytes).unwrap();
-    let placements = reader.raster_placements().unwrap();
-    assert!(!placements.is_empty(), "no image became a raster");
-    // Pixel (0, 0) is the top left of the image, which is (0, 1) in its unit square, and the
-    // far corner is (1, 0). Source space is inches with the origin at the top left of the page.
-    let paints = |placement: &pvec_facade::unstable::Placement,
-                  image: &libviprs::pvec::PdfImagePlacement| {
-        let [a, b, c, d, e, f] = image.ctm;
-        let (w, h) = (f64::from(placement.width), f64::from(placement.height));
-        [(0.0, 0.0, 0.0, 1.0), (w, h, 1.0, 0.0)]
-            .iter()
-            .all(|&(px, py, u, v)| {
-                let [pa, pb, pc, pd, ptx, pty] = placement.pixel_to_source;
-                let got = [pa * px + pb * py + ptx, pc * px + pd * py + pty];
-                let want = [
-                    (a * u + c * v + e) / 72.0,
-                    (page.height - (b * u + d * v + f)) / 72.0,
-                ];
-                (got[0] - want[0]).abs() < 1e-6 && (got[1] - want[1]).abs() < 1e-6
-            })
-    };
-    for (raster, placement) in placements.iter().enumerate() {
-        assert!(
-            page.images.iter().any(|image| paints(placement, image)),
-            "raster {raster} is not where any image of the PDF is painted"
-        );
-    }
-}

@@ -131,7 +131,7 @@ pub use ordering::{
 };
 pub use pdf_text::PdfTextRun;
 #[cfg(feature = "pvec-write")]
-pub use pdf_to_pvec::{PdfToPvecError, pdf_page_to_pvec};
+pub use pdf_to_pvec::{PdfToPvecError, pdf_page_to_pvec, pdf_page_to_pvec_with};
 pub use pdf_vector::{
     PdfDash, PdfFillRule, PdfGcs, PdfImagePlacement, PdfLgiDict, PdfMeasure, PdfNumberFormat,
     PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance, PdfStrokeParams,
