@@ -6,7 +6,7 @@
 #![cfg(all(feature = "pvec-write", feature = "pvec-raster"))]
 
 use libviprs::pvec::{PdfVectorLimits, extract_page_paths, pdf_page_to_pvec};
-use pvec_facade::components::{StrokePaintStream, TextStream};
+use pvec_facade::components::{ItemKind, PaintOrderStream, StrokePaintStream, TextStream};
 use pvec_facade::{EntityId, PvecReader};
 use std::path::PathBuf;
 
@@ -81,4 +81,21 @@ fn every_text_anchor_is_an_entity_with_the_text_colour() {
             "text anchor {entity:?} has no colour"
         );
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn every_text_record_of_the_title_block_is_named_once_in_the_paint_order() {
+    let Some((_, bytes)) = written() else { return };
+    let reader = PvecReader::open(bytes).unwrap();
+    let texts = TextStream::decode(&payload(&reader, TextStream::CAPABILITY)).unwrap();
+    let order = PaintOrderStream::decode(&payload(&reader, PaintOrderStream::CAPABILITY)).unwrap();
+    let mut named: Vec<u32> = order
+        .runs
+        .iter()
+        .filter(|run| run.kind == ItemKind::Text)
+        .flat_map(|run| run.first..run.first + run.count)
+        .collect();
+    named.sort_unstable();
+    assert_eq!(named, (0..texts.records.len() as u32).collect::<Vec<_>>());
 }

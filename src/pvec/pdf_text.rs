@@ -49,6 +49,9 @@ pub struct PdfTextRun {
     pub fill_colour: [u8; 3],
     /// The number of entities painted before the run, like [`super::PdfImagePlacement`].
     pub sequence: u64,
+    /// The `sequence` of every clip-defining entity in force, outermost first (see
+    /// [`super::PdfPathEntity::active_clips`]).
+    pub active_clips: Vec<u64>,
 }
 
 /// What a font tells the tracker: how to read its codes and how wide they are.
@@ -67,11 +70,12 @@ struct Font {
 
 /// What the interpreter knows around an operator: the matrix from user space to page space, the
 /// `Tr` and fill colour in force, and the number of entities painted so far.
-pub(crate) struct TextContext {
+pub(crate) struct TextContext<'a> {
     pub(crate) ctm: [f64; 6],
     pub(crate) render_mode: i64,
     pub(crate) fill: [u8; 3],
     pub(crate) sequence: u64,
+    pub(crate) active_clips: &'a [u64],
 }
 
 /// The text parameters that `q` saves and `Q` restores (`Tc`, `Tw`, `Tz`, `TL`, `Tf` and its size,
@@ -188,6 +192,7 @@ impl TextTracker {
             render_mode,
             fill,
             sequence,
+            active_clips,
         } = *context;
         let Some(font) = self.params.font.clone() else {
             return;
@@ -253,6 +258,7 @@ impl TextTracker {
                 cap_height: fs * scale * font.cap_height / 1000.0,
                 fill_colour: fill,
                 sequence,
+                active_clips: active_clips.to_vec(),
             });
         }
         self.tm = then(&[1.0, 0.0, 0.0, 1.0, advance, 0.0], &self.tm);

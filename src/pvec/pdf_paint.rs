@@ -114,9 +114,10 @@ impl PaintLog {
         first..self.hatch.records.len() as u32
     }
 
-    /// A stroke entity, painted after everything logged before it.
-    pub(super) fn stroke(&mut self, entity: EntityId) {
-        self.items.push((ItemKind::Stroke, entity.index()));
+    /// A stroke (its entity id), a text record or a raster (its `RasterId`), painted after
+    /// everything logged before it. Fills are logged by `fill`.
+    pub(super) fn item(&mut self, kind: ItemKind, number: u32) {
+        self.items.push((kind, number));
     }
 
     /// The rings of every fill, which `pdf_page_to_pvec` hides through the one line style stream.

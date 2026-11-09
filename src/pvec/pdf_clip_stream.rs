@@ -8,8 +8,8 @@
 //! to the record of its innermost clip. A chain is cut off at eight records (the stencil bits a
 //! renderer has), so the items under a deeper clip are drawn with the first eight.
 //!
-//! Strokes (by entity id) and fills (by hatch record number, from `pdf_paint`) are assigned. Text
-//! and rasters follow the same way once they are written. A clip whose path has no ring of three distinct
+//! Strokes (by entity id), fills (by hatch record number, from `pdf_paint`), text (by record) and
+//! rasters (by `RasterId`) are assigned. A clip whose path has no ring of three distinct
 //! points (a line, a point) is left unapplied, like a clip this module does not know.
 
 use super::components::{ClipRecord, ClipRun, ClipStream, FillRule, ItemKind};
@@ -75,27 +75,21 @@ pub(super) fn general_clips(
     found
 }
 
-/// The clip stream for the strokes in `stroked` (an entity id and its chain, ascending by id) and
-/// the fills in `filled` (a hatch record number and its chain, ascending). `write_rings` writes the hidden rings of one clip, once per clip, and returns the rule and the
+/// The clip stream for `items`: each is a kind, its number (an entity id for a stroke, a hatch
+/// record, a text record or a `RasterId` for the others) and the chain of clips in force. Items of
+/// one kind are ascending by number, and the kinds come in the order they should first meet a clip.
+/// `write_rings` writes the hidden rings of one clip, once per clip, and returns the rule and the
 /// ids of the ring entities.
 pub(super) fn build<E>(
-    stroked: &[(EntityId, Vec<u64>)],
-    filled: &[(u32, Vec<u64>)],
+    items: &[(ItemKind, u32, Vec<u64>)],
     mut write_rings: impl FnMut(u64) -> Result<(FillRule, Vec<EntityId>), E>,
 ) -> Result<ClipStream, E> {
     let mut rings: BTreeMap<u64, (FillRule, Vec<EntityId>)> = BTreeMap::new();
     let mut index: BTreeMap<&[u64], u32> = BTreeMap::new();
     let mut clips: Vec<ClipRecord> = Vec::new();
     let mut runs: Vec<ClipRun> = Vec::new();
-    let items = stroked
-        .iter()
-        .map(|(id, chain)| (ItemKind::Stroke, id.index(), chain))
-        .chain(
-            filled
-                .iter()
-                .map(|(hatch, chain)| (ItemKind::Fill, *hatch, chain)),
-        );
     for (kind, number, chain) in items {
+        let (kind, number) = (*kind, *number);
         for end in 1..=chain.len() {
             let prefix = &chain[..end];
             if index.contains_key(prefix) {

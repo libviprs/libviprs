@@ -16,7 +16,9 @@
 //!
 //! The paint order (stream 23), the fill rule (stream 25) and the hatch record of every fill come from `pdf_paint` (L3). A clip that is not a rectangle is written as capability 26 for the strokes and fills under it (L4, `pdf_clip_stream`).
 
-use super::components::{LineStyleDef, LineStyleStream, Stream, StrokePaintStream, StrokeWidth};
+use super::components::{
+    ItemKind, LineStyleDef, LineStyleStream, Stream, StrokePaintStream, StrokeWidth,
+};
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
 use super::pdf_clip_stream::{build as build_clip_stream, general_clips};
@@ -228,11 +230,75 @@ pub fn pdf_page_to_pvec_with(
         .as_ref()
         .map(|clips| general_clips(page, clips))
         .unwrap_or_default();
-    // Each stroke (by entity id) and each fill (by hatch record number) written under general
-    // clips, with the clips in force (outermost first, cut off at eight, the depth a clip stream
-    // allows).
-    let mut stroked: Vec<(EntityId, Vec<u64>)> = Vec::new();
-    let mut filled: Vec<(u32, Vec<u64>)> = Vec::new();
+    // Each stroke (by entity id), fill (by hatch record number), text record and raster (by
+    // `RasterId`) written under general clips, with the clips in force (outermost first, cut off
+    // at eight, the depth a clip stream allows).
+    let mut clipped: Vec<(ItemKind, u32, Vec<u64>)> = Vec::new();
+    let general_chain = |active: &[u64]| -> Vec<u64> {
+        active
+            .iter()
+            .copied()
+            .filter(|sequence| general.contains_key(sequence))
+            .take(8)
+            .collect()
+    };
+    // Images (L6), only when the caller asks: baking decodes and tiles every image, which takes
+    // minutes on a scanned sheet. They go into the raster capability in content-stream order, each
+    // placed by its CTM. The pyramid of the whole page stays the first picture under them.
+    let bake = bake_images
+        .then(|| {
+            bake_page_images(
+                page,
+                &PdfImageOptions {
+                    page_to_source: [1.0 / 72.0, 0.0, 0.0, -1.0 / 72.0, 0.0, page.height / 72.0],
+                    ..PdfImageOptions::default()
+                },
+            )
+        })
+        .filter(|bake| !bake.written.is_empty());
+    // The text runs that get a record, in order: a baseline with a length and a height, and not
+    // under a clip that leaves nothing.
+    let empty_clips: Vec<u64> = clips
+        .iter()
+        .flat_map(|clips| &clips.clips)
+        .filter(|clip| clip.empty)
+        .map(|clip| clip.sequence)
+        .collect();
+    let texts: Vec<_> = page
+        .texts
+        .iter()
+        .filter_map(|run| {
+            let start = source_point(run.start, page.height);
+            let end = source_point(run.end, page.height);
+            let height = run.cap_height / 72.0;
+            let visible = start != end && height > 0.0 && height.is_finite();
+            (visible && !run.active_clips.iter().any(|c| empty_clips.contains(c)))
+                .then_some((run, start, end, height))
+        })
+        .collect();
+    // The rasters and the text records are painted where their `sequence` says (the number of
+    // entities before them): an image before a text run of the same number, both before the entity
+    // of that number.
+    let mut extras: Vec<(u64, ItemKind, u32, Vec<u64>)> = Vec::new();
+    for (raster, baked) in bake.iter().flat_map(|bake| &bake.written).enumerate() {
+        let image = &page.images[baked.index];
+        extras.push((
+            image.provenance.sequence,
+            ItemKind::Raster,
+            raster as u32,
+            general_chain(&image.active_clips),
+        ));
+    }
+    for (record, (run, ..)) in texts.iter().enumerate() {
+        extras.push((
+            run.sequence,
+            ItemKind::Text,
+            record as u32,
+            general_chain(&run.active_clips),
+        ));
+    }
+    extras.sort_by_key(|extra| extra.0);
+    let mut extras = extras.into_iter().peekable();
     let decisions: BTreeMap<u64, _> = clips
         .iter()
         .flat_map(|clips| &clips.decisions)
@@ -295,17 +361,22 @@ pub fn pdf_page_to_pvec_with(
     // An `sh` goes before the entity that had its sequence number, and after one painted earlier.
     painted.sort_by_key(|&(entity, is_sh)| (entity.provenance.sequence, !is_sh));
     for (entity, is_sh) in painted {
+        // Rasters and text painted before this entity (an `sh` has the number of the entity it
+        // goes before, and comes first among them).
+        let sequence = entity.provenance.sequence;
+        while let Some((_, kind, number, chain)) =
+            extras.next_if(|extra| extra.0 < sequence || (!is_sh && extra.0 == sequence))
+        {
+            log.item(kind, number);
+            if !chain.is_empty() {
+                clipped.push((kind, number, chain));
+            }
+        }
         let mut clip = None;
         let mut chain: Vec<u64> = Vec::new();
         if is_sh {
             // Clips in force at the `sh`: the rectangles cut it, the others are its clip chain.
-            chain = entity
-                .active_clips
-                .iter()
-                .copied()
-                .filter(|sequence| general.contains_key(sequence))
-                .take(8)
-                .collect();
+            chain = general_chain(&entity.active_clips);
             clip = entity
                 .active_clips
                 .iter()
@@ -326,13 +397,7 @@ pub fn pdf_page_to_pvec_with(
             if decision.case == ClipCase::FullyClipped {
                 continue;
             }
-            chain = decision
-                .clips
-                .iter()
-                .copied()
-                .filter(|sequence| general.contains_key(sequence))
-                .take(8)
-                .collect();
+            chain = general_chain(&decision.clips);
             let rects = decision
                 .clips
                 .iter()
@@ -421,7 +486,7 @@ pub fn pdf_page_to_pvec_with(
                 )
                 .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
             if style == 1 && !chain.is_empty() {
-                stroked.push((id, chain.clone()));
+                clipped.push((ItemKind::Stroke, id.index(), chain.clone()));
             }
             next_id += 1;
             if style == 2 {
@@ -438,11 +503,18 @@ pub fn pdf_page_to_pvec_with(
                 entity.fill_pattern.map(|pattern| (pattern, page)),
             );
             if !chain.is_empty() {
-                filled.extend(hatches.map(|hatch| (hatch, chain.clone())));
+                clipped.extend(hatches.map(|hatch| (ItemKind::Fill, hatch, chain.clone())));
             }
         }
         for id in strokes {
-            log.stroke(id);
+            log.item(ItemKind::Stroke, id.index());
+        }
+    }
+    // What is left was painted after every entity.
+    for (_, kind, number, chain) in extras {
+        log.item(kind, number);
+        if !chain.is_empty() {
+            clipped.push((kind, number, chain));
         }
     }
     if next_id == 1 {
@@ -452,8 +524,16 @@ pub fn pdf_page_to_pvec_with(
     let refused = |error: &dyn std::fmt::Display| PdfToPvecError::Write(error.to_string());
     // The rings of the general clips are hidden closed polylines, written after the page's own
     // entities, with the clip stream that names them.
-    if !stroked.is_empty() || !filled.is_empty() {
-        let stream = build_clip_stream(&stroked, &filled, |sequence| {
+    if !clipped.is_empty() {
+        // Strokes first, then fills, text and rasters, so the records come in the order they did
+        // before text and rasters were assigned.
+        clipped.sort_by_key(|(kind, ..)| match kind {
+            ItemKind::Stroke => 0,
+            ItemKind::Fill => 1,
+            ItemKind::Text => 2,
+            ItemKind::Raster => 3,
+        });
+        let stream = build_clip_stream(&clipped, |sequence| {
             let clip = &general[&sequence];
             let mut boundary = Vec::new();
             for ring in &clip.rings {
@@ -494,13 +574,7 @@ pub fn pdf_page_to_pvec_with(
     // the text its bounds and the colour of stream 24 something to hang on. The rotation is the
     // direction of the baseline in source space, which has y down.
     let mut records = Vec::new();
-    for run in &page.texts {
-        let start = source_point(run.start, page.height);
-        let end = source_point(run.end, page.height);
-        let height = run.cap_height / 72.0;
-        if start == end || height <= 0.0 || !height.is_finite() {
-            continue;
-        }
+    for &(run, start, end, height) in &texts {
         let (anchor_bounds, cell) = bounds_and_cell(&[start, end], bounds);
         let id =
             EntityId::new(next_id).map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
@@ -547,19 +621,7 @@ pub fn pdf_page_to_pvec_with(
             .map_err(|e| refused(&e))?;
         writer.push_stream(stream).map_err(|e| refused(&e))?;
     }
-    // Images (L6), only when the caller asks: baking decodes and tiles every image, which takes
-    // minutes on a scanned sheet. They go into the raster capability in content-stream order, each
-    // placed by its CTM. The pyramid of the whole page stays the first picture under them.
-    let bake = bake_images.then(|| {
-        bake_page_images(
-            page,
-            &PdfImageOptions {
-                page_to_source: [1.0 / 72.0, 0.0, 0.0, -1.0 / 72.0, 0.0, page.height / 72.0],
-                ..PdfImageOptions::default()
-            },
-        )
-    });
-    if let Some(bake) = bake.filter(|bake| !bake.written.is_empty()) {
+    if let Some(bake) = bake {
         let placements = bake
             .written
             .iter()
