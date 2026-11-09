@@ -720,6 +720,8 @@ annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_one_failing_s
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_the_number_is_as_wide_as_the_count_and_counts_every_paper_layout
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_the_stem_comes_from_the_file_name_and_bytes_need_one
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1583_a_blank_layout_is_empty_after_view_without_being_converted
+annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::a_page_with_nothing_painted_is_refused_with_the_servers_message
+annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::blueprint_mix_bytes_match_server_main
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs
@@ -760,6 +762,7 @@ annotated   fs-detected  tests/pvec_api_surface.rs::no_index_directory_or_stradd
 annotated   fs-detected  tests/pvec_api_surface.rs::no_pvec_path_under_src_is_outside_the_allowed_surface
 annotated   fs-detected  tests/pvec_api_surface.rs::no_writer_call_is_made_outside_the_funnel
 annotated   fs-detected  tests/pvec_api_surface.rs::only_the_semantic_crates_are_named_today
+annotated   fs-detected  tests/pvec_api_surface.rs::pvec_container_is_optional_and_named_by_its_one_file
 annotated   fs-detected  tests/pvec_api_surface.rs::src_pvec_implements_no_curve_evaluation_knot_insertion_or_tessellation
 annotated   fs-detected  tests/pvec_api_surface.rs::the_facade_is_named_by_the_funnel_and_the_raster_files_only
 annotated   fs-detected  tests/pvec_api_surface.rs::the_pvec_dependencies_stay_semantic_and_optional

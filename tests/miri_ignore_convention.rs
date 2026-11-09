@@ -887,7 +887,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1565 adds 9: the `tests/pvec_1565_viewport_curves.rs` cells that convert a sheet whose curves cross a viewport or the sheet into a temp dir and read the artifact back. Two #1562 and #1563 cells are renamed, not added. It said 1120 before this line moved.
 /// #1582 adds 1: `tests/pvec_1563_viewports.rs::issue_1582_the_paper_view_is_a_policy_reason_of_its_own`, which converts a sheet into a temp dir. It said 1129 before this line moved.
 /// #1583 adds 1: `tests/pvec_1564_layout_set.rs::issue_1583_a_blank_layout_is_empty_after_view_without_being_converted`, which converts a layout set into a temp dir. It said 1130 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1131;
+/// #1578 adds 3: the two `tests/pvec_1578_pdf_page_to_pvec.rs` cells that read `blueprint-mix.pdf`, and `tests/pvec_api_surface.rs::pvec_container_is_optional_and_named_by_its_one_file`, which reads the manifest. It said 1131 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1134;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
