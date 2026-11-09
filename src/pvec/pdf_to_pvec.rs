@@ -22,6 +22,7 @@ use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_
 use super::pdf_clip_stream::{build as build_clip_stream, general_clips};
 use super::pdf_image::{PdfImageOptions, bake_page_images};
 use super::pdf_paint::PaintLog;
+use super::pdf_ring_cut::cut_ring;
 use super::pdf_shading::PdfFillPattern;
 use super::pdf_vector::{
     PdfFillRule, PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfProvenance, PdfStrokeParams,
@@ -136,51 +137,6 @@ pub fn pdf_page_to_pvec_with(
             pieces
         }
 
-        /// Sutherland-Hodgman against the rectangle. The ring comes in closed and goes out closed, or
-        /// empty when nothing is left.
-        fn clip_polygon(ring: &[[f64; 2]], rect: ExactBounds) -> Vec<[f64; 2]> {
-            let mut out = ring[..ring.len() - 1].to_vec();
-            for (axis, value, keep_above) in [
-                (0, rect.min[0], true),
-                (0, rect.max[0], false),
-                (1, rect.min[1], true),
-                (1, rect.max[1], false),
-            ] {
-                let inside = |p: [f64; 2]| {
-                    if keep_above {
-                        p[axis] >= value
-                    } else {
-                        p[axis] <= value
-                    }
-                };
-                let input = std::mem::take(&mut out);
-                for (index, &current) in input.iter().enumerate() {
-                    let previous = input[(index + input.len() - 1) % input.len()];
-                    let crossing = || {
-                        let t = (value - previous[axis]) / (current[axis] - previous[axis]);
-                        let mut point = [0.0; 2];
-                        point[axis] = value;
-                        point[1 - axis] =
-                            previous[1 - axis] + t * (current[1 - axis] - previous[1 - axis]);
-                        point
-                    };
-                    if inside(current) {
-                        if !inside(previous) {
-                            out.push(crossing());
-                        }
-                        out.push(current);
-                    } else if inside(previous) {
-                        out.push(crossing());
-                    }
-                }
-                if out.is_empty() {
-                    return out;
-                }
-            }
-            out.push(out[0]);
-            out
-        }
-
         // The viewer paints the page white, so a white fill adds nothing. One that is also stroked
         // keeps its outline.
         // A shading fill is not white whatever the last plain colour was.
@@ -199,8 +155,13 @@ pub fn pdf_page_to_pvec_with(
             let filled = fills && ring.len() >= 3;
             if filled {
                 ring.push(ring[0]);
+                // A fill is cut as a closed ring (a rectangle is convex, so the cut keeps the fill
+                // rule), never as a polyline: that can split a ring into open pieces.
                 if let Some(clip) = clip {
-                    ring = clip_polygon(&ring, clip);
+                    let [(x0, y0), (x1, y1)] =
+                        [(clip.min[0], clip.min[1]), (clip.max[0], clip.max[1])];
+                    ring = cut_ring(&ring, &[[x0, y0], [x1, y0], [x1, y1], [x0, y1], [x0, y0]])
+                        .unwrap_or_default();
                 }
                 if ring.len() >= 4 {
                     runs.push((
