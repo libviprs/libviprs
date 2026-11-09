@@ -96,18 +96,18 @@ fn blueprint_mix() -> Option<PathBuf> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn blueprint_mix_bytes_match_server_main() {
+fn blueprint_mix_bytes_are_pinned_with_the_stroke_streams() {
     let Some(path) = blueprint_mix() else { return };
     let page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
     let bytes = pdf_page_to_pvec(&page, "iasbuilt-server", "1.0.3").unwrap();
-    assert_eq!(bytes.len(), 12896);
+    assert_eq!(bytes.len(), 16400);
     let hex: String = Sha256::digest(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(
         hex,
-        "cb8da922d5562db37745b47a7e1d9e37e4016f804773b4f89a96d649a8ee3c8f"
+        "3e94b62fd975928c65d38b875d1ab9e41aa27abd0b4b32e3019e77bed3c4855c"
     );
 }
 

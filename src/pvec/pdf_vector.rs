@@ -204,6 +204,20 @@ pub struct PdfPathEntity {
     /// The fill colour in force when the path was painted, as sRGB (issue #1544). Black until a
     /// colour operator sets it; a pattern or a colour space this does not know leaves it alone.
     pub fill_colour: [u8; 3],
+    /// The stroke colour in force when the path was painted, as sRGB (issue #1578). Black until
+    /// a stroke colour operator (`G RG K SC SCN`) sets it.
+    pub stroke_colour: [u8; 3],
+    /// The fill alpha (`ca` in a graphics state) as a byte, 255 when none was set.
+    pub fill_alpha: u8,
+    /// The stroke alpha (`CA` in a graphics state) as a byte, 255 when none was set.
+    pub stroke_alpha: u8,
+    /// The scale of the CTM the path was painted under, the square root of the absolute
+    /// determinant, in page points per user unit. A stroke width in user units times this is the
+    /// width on the page.
+    pub ctm_scale: f64,
+    /// The ratio of the larger to the smaller singular value of the CTM, 1 for a similarity.
+    /// A width is only one number when this is near 1.
+    pub ctm_anisotropy: f64,
     /// The `sequence` of every clip-defining entity in force when this path was painted,
     /// outermost first. A path's own `W` takes effect after it is painted, so it is not in
     /// its own list. Scoped by `q`/`Q` and by Form XObject boundaries (N5.3).
@@ -752,6 +766,9 @@ pub fn extract_page_paths_from_bytes(
         text: TextReport::default(),
         font: TextFontOutcome::Unresolved,
         fill: [0, 0, 0],
+        stroke_colour: [0, 0, 0],
+        fill_alpha: 255,
+        stroke_alpha: 255,
         image_bytes: 0,
     };
     let resources = inherited_resources(&doc, page_id)?;
@@ -1522,6 +1539,11 @@ struct Run<'a> {
     font: TextFontOutcome,
     /// The fill colour in force as sRGB, for an image mask (issue #1332) and a path (issue #1544).
     fill: [u8; 3],
+    /// The stroke colour in force, as sRGB.
+    stroke_colour: [u8; 3],
+    /// `ca` and `CA` as bytes.
+    fill_alpha: u8,
+    stroke_alpha: u8,
     /// Encoded image bytes kept so far, for `max_image_bytes`.
     image_bytes: u64,
 }
@@ -1529,6 +1551,9 @@ struct Run<'a> {
 /// What `q` saves and `Q` restores.
 struct Saved {
     fill: [u8; 3],
+    stroke_colour: [u8; 3],
+    fill_alpha: u8,
+    stroke_alpha: u8,
     ctm: Matrix,
     clips: usize,
     soft_mask: bool,
@@ -1606,6 +1631,9 @@ impl Run<'_> {
                         stroke: self.stroke.clone(),
                         font: self.font,
                         fill: self.fill,
+                        stroke_colour: self.stroke_colour,
+                        fill_alpha: self.fill_alpha,
+                        stroke_alpha: self.stroke_alpha,
                     });
                 }
                 "Q" => {
@@ -1619,6 +1647,9 @@ impl Run<'_> {
                             self.stroke = saved.stroke;
                             self.font = saved.font;
                             self.fill = saved.fill;
+                            self.stroke_colour = saved.stroke_colour;
+                            self.fill_alpha = saved.fill_alpha;
+                            self.stroke_alpha = saved.stroke_alpha;
                         }
                     } else {
                         self.unbalanced += 1;
@@ -1682,15 +1713,29 @@ impl Run<'_> {
                 }
                 "W" => path.clip = Some(PdfFillRule::NonZero),
                 "W*" => path.clip = Some(PdfFillRule::EvenOdd),
-                "n" => self.paint(&mut path, op, None, false, false)?,
-                "S" => self.paint(&mut path, op, None, true, false)?,
-                "s" => self.paint(&mut path, op, None, true, true)?,
-                "f" | "F" => self.paint(&mut path, op, Some(PdfFillRule::NonZero), false, false)?,
-                "f*" => self.paint(&mut path, op, Some(PdfFillRule::EvenOdd), false, false)?,
-                "B" => self.paint(&mut path, op, Some(PdfFillRule::NonZero), true, false)?,
-                "B*" => self.paint(&mut path, op, Some(PdfFillRule::EvenOdd), true, false)?,
-                "b" => self.paint(&mut path, op, Some(PdfFillRule::NonZero), true, true)?,
-                "b*" => self.paint(&mut path, op, Some(PdfFillRule::EvenOdd), true, true)?,
+                "n" => self.paint(&mut path, &ctm, op, None, false, false)?,
+                "S" => self.paint(&mut path, &ctm, op, None, true, false)?,
+                "s" => self.paint(&mut path, &ctm, op, None, true, true)?,
+                "f" | "F" => self.paint(
+                    &mut path,
+                    &ctm,
+                    op,
+                    Some(PdfFillRule::NonZero),
+                    false,
+                    false,
+                )?,
+                "f*" => self.paint(
+                    &mut path,
+                    &ctm,
+                    op,
+                    Some(PdfFillRule::EvenOdd),
+                    false,
+                    false,
+                )?,
+                "B" => self.paint(&mut path, &ctm, op, Some(PdfFillRule::NonZero), true, false)?,
+                "B*" => self.paint(&mut path, &ctm, op, Some(PdfFillRule::EvenOdd), true, false)?,
+                "b" => self.paint(&mut path, &ctm, op, Some(PdfFillRule::NonZero), true, true)?,
+                "b*" => self.paint(&mut path, &ctm, op, Some(PdfFillRule::EvenOdd), true, true)?,
                 "w" => self.stroke.width = Some(self.operands(op, 1)?[0]),
                 "d" => self.dash(op)?,
                 "g" | "G" | "rg" | "RG" | "k" | "K" | "cs" | "CS" | "sc" | "SC" => {
@@ -1770,6 +1815,7 @@ impl Run<'_> {
     fn paint(
         &mut self,
         path: &mut PathState,
+        ctm: &Matrix,
         op: &Operation,
         fill: Option<PdfFillRule>,
         stroke: bool,
@@ -1792,6 +1838,14 @@ impl Run<'_> {
             });
         }
         let sequence = self.out.len() as u64;
+        let [a, b, c, d, _, _] = ctm.0;
+        // Singular values of the linear part: their product is |det|, their sum of squares is the
+        // squared Frobenius norm.
+        let det = (a * d - b * c).abs();
+        let frobenius = a * a + b * b + c * c + d * d;
+        let spread = (frobenius * frobenius - 4.0 * det * det).max(0.0).sqrt();
+        let large = ((frobenius + spread) / 2.0).sqrt();
+        let small = ((frobenius - spread) / 2.0).max(0.0).sqrt();
         self.out.push(PdfPathEntity {
             segments: state.segments,
             paint: PdfPaintIntent {
@@ -1801,6 +1855,15 @@ impl Run<'_> {
             },
             clip: state.clip,
             fill_colour: self.fill,
+            stroke_colour: self.stroke_colour,
+            fill_alpha: self.fill_alpha,
+            stroke_alpha: self.stroke_alpha,
+            ctm_scale: det.sqrt(),
+            ctm_anisotropy: if small > 0.0 {
+                large / small
+            } else {
+                f64::INFINITY
+            },
             active_clips: self.clips.clone(),
             soft_masked: self.soft_mask,
             text_clipped: self.text_clip,
@@ -1850,6 +1913,20 @@ impl Run<'_> {
         else {
             return;
         };
+        let alpha = |key: &[u8]| {
+            gs.get(key)
+                .ok()
+                .and_then(|o| deref(doc, o))
+                .and_then(number)
+                .filter(|v| v.is_finite())
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0).round() as u8)
+        };
+        if let Some(a) = alpha(b"ca") {
+            self.fill_alpha = a;
+        }
+        if let Some(a) = alpha(b"CA") {
+            self.stroke_alpha = a;
+        }
         match gs.get(b"SMask").ok().and_then(|m| deref(doc, m)) {
             Some(Object::Name(n)) if n == b"None" => self.soft_mask = false,
             Some(Object::Dictionary(_) | Object::Stream(_)) => self.soft_mask = true,
@@ -1857,14 +1934,18 @@ impl Run<'_> {
         }
     }
 
-    /// Track the fill colour an image mask is painted in: the device operators set it, and a
-    /// `cs` or `sc` with 1, 3 or 4 components is read as gray, RGB or CMYK. A pattern or a colour
-    /// space this does not know leaves it alone. Stroke operators are not the fill.
+    /// Track the fill and stroke colours: the device operators set them, and a `cs`/`CS` or
+    /// `sc`/`SC` with 1, 3 or 4 components is read as gray, RGB or CMYK. A pattern or a colour
+    /// space this does not know leaves them alone. The upper case forms are the stroke.
     fn fill_operator(&mut self, op: &Operation) {
         let nums: Vec<f64> = op.operands.iter().filter_map(number).collect();
         let unit = |v: f64| v.clamp(0.0, 1.0);
         let byte = |v: f64| (unit(v) * 255.0).round() as u8;
-        let colour = match (op.operator.as_str(), nums.as_slice()) {
+        let stroke = op
+            .operator
+            .chars()
+            .all(|c| c.is_ascii_uppercase() || c == '*');
+        let colour = match (op.operator.to_ascii_lowercase().as_str(), nums.as_slice()) {
             ("cs", _) => Some([0, 0, 0]),
             ("g", [g]) | ("sc" | "scn", [g]) => Some([byte(*g); 3]),
             ("rg", [r, g, b]) | ("sc" | "scn", [r, g, b]) => Some([byte(*r), byte(*g), byte(*b)]),
@@ -1875,7 +1956,11 @@ impl Run<'_> {
             _ => None,
         };
         if let Some(c) = colour {
-            self.fill = c;
+            if stroke {
+                self.stroke_colour = c;
+            } else {
+                self.fill = c;
+            }
         }
     }
 
