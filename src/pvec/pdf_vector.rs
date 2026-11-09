@@ -1651,7 +1651,7 @@ impl Run<'_> {
                         render_mode: self.render_mode,
                         stroke: self.stroke.clone(),
                         font: self.font,
-                        text: self.tracker.save(),
+                        text: self.tracker.params.clone(),
                         fill: self.fill,
                         stroke_colour: self.stroke_colour,
                         fill_alpha: self.fill_alpha,
@@ -1668,7 +1668,7 @@ impl Run<'_> {
                             self.render_mode = saved.render_mode;
                             self.stroke = saved.stroke;
                             self.font = saved.font;
-                            self.tracker.restore(saved.text);
+                            self.tracker.params = saved.text;
                             self.fill = saved.fill;
                             self.stroke_colour = saved.stroke_colour;
                             self.fill_alpha = saved.fill_alpha;

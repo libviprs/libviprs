@@ -75,12 +75,6 @@ fn q_and_big_q_bring_back_tc_tw_tz_tl_tf_and_ts() {
     assert_eq!(after.cap_height, 7.0);
 }
 
-struct Written {
-    texts: TextStream,
-    clips: ClipStream,
-    styles: LineStyleStream,
-}
-
 #[test]
 fn a_text_anchor_and_a_clip_ring_do_not_share_a_line_style() {
     let page = page(&format!(
@@ -95,22 +89,19 @@ fn a_text_anchor_and_a_clip_ring_do_not_share_a_line_style() {
             .unwrap_or_else(|| panic!("no stream {cap:?}"))
             .payload
     };
-    let written = Written {
-        texts: TextStream::decode(payload(TextStream::CAPABILITY)).unwrap(),
-        clips: ClipStream::decode(payload(ClipStream::CAPABILITY)).unwrap(),
-        styles: LineStyleStream::decode(payload(LineStyleStream::CAPABILITY)).unwrap(),
-    };
+    let texts = TextStream::decode(payload(TextStream::CAPABILITY)).unwrap();
+    let clips = ClipStream::decode(payload(ClipStream::CAPABILITY)).unwrap();
+    let styles = LineStyleStream::decode(payload(LineStyleStream::CAPABILITY)).unwrap();
     let name_of = |entity| {
-        let (_, style) = written
-            .styles
+        let (_, style) = styles
             .assignments
             .iter()
             .find(|(id, _)| *id == entity)
             .expect("the entity has a line style");
-        written.styles.styles[*style as usize].name.clone()
+        styles.styles[*style as usize].name.clone()
     };
-    assert_eq!(name_of(written.texts.records[0].entity), "pdf-text-anchor");
-    assert_eq!(name_of(written.clips.clips[0].boundary[0]), "pdf-clip-ring");
+    assert_eq!(name_of(texts.records[0].entity), "pdf-text-anchor");
+    assert_eq!(name_of(clips.clips[0].boundary[0]), "pdf-clip-ring");
 }
 
 #[test]

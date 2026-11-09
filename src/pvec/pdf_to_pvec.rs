@@ -451,10 +451,7 @@ pub fn pdf_page_to_pvec_with(
         if start == end || height <= 0.0 || !height.is_finite() {
             continue;
         }
-        let anchor_bounds = Bounds {
-            min: [start[0].min(end[0]), start[1].min(end[1])],
-            max: [start[0].max(end[0]), start[1].max(end[1])],
-        };
+        let (anchor_bounds, cell) = bounds_and_cell(&[start, end], bounds);
         let id =
             EntityId::new(next_id).map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
         writer
@@ -462,7 +459,7 @@ pub fn pdf_page_to_pvec_with(
                 EntityMeta {
                     id,
                     style: 1,
-                    cell: bounds_and_cell(&[start, end], bounds).1,
+                    cell,
                     bounds: anchor_bounds,
                 },
                 &[start, end],
@@ -482,7 +479,7 @@ pub fn pdf_page_to_pvec_with(
             },
         ));
         let mut text = run.text.as_str();
-        while text.len() > 4096 {
+        if text.len() > 4096 {
             text = &text[..text.floor_char_boundary(4096)];
         }
         records.push(TextRecord {

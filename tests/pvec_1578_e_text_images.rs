@@ -1,8 +1,7 @@
-//! Issue #1578 (L6 and L7): `pdf_page_to_pvec` writes the text of the page (text records, each on a
-//! hidden anchor entity that carries the text colour) and bakes the page's images into the raster
-//! capability, ordered with the fills. `blueprint-mix.pdf` is the oracle: its title block reads
-//! "Campus Map 1.0 1 of 09 Revision 1.01/2025 - April 7, 2025." (pdftotext) and its scan strips
-//! are 12738 by 220 images with soft masks. Needs `--features pvec-write,pvec-raster`.
+//! Issue #1578 (L6): `pdf_page_to_pvec` writes the text of the page (text records, each on a
+//! hidden anchor entity that carries the text colour). `blueprint-mix.pdf` is the oracle: its title
+//! block reads "Campus Map 1.0 1 of 09 Revision 1.01/2025 - April 7, 2025." (pdftotext). Needs
+//! `--features pvec-write,pvec-raster`. Image baking is checked in `pvec_1578_e_text_state`.
 
 #![cfg(all(feature = "pvec-write", feature = "pvec-raster"))]
 

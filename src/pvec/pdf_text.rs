@@ -105,7 +105,7 @@ impl Default for TextParams {
 pub(crate) struct TextTracker {
     tm: Matrix,
     tlm: Matrix,
-    params: TextParams,
+    pub(crate) params: TextParams,
     cache: BTreeMap<(u32, u16), Rc<Font>>,
     /// The runs shown so far, in content-stream order.
     pub(crate) runs: Vec<PdfTextRun>,
@@ -120,16 +120,6 @@ impl TextTracker {
             cache: BTreeMap::new(),
             runs: Vec::new(),
         }
-    }
-
-    /// What `q` saves.
-    pub(crate) fn save(&self) -> TextParams {
-        self.params.clone()
-    }
-
-    /// What `Q` brings back.
-    pub(crate) fn restore(&mut self, saved: TextParams) {
-        self.params = saved;
     }
 
     /// Follows one operator.
