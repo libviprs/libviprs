@@ -16,7 +16,7 @@ use pvec_container::{
     writer::{ContainerWriter, EntityMeta, WriterConfig},
 };
 use pvec_entity::EntityId;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use thiserror::Error;
 
 /// Why a page could not be written as a PVec.
@@ -63,12 +63,12 @@ pub fn pdf_page_to_pvec(
         &LinesOnlyBounds,
     )
     .ok();
-    let decisions: HashMap<u64, _> = clips
+    let decisions: BTreeMap<u64, _> = clips
         .iter()
         .flat_map(|clips| &clips.decisions)
         .map(|decision| (decision.entity, decision))
         .collect();
-    let rectangles: HashMap<u64, _> = clips
+    let rectangles: BTreeMap<u64, _> = clips
         .iter()
         .flat_map(|clips| &clips.clips)
         .filter_map(|clip| Some((clip.sequence, clip.rect?)))
