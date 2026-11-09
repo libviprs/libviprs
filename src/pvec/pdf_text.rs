@@ -223,7 +223,8 @@ impl TextTracker {
         if visible && !text.is_empty() && fs > 0.0 && advance.is_finite() {
             let start = apply(&trm, [0.0, self.rise]);
             let end = apply(&trm, [advance, self.rise]);
-            let scale = trm[2].hypot(trm[3]);
+            // Basic arithmetic and `sqrt`, not libm `hypot`, which differs in the last bit by architecture.
+            let scale = (trm[2] * trm[2] + trm[3] * trm[3]).sqrt();
             self.runs.push(PdfTextRun {
                 text,
                 start,
