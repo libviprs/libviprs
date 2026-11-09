@@ -1,14 +1,14 @@
 //! Issue #1578, L4 (non-rectangular clips): a `W` or `W*` clip that is not an axis-aligned
 //! rectangle is written as capability 26. Its path becomes hidden closed ring entities (a hidden
 //! style in the line style stream), the clip record carries the rule and the parent (nesting is
-//! the parent chain, 8 deep at most), and the strokes drawn under it are named by runs. A
+//! the parent chain, 8 deep at most), and the strokes and fills drawn under it are named by runs
+//! (a fill by its hatch record). A
 //! rectangular clip is still cut into the geometry and writes no record. The PDF's own operators
 //! are the oracle; `blueprint-mix.pdf` has rectangles only, so its bytes stay the pinned ones in
 //! `pvec_1578_pdf_page_to_pvec.rs`. Needs `--features pvec-write`.
 //!
-//! Left for the hatch stream: a fill under a general clip is a style 2 polygon today, not a hatch
-//! record, so there is no fill item to name yet. The circle, even-odd and triangle regions of
-//! `fid-clips` need that (and the closed-ring cutting of L5) on top of this.
+//! Left for L5: the fill rings themselves are not cut to the clip yet. The circle, even-odd and
+//! triangle regions of `fid-clips` need that on top of this.
 
 #![cfg(feature = "pvec-write")]
 
@@ -84,12 +84,16 @@ fn circle(cx: f64, cy: f64, r: f64) -> String {
     )
 }
 
-/// The items of one kind the runs assign to clip `clip`.
+/// The strokes the runs assign to clip `clip`.
 fn items(stream: &ClipStream, clip: u32) -> u32 {
+    kind_items(stream, ItemKind::Stroke, clip)
+}
+
+fn kind_items(stream: &ClipStream, kind: ItemKind, clip: u32) -> u32 {
     stream
         .runs
         .iter()
-        .filter(|r| r.kind == ItemKind::Stroke && r.clip == clip)
+        .filter(|r| r.kind == kind && r.clip == clip)
         .map(|r| r.count)
         .sum()
 }
@@ -203,4 +207,24 @@ fn the_same_clip_used_twice_in_a_row_is_one_record() {
     let clips = convert(&content).clips.unwrap();
     assert_eq!(clips.clips.len(), 1);
     assert_eq!(items(&clips, 0), 4);
+}
+
+#[test]
+fn fills_under_a_general_clip_are_runs_over_their_hatch_records() {
+    // Two filled squares under a triangle, one after the restore, and a stroke between them.
+    let content = format!(
+        "q {TRIANGLE}W n 1 0 0 rg 50 50 40 40 re f {}0 0 1 rg 100 50 40 40 re f Q 0 1 0 rg 200 50 40 40 re f",
+        hatch(0, 1)
+    );
+    let clips = convert(&content).clips.unwrap();
+    assert_eq!(clips.clips.len(), 1);
+    assert_eq!(kind_items(&clips, ItemKind::Fill, 0), 2);
+    assert_eq!(items(&clips, 0), 1);
+    let fills: Vec<_> = clips
+        .runs
+        .iter()
+        .filter(|r| r.kind == ItemKind::Fill)
+        .map(|r| (r.first, r.count))
+        .collect();
+    assert_eq!(fills, vec![(0, 2)]);
 }
