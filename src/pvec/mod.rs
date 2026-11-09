@@ -71,6 +71,8 @@ mod pdf_filters;
 pub mod pdf_image;
 mod pdf_image_decode;
 #[cfg(feature = "pvec-write")]
+mod pdf_paint;
+#[cfg(feature = "pvec-write")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
 pub mod pdf_to_pvec;
 pub mod pdf_vector;

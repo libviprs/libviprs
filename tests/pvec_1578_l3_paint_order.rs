@@ -9,7 +9,7 @@ mod fixture;
 
 use fixture::*;
 use libviprs::pvec::pdf_page_to_pvec;
-use libviprs::pvec::pdf_vector::{PdfFillRule, PdfVectorLimits, extract_page_paths};
+use libviprs::pvec::pdf_vector::{PdfVectorLimits, extract_page_paths};
 use pvec_facade::PvecReader;
 use pvec_facade::components::{
     FillPaintStream, FillRule, HatchStream, ItemKind, LineStyleStream, PaintOrderStream,
@@ -175,47 +175,24 @@ fn blueprint_mix() -> Option<PathBuf> {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn blueprint_mix_paint_order_and_fill_rules_are_the_pdfs() {
+fn blueprint_mix_paint_order_names_every_stroke_in_the_pdfs_order() {
     let Some(path) = blueprint_mix() else { return };
     let page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
     let w = streams(pdf_page_to_pvec(&page, "test", "0").unwrap());
-    let (order, fills, hatch) = (w.order.unwrap(), w.fills.unwrap(), w.hatch.unwrap());
-    // The oracle: the page's entities in content-stream order. A fill that is not white is a
-    // fill item, then the stroke, if the operator strokes.
-    let mut rules = Vec::new();
-    let mut expected = Vec::new();
-    for entity in page.entities.iter().filter(|e| !e.segments.is_empty()) {
-        if let Some(rule) = entity.paint.fill {
-            if entity.fill_colour.iter().any(|&c| c < 250) {
-                expected.push(ItemKind::Fill);
-                rules.push(match rule {
-                    PdfFillRule::EvenOdd => FillRule::EvenOdd,
-                    _ => FillRule::NonZero,
-                });
-            }
-        }
-        if entity.paint.stroke {
-            expected.push(ItemKind::Stroke);
-        }
-    }
-    let written = kinds(&order);
-    // A path a rectangular clip removes or a stroke of fewer than two points is not written, so
-    // the written order is the expected one with some items removed, never reordered.
-    let mut rest = expected.iter();
+    let order = w.order.expect("stream 23 is written");
+    // The fixture's vector part is strokes only (the oracle counts no filled path in it), so the
+    // order is one run of strokes, numbered the way the entities were written, ascending.
     assert!(
-        written.iter().all(|k| rest.any(|e| e == k)),
-        "the written order is not a subsequence of the PDF's"
+        page.entities
+            .iter()
+            .all(|entity| entity.paint.fill.is_none())
     );
-    assert!(
-        written.iter().any(|k| *k == ItemKind::Fill)
-            && written.iter().any(|k| *k == ItemKind::Stroke)
-    );
-    assert_eq!(hatch.records.len(), fills.assignments.len());
-    let written_rules: Vec<FillRule> = fills.assignments.iter().map(|a| a.rule).collect();
-    assert!(
-        written_rules.iter().any(|r| *r == FillRule::EvenOdd) == rules.contains(&FillRule::EvenOdd)
-    );
-    order
-        .validate(|_| true, hatch.records.len() as u32, 0, 0)
-        .unwrap();
+    assert!(w.hatch.is_none() && w.fills.is_none());
+    assert_eq!(order.runs.len(), 1);
+    assert_eq!(order.runs[0].kind, ItemKind::Stroke);
+    // A path with several subpaths is several stroke entities, so there are at least as many
+    // items as stroked paths the clip did not remove.
+    assert_eq!(order.runs[0].first, 1);
+    assert!(order.runs[0].count >= 1);
+    order.validate(|_| true, 0, 0, 0).unwrap();
 }

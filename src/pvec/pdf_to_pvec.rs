@@ -6,11 +6,13 @@
 //! (style 2 for a filled polygon, 1 for a stroke), curves flattened to 16 steps. A white fill is
 //! dropped (a stroked one keeps its outline), and a path inside a rectangular clip is cut to it
 //! through `apply_clip_policy`. `tests/pvec_1578_pdf_page_to_pvec.rs` pins the bytes on
-//! `blueprint-mix.pdf`. Nothing from the paint design's new streams is written here yet.
+//! `blueprint-mix.pdf`. The paint order (stream 23), the fill rule (stream 25) and the hatch records every fill is come from `pdf_paint` (L3): the geometry blocks are the ones server main writes, and the test pins the whole file.
 
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
+use super::pdf_paint::PaintLog;
 use super::pdf_vector::{PdfPathEntity, PdfPathSegment, PdfVectorPage};
+use pvec_capabilities::Registry;
 use pvec_container::{
     Bounds, LengthUnit, Metadata,
     writer::{ContainerWriter, EntityMeta, WriterConfig},
@@ -54,6 +56,8 @@ pub fn pdf_page_to_pvec(
         capabilities: vec![],
     });
     let mut next_id = 1u32;
+    // What was painted, in the PDF's own order: the hatch records, the fill rules and stream 23.
+    let mut log = PaintLog::new();
     // A clip that is a plain rectangle is applied to the geometry. A general clip path is kept
     // unclipped (display fidelity only), as the clip policy records. When clip analysis fails
     // (more clips in force at once than the policy allows), the page still converts, unclipped.
@@ -102,7 +106,12 @@ pub fn pdf_page_to_pvec(
                 continue;
             }
         }
-        for (style, points) in entity_runs(entity, clip, page.height) {
+        // The PDF paints a path's fill and then its stroke, so the rings come first.
+        let mut runs = entity_runs(entity, clip, page.height);
+        runs.sort_by_key(|(style, _)| std::cmp::Reverse(*style));
+        let mut rings = Vec::new();
+        let mut strokes = Vec::new();
+        for (style, points) in runs {
             // One polyline entity: repeated points dropped, a single point (or none) skipped, the
             // cell the centre of its bounds falls in on a 16 by 16 grid over the page.
             let points = points
@@ -146,10 +155,29 @@ pub fn pdf_page_to_pvec(
                 )
                 .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
             next_id += 1;
+            if style == 2 {
+                rings.push(id);
+            } else {
+                strokes.push(id);
+            }
+        }
+        if let (false, Some(rule)) = (rings.is_empty(), entity.paint.fill) {
+            log.fill(&rings, rule, entity.fill_colour);
+        }
+        for id in strokes {
+            log.stroke(id);
         }
     }
     if next_id == 1 {
         return Err(PdfToPvecError::NoPaths);
+    }
+    for stream in log
+        .streams(&Registry::v1())
+        .map_err(PdfToPvecError::Write)?
+    {
+        writer
+            .push_stream(stream)
+            .map_err(|error| PdfToPvecError::Write(error.to_string()))?;
     }
     writer
         .finish()
