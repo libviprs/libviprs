@@ -127,13 +127,15 @@ fn blueprint_mix() -> Option<PathBuf> {
             PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../libviprs-tests/tests/fixtures")
         });
     let path = fixtures.join("blueprint-mix.pdf");
-    path.is_file().then_some(path).or_else(|| {
+    if path.is_file() {
+        Some(path)
+    } else {
         eprintln!(
             "skipped: {} is not there (set LIBVIPRS_TESTS_FIXTURES)",
             path.display()
         );
         None
-    })
+    }
 }
 
 #[test]
