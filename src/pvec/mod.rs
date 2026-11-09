@@ -77,6 +77,7 @@ mod pdf_paint;
 pub mod pdf_ring_cut;
 pub mod pdf_shading;
 mod pdf_text;
+pub mod pdf_tiling;
 #[cfg(feature = "pvec-write")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
 pub mod pdf_to_pvec;
@@ -134,6 +135,7 @@ pub use pdf_shading::{
     PdfFillPattern, PdfGradientKind, PdfGradientStop, PdfShading, PdfShadingPaint,
 };
 pub use pdf_text::PdfTextRun;
+pub use pdf_tiling::{PdfTiling, PdfTilingPrimitive};
 #[cfg(feature = "pvec-write")]
 pub use pdf_to_pvec::{PdfToPvecError, pdf_page_to_pvec, pdf_page_to_pvec_with};
 pub use pdf_vector::{

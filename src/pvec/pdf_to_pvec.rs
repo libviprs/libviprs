@@ -431,18 +431,11 @@ pub fn pdf_page_to_pvec_with(
             }
         }
         if let (false, Some(rule)) = (rings.is_empty(), entity.paint.fill) {
-            let shading = match entity.fill_pattern {
-                Some(PdfFillPattern::Shading(index)) => page
-                    .shadings
-                    .get(index)
-                    .map(|shading| (shading, page.height)),
-                None => None,
-            };
             let hatches = log.fill(
                 &rings,
                 rule,
                 (entity.fill_colour, entity.fill_alpha),
-                shading,
+                entity.fill_pattern.map(|pattern| (pattern, page)),
             );
             if !chain.is_empty() {
                 filled.extend(hatches.map(|hatch| (hatch, chain.clone())));

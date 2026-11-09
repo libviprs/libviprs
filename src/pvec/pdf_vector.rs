@@ -46,6 +46,7 @@ use thiserror::Error;
 
 use super::pdf_shading::{PdfFillPattern, PdfShading, PdfShadingPaint, read_shading};
 use super::pdf_text::{PdfTextRun, TextContext, TextParams, TextTracker};
+use super::pdf_tiling::{PdfTiling, read_tiling};
 use super::text_policy::{TextFontOutcome, TextReport, font_outcome};
 use crate::pdf::{PageRotation, PdfError, page_object_id, page_rotation_of, page_visible_box};
 
@@ -286,6 +287,12 @@ pub struct PdfVectorPage {
     /// Shadings, by `sh` or by pattern, that are not axial or radial or whose function or colour
     /// space this does not read, so they have no entry in `shadings`.
     pub shadings_not_sampled: u32,
+    /// The tiling patterns the page fills with, their cells read as paths (issue #1578).
+    /// [`PdfPathEntity::fill_pattern`] indexes this.
+    pub tilings: Vec<PdfTiling>,
+    /// Tiling patterns selected for a fill whose cell this does not read (text, images, shadings
+    /// or too many paths in the cell), so they have no entry in `tilings`.
+    pub tilings_not_read: u32,
 }
 
 /// One `/LGIDict` of a page (issue #1548): a map from the page into a projection, and the
@@ -793,6 +800,9 @@ pub fn extract_page_paths_from_bytes(
         shading_ops: Vec::new(),
         shading_cache: std::collections::HashMap::new(),
         shadings_not_sampled: 0,
+        tiling_defs: Vec::new(),
+        tiling_cache: std::collections::HashMap::new(),
+        tilings_not_read: 0,
         image_bytes: 0,
     };
     let resources = inherited_resources(&doc, page_id)?;
@@ -1030,6 +1040,8 @@ pub fn extract_page_paths_from_bytes(
         shadings: run.shading_defs,
         shading_ops: run.shading_ops,
         shadings_not_sampled: run.shadings_not_sampled,
+        tilings: run.tiling_defs,
+        tilings_not_read: run.tilings_not_read,
         user_unit: doc
             .get_dictionary(page_id)
             .ok()
@@ -1584,6 +1596,10 @@ struct Run<'a> {
     /// Shadings already read, by object and matrix, so a pattern used by many paths is one entry.
     shading_cache: std::collections::HashMap<(lopdf::ObjectId, [u64; 6]), Option<usize>>,
     shadings_not_sampled: u32,
+    tiling_defs: Vec<PdfTiling>,
+    /// Tilings already read, by object and matrix.
+    tiling_cache: std::collections::HashMap<(lopdf::ObjectId, [u64; 6]), Option<usize>>,
+    tilings_not_read: u32,
     /// Encoded image bytes kept so far, for `max_image_bytes`.
     image_bytes: u64,
 }
@@ -1838,7 +1854,7 @@ impl Run<'_> {
                     if let Some(Object::Name(name)) = op.operands.last() {
                         self.patterns = self.patterns.saturating_add(1);
                         if op.operator == "scn" {
-                            self.fill_pattern = self.shading_pattern(name, resources);
+                            self.fill_pattern = self.pattern_fill(name, resources);
                         }
                     }
                 }
@@ -2091,21 +2107,48 @@ impl Run<'_> {
         });
     }
 
-    /// `scn` with a pattern name: the shading pattern it selects, whose matrix maps pattern space
-    /// to the page (or form) the stream runs in, never the CTM in force (PDF 32000-1 8.7.3.1).
-    fn shading_pattern(
+    /// `scn` with a pattern name: the shading or tiling pattern it selects, whose matrix maps
+    /// pattern space to the page (or form) the stream runs in, never the CTM in force
+    /// (PDF 32000-1 8.7.3.1).
+    fn pattern_fill(
         &mut self,
         name: &[u8],
         resources: Option<&Dictionary>,
     ) -> Option<PdfFillPattern> {
         let doc = self.doc;
-        let pattern = as_dict(
-            doc,
-            resources
-                .and_then(|r| r.get(b"Pattern").ok())
-                .and_then(|x| as_dict(doc, x))
-                .and_then(|d| d.get(name).ok())?,
-        )?;
+        let object = resources
+            .and_then(|r| r.get(b"Pattern").ok())
+            .and_then(|x| as_dict(doc, x))
+            .and_then(|d| d.get(name).ok())?;
+        // A tiling pattern is a stream, a shading pattern a dictionary.
+        if deref(doc, object).is_some_and(|o| o.as_stream().is_ok()) {
+            let base = self.pattern_base;
+            let key = match object {
+                Object::Reference(id) => Some((*id, base.0.map(f64::to_bits))),
+                _ => None,
+            };
+            let index = match key.and_then(|k| self.tiling_cache.get(&k)) {
+                Some(hit) => *hit,
+                None => {
+                    // PVec's tiling table holds 1,024.
+                    let read =
+                        read_tiling(doc, object, base.0).filter(|_| self.tiling_defs.len() < 1024);
+                    let index = read.map(|tiling| {
+                        self.tiling_defs.push(tiling);
+                        self.tiling_defs.len() - 1
+                    });
+                    if index.is_none() {
+                        self.tilings_not_read = self.tilings_not_read.saturating_add(1);
+                    }
+                    if let Some(k) = key {
+                        self.tiling_cache.insert(k, index);
+                    }
+                    index
+                }
+            };
+            return index.map(PdfFillPattern::Tiling);
+        }
+        let pattern = as_dict(doc, object)?;
         if pattern.get(b"PatternType").ok().and_then(number) != Some(2.0) {
             return None;
         }

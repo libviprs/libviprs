@@ -68,6 +68,8 @@ pub struct PdfShading {
 pub enum PdfFillPattern {
     /// A shading pattern: an index into [`PdfVectorPage::shadings`](super::pdf_vector::PdfVectorPage::shadings).
     Shading(usize),
+    /// A tiling pattern: an index into [`PdfVectorPage::tilings`](super::pdf_vector::PdfVectorPage::tilings).
+    Tiling(usize),
 }
 
 /// An `sh` operator: the shading it painted over the clip in force.

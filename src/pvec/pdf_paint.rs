@@ -7,10 +7,11 @@ use super::components::{
     Fill, FillAssignment, FillPaintStream, FillRule, FillSource, HatchStream, ItemKind,
     PaintOrderStream, PaintRun, Stream,
 };
-use super::pdf_shading::{PdfGradientKind, PdfShading};
-use super::pdf_vector::PdfFillRule;
+use super::pdf_shading::{PdfFillPattern, PdfGradientKind, PdfShading};
+use super::pdf_tiling::{PdfTiling, PdfTilingPrimitive};
+use super::pdf_vector::{PdfFillRule, PdfVectorPage};
 use pvec_capabilities::Registry;
-use pvec_components::{Gradient, GradientCoords, HatchRecord, Stop};
+use pvec_components::{Gradient, GradientCoords, HatchRecord, Stop, Tiling, TilingPrimitive};
 use pvec_entity::EntityId;
 
 /// What `pdf_page_to_pvec` painted, in content-stream order: one hatch record per filled path
@@ -20,6 +21,7 @@ use pvec_entity::EntityId;
 pub(super) struct PaintLog {
     hatch: HatchStream,
     gradients: Vec<Gradient>,
+    tilings: Vec<Tiling>,
     rules: Vec<FillAssignment>,
     hidden: Vec<EntityId>,
     items: Vec<(ItemKind, u32)>,
@@ -32,6 +34,7 @@ impl PaintLog {
                 records: Vec::new(),
             },
             gradients: Vec::new(),
+            tilings: Vec::new(),
             rules: Vec::new(),
             hidden: Vec::new(),
             items: Vec::new(),
@@ -39,42 +42,58 @@ impl PaintLog {
     }
 
     /// A filled path: `rings` are the polygon entities written for it, `rgb` and `alpha` its fill
-    /// colour (`ca`). With a `shading` (a shading pattern or an `sh`, `page_height` in points to
-    /// flip it into source space) the fill is that gradient in stream 25, and the hatch record
-    /// keeps the colour in the middle of the ramp for a reader that does not know 25. A shading
-    /// that cannot be written as a gradient (a zero length axis, a singular matrix) is the flat
-    /// colour. Returns the numbers of the hatch records it became.
+    /// colour (`ca`). With a `pattern` (a shading or a tiling of `page`) the fill is that gradient
+    /// or tiling in stream 25, and the hatch record keeps the colour in the middle of the ramp (or
+    /// the mean colour of the cell) for a reader that does not know 25. A pattern that cannot be
+    /// written (a zero length axis, a singular matrix) is the flat colour. Returns the numbers of
+    /// the hatch records it became.
     pub(super) fn fill(
         &mut self,
         rings: &[EntityId],
         rule: PdfFillRule,
         (rgb, alpha): ([u8; 3], u8),
-        shading: Option<(&PdfShading, f64)>,
+        pattern: Option<(PdfFillPattern, &PdfVectorPage)>,
     ) -> std::ops::Range<u32> {
         let first = self.hatch.records.len() as u32;
         let rule = match rule {
             PdfFillRule::EvenOdd => FillRule::EvenOdd,
             _ => FillRule::NonZero,
         };
-        let gradient = shading.and_then(|(shading, height)| gradient(shading, height, alpha));
-        let [r, g, b] = match (&gradient, shading) {
-            (Some(_), Some((shading, _))) => middle(shading),
-            _ => rgb,
-        };
-        let source = match gradient {
-            Some(gradient) => {
-                let index = self
-                    .gradients
-                    .iter()
-                    .position(|known| *known == gradient)
-                    .unwrap_or_else(|| {
-                        self.gradients.push(gradient);
-                        self.gradients.len() - 1
-                    });
-                FillSource::Gradient(index as u32)
-            }
-            None => FillSource::Own,
-        };
+        let height = pattern.map_or(0.0, |(_, page)| page.height);
+        let (source, [r, g, b]) = match pattern {
+            Some((PdfFillPattern::Shading(index), page)) => page
+                .shadings
+                .get(index)
+                .and_then(|shading| Some((shading, gradient(shading, height, alpha)?)))
+                .map(|(shading, gradient)| {
+                    let index = self
+                        .gradients
+                        .iter()
+                        .position(|known| *known == gradient)
+                        .unwrap_or_else(|| {
+                            self.gradients.push(gradient);
+                            self.gradients.len() - 1
+                        });
+                    (FillSource::Gradient(index as u32), middle(shading))
+                }),
+            Some((PdfFillPattern::Tiling(index), page)) => page
+                .tilings
+                .get(index)
+                .and_then(|tiling| Some((tiling, tiling_cell(tiling, height, alpha)?)))
+                .map(|(tiling, cell)| {
+                    let index = self
+                        .tilings
+                        .iter()
+                        .position(|known| *known == cell)
+                        .unwrap_or_else(|| {
+                            self.tilings.push(cell);
+                            self.tilings.len() - 1
+                        });
+                    (FillSource::Tiling(index as u32), mean(tiling, rgb))
+                }),
+            None => None,
+        }
+        .unwrap_or((FillSource::Own, rgb));
         // A record holds at most 4096 boundary entities.
         for rings in rings.chunks(4096) {
             let hatch = self.hatch.records.len() as u32;
@@ -113,7 +132,7 @@ impl PaintLog {
             out.push(self.hatch.into_stream(registry).map_err(|e| refused(&e))?);
             let fill_paint = FillPaintStream {
                 gradients: self.gradients,
-                tilings: Vec::new(),
+                tilings: self.tilings,
                 assignments: self.rules,
             };
             out.push(fill_paint.into_stream(registry).map_err(|e| refused(&e))?);
@@ -142,15 +161,7 @@ impl PaintLog {
 /// it to source space in PVec's `[a b c d tx ty]` order (rows `[a b tx]` and `[c d ty]`). `None`
 /// when PVec would refuse it.
 fn gradient(shading: &PdfShading, page_height: f64, alpha: u8) -> Option<Gradient> {
-    let [a, b, c, d, e, f] = shading.matrix;
-    let transform = [
-        a / 72.0,
-        c / 72.0,
-        -b / 72.0,
-        -d / 72.0,
-        e / 72.0,
-        (page_height - f) / 72.0,
-    ];
+    let transform = to_source(shading.matrix, page_height);
     let det = transform[0] * transform[3] - transform[1] * transform[2];
     let coords = match (shading.kind, shading.coords.as_slice()) {
         (PdfGradientKind::Axial, &[x0, y0, x1, y1]) if (x0, y0) != (x1, y1) => {
@@ -203,4 +214,78 @@ fn middle(shading: &PdfShading) -> [u8; 3] {
         }
         _ => next.rgb,
     }
+}
+
+/// A map to the page in points with y up, `[a b c d e f]` in PDF's row-vector order, as the map
+/// to source space (inches, y down) in PVec's `[a b c d tx ty]` order (rows `[a b tx]`, `[c d ty]`).
+fn to_source([a, b, c, d, e, f]: [f64; 6], page_height: f64) -> [f64; 6] {
+    [
+        a / 72.0,
+        c / 72.0,
+        -b / 72.0,
+        -d / 72.0,
+        e / 72.0,
+        (page_height - f) / 72.0,
+    ]
+}
+
+/// The cell as a PVec tiling with `alpha` on every colour. `None` when PVec would refuse it.
+fn tiling_cell(tiling: &PdfTiling, page_height: f64, alpha: u8) -> Option<Tiling> {
+    let transform = to_source(tiling.matrix, page_height);
+    let det = transform[0] * transform[3] - transform[1] * transform[2];
+    let word = |rgb: [u8; 3]| u32::from_be_bytes([rgb[0], rgb[1], rgb[2], alpha]);
+    let primitives = tiling
+        .primitives
+        .iter()
+        .map(|primitive| match primitive {
+            PdfTilingPrimitive::Polygon { rule, rgb, points } if points.len() >= 3 => {
+                Some(TilingPrimitive::Polygon {
+                    rule: match rule {
+                        PdfFillRule::EvenOdd => FillRule::EvenOdd,
+                        _ => FillRule::NonZero,
+                    },
+                    rgba: word(*rgb),
+                    points: points.clone(),
+                })
+            }
+            PdfTilingPrimitive::Polyline { rgb, width, points }
+                if points.len() >= 2 && width.is_finite() && *width >= 0.0 =>
+            {
+                Some(TilingPrimitive::Polyline {
+                    rgba: word(*rgb),
+                    width: *width,
+                    points: points.clone(),
+                })
+            }
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (det != 0.0 && det.is_finite() && transform.iter().all(|v| v.is_finite())).then(|| Tiling {
+        coloured: tiling.coloured,
+        x_step: tiling.steps[0],
+        y_step: tiling.steps[1],
+        cell: tiling.cell,
+        transform,
+        primitives,
+    })
+}
+
+/// The mean colour of the cell's primitives, which a reader that does not know stream 25 draws.
+/// An uncoloured cell is painted in `fill`.
+fn mean(tiling: &PdfTiling, fill: [u8; 3]) -> [u8; 3] {
+    let colours: Vec<[u8; 3]> = tiling
+        .primitives
+        .iter()
+        .map(|primitive| match primitive {
+            PdfTilingPrimitive::Polygon { rgb, .. } | PdfTilingPrimitive::Polyline { rgb, .. } => {
+                *rgb
+            }
+        })
+        .collect();
+    if !tiling.coloured || colours.is_empty() {
+        return fill;
+    }
+    std::array::from_fn(|i| {
+        (colours.iter().map(|c| u32::from(c[i])).sum::<u32>() / colours.len() as u32) as u8
+    })
 }
