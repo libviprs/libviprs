@@ -181,18 +181,29 @@ fn blueprint_mix_paint_order_names_every_stroke_in_the_pdfs_order() {
     let w = streams(pdf_page_to_pvec(&page, "test", "0").unwrap());
     let order = w.order.expect("stream 23 is written");
     // The fixture's vector part is strokes only (the oracle counts no filled path in it), so the
-    // order is one run of strokes, numbered the way the entities were written, ascending.
+    // order is strokes numbered the way the entities were written, ascending, with the text of
+    // the page between them (the second half of #1578 names text in the order).
     assert!(
         page.entities
             .iter()
             .all(|entity| entity.paint.fill.is_none())
     );
     assert!(w.hatch.is_none() && w.fills.is_none());
-    assert_eq!(order.runs.len(), 1);
-    assert_eq!(order.runs[0].kind, ItemKind::Stroke);
+    assert!(
+        order
+            .runs
+            .iter()
+            .all(|run| matches!(run.kind, ItemKind::Stroke | ItemKind::Text))
+    );
     // A path with several subpaths is several stroke entities, so there are at least as many
     // items as stroked paths the clip did not remove.
-    assert_eq!(order.runs[0].first, 1);
-    assert!(order.runs[0].count >= 1);
-    order.validate(|_| true, 0, 0, 0).unwrap();
+    let mut next = 1;
+    for run in order.runs.iter().filter(|run| run.kind == ItemKind::Stroke) {
+        assert_eq!(run.first, next, "strokes are numbered in the order written");
+        next += run.count;
+    }
+    assert!(next > 1);
+    order
+        .validate(|_| true, 0, 0, page.texts.len() as u32)
+        .unwrap();
 }

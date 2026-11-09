@@ -1682,6 +1682,7 @@ impl Run<'_> {
                     render_mode: self.render_mode,
                     fill: self.fill,
                     sequence: self.out.len() as u64,
+                    active_clips: &self.clips,
                 },
             );
             match op.operator.as_str() {

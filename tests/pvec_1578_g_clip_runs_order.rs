@@ -69,7 +69,7 @@ fn streams(content: &str, bake: bool) -> Vec<PvecStream> {
     PvecReader::open(bytes).unwrap().streams().unwrap().0
 }
 
-/// The paint order, one (kind, number) per item.
+/// The paint order, one (kind, number) per item. Entity ids start at 1, so the first stroke is 1.
 fn order(streams: &[PvecStream]) -> Vec<(ItemKind, u32)> {
     let stream = streams
         .iter()
@@ -129,7 +129,7 @@ fn two_text_runs_are_numbered_by_their_records_in_order() {
         items,
         [
             (ItemKind::Text, 0),
-            (ItemKind::Stroke, 0),
+            (ItemKind::Stroke, 1),
             (ItemKind::Text, 1)
         ]
     );
@@ -167,7 +167,7 @@ fn a_raster_painted_first_is_first_and_one_painted_last_is_last() {
         items,
         [
             (ItemKind::Raster, 0),
-            (ItemKind::Stroke, 0),
+            (ItemKind::Stroke, 1),
             (ItemKind::Raster, 1)
         ]
     );
@@ -181,7 +181,7 @@ fn no_raster_is_named_when_the_images_are_not_baked() {
 
 #[test]
 fn text_under_a_triangle_clip_is_assigned_to_its_record_and_text_after_the_restore_is_not() {
-    let streams = streams(&format!("q {TRIANGLE}W n {TEXT}Q {TEXT}"), false);
+    let streams = streams(&format!("{RULE_A}q {TRIANGLE}W n {TEXT}Q {TEXT}"), false);
     let clips = clips(&streams);
     assert_eq!(clips.clips.len(), 1);
     assert_eq!(under(&clips, ItemKind::Text, 0), 1);
@@ -196,7 +196,7 @@ fn text_under_a_triangle_clip_is_assigned_to_its_record_and_text_after_the_resto
 
 #[test]
 fn a_raster_under_a_triangle_clip_is_assigned_to_its_record() {
-    let streams = streams(&format!("q {TRIANGLE}W n {IMAGE}Q {IMAGE}"), true);
+    let streams = streams(&format!("{RULE_A}q {TRIANGLE}W n {IMAGE}Q {IMAGE}"), true);
     let clips = clips(&streams);
     assert_eq!(under(&clips, ItemKind::Raster, 0), 1);
     let rasters: u32 = clips
