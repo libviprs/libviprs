@@ -44,6 +44,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object};
 use thiserror::Error;
 
+use super::pdf_shading::{PdfFillPattern, PdfShading, PdfShadingPaint, read_shading};
 use super::pdf_text::{PdfTextRun, TextContext, TextParams, TextTracker};
 use super::text_policy::{TextFontOutcome, TextReport, font_outcome};
 use crate::pdf::{PageRotation, PdfError, page_object_id, page_rotation_of, page_visible_box};
@@ -219,6 +220,10 @@ pub struct PdfPathEntity {
     /// The ratio of the larger to the smaller singular value of the CTM, 1 for a similarity.
     /// A width is only one number when this is near 1.
     pub ctm_anisotropy: f64,
+    /// The pattern a fill is painted with when the fill colour is a pattern (issue #1578): a
+    /// shading pattern this reads. `None` for a flat colour and for a pattern this does not read
+    /// (the flat `fill_colour` is then the best this knows).
+    pub fill_pattern: Option<PdfFillPattern>,
     /// The `sequence` of every clip-defining entity in force when this path was painted,
     /// outermost first. A path's own `W` takes effect after it is painted, so it is not in
     /// its own list. Scoped by `q`/`Q` and by Form XObject boundaries (N5.3).
@@ -272,6 +277,15 @@ pub struct PdfVectorPage {
     pub user_unit: f64,
     /// The page's `/LGIDict` georeferences, the form GeoPDF had before ISO 32000-2 (issue #1548).
     pub lgidicts: Vec<PdfLgiDict>,
+    /// The axial and radial shadings the page paints, from `sh` and from shading patterns, with
+    /// their functions sampled to stops (issue #1578). [`PdfPathEntity::fill_pattern`] and
+    /// [`PdfShadingPaint::shading`] index this.
+    pub shadings: Vec<PdfShading>,
+    /// Every `sh` that painted one of `shadings`, in content-stream order.
+    pub shading_ops: Vec<PdfShadingPaint>,
+    /// Shadings, by `sh` or by pattern, that are not axial or radial or whose function or colour
+    /// space this does not read, so they have no entry in `shadings`.
+    pub shadings_not_sampled: u32,
 }
 
 /// One `/LGIDict` of a page (issue #1548): a map from the page into a projection, and the
@@ -773,6 +787,12 @@ pub fn extract_page_paths_from_bytes(
         stroke_colour: [0, 0, 0],
         fill_alpha: 255,
         stroke_alpha: 255,
+        fill_pattern: None,
+        pattern_base: base,
+        shading_defs: Vec::new(),
+        shading_ops: Vec::new(),
+        shading_cache: std::collections::HashMap::new(),
+        shadings_not_sampled: 0,
         image_bytes: 0,
     };
     let resources = inherited_resources(&doc, page_id)?;
@@ -1007,6 +1027,9 @@ pub fn extract_page_paths_from_bytes(
         texts: run.tracker.runs,
         viewports: read_viewports(&doc, page_id, &base),
         lgidicts: read_lgidicts(&doc, page_id, &base),
+        shadings: run.shading_defs,
+        shading_ops: run.shading_ops,
+        shadings_not_sampled: run.shadings_not_sampled,
         user_unit: doc
             .get_dictionary(page_id)
             .ok()
@@ -1551,6 +1574,16 @@ struct Run<'a> {
     /// `ca` and `CA` as bytes.
     fill_alpha: u8,
     stroke_alpha: u8,
+    /// The shading pattern the fill colour selects, if any (issue #1578).
+    fill_pattern: Option<PdfFillPattern>,
+    /// Pattern space to page space for the content stream running: the page's own map, or the
+    /// form's at its invocation.
+    pattern_base: Matrix,
+    shading_defs: Vec<PdfShading>,
+    shading_ops: Vec<PdfShadingPaint>,
+    /// Shadings already read, by object and matrix, so a pattern used by many paths is one entry.
+    shading_cache: std::collections::HashMap<(lopdf::ObjectId, [u64; 6]), Option<usize>>,
+    shadings_not_sampled: u32,
     /// Encoded image bytes kept so far, for `max_image_bytes`.
     image_bytes: u64,
 }
@@ -1561,6 +1594,7 @@ struct Saved {
     stroke_colour: [u8; 3],
     fill_alpha: u8,
     stroke_alpha: u8,
+    fill_pattern: Option<PdfFillPattern>,
     ctm: Matrix,
     clips: usize,
     soft_mask: bool,
@@ -1656,6 +1690,7 @@ impl Run<'_> {
                         stroke_colour: self.stroke_colour,
                         fill_alpha: self.fill_alpha,
                         stroke_alpha: self.stroke_alpha,
+                        fill_pattern: self.fill_pattern,
                     });
                 }
                 "Q" => {
@@ -1673,6 +1708,7 @@ impl Run<'_> {
                             self.stroke_colour = saved.stroke_colour;
                             self.fill_alpha = saved.fill_alpha;
                             self.stroke_alpha = saved.stroke_alpha;
+                            self.fill_pattern = saved.fill_pattern;
                         }
                     } else {
                         self.unbalanced += 1;
@@ -1785,7 +1821,10 @@ impl Run<'_> {
                         self.text_clip_pending = true;
                     }
                 }
-                "sh" => self.shadings = self.shadings.saturating_add(1),
+                "sh" => {
+                    self.shadings = self.shadings.saturating_add(1);
+                    self.paint_shading(op, resources, &ctm);
+                }
                 "BI" => {
                     let inline = op.operands.first().and_then(|o| o.as_stream().ok());
                     self.record_image(None, &ctm, "BI", inline)?;
@@ -1796,8 +1835,11 @@ impl Run<'_> {
                         .entry(op.operator.clone())
                         .or_insert(0) += 1;
                     self.fill_operator(op);
-                    if matches!(op.operands.last(), Some(Object::Name(_))) {
+                    if let Some(Object::Name(name)) = op.operands.last() {
                         self.patterns = self.patterns.saturating_add(1);
+                        if op.operator == "scn" {
+                            self.fill_pattern = self.shading_pattern(name, resources);
+                        }
                     }
                 }
                 // Colour, marked content and the rest are other tasks'.
@@ -1887,6 +1929,7 @@ impl Run<'_> {
             } else {
                 f64::INFINITY
             },
+            fill_pattern: self.fill_pattern,
             active_clips: self.clips.clone(),
             soft_masked: self.soft_mask,
             text_clipped: self.text_clip,
@@ -1983,8 +2026,108 @@ impl Run<'_> {
                 self.stroke_colour = c;
             } else {
                 self.fill = c;
+                self.fill_pattern = None;
             }
         }
+    }
+
+    /// The index in `shading_defs` of the shading `object` names under `matrix`, reading it the
+    /// first time. `None`, counted in `shadings_not_sampled`, when it is not one this reads.
+    fn shading_index(
+        &mut self,
+        object: &Object,
+        resources: Option<&Dictionary>,
+        matrix: Matrix,
+    ) -> Option<usize> {
+        let key = match object {
+            Object::Reference(id) => Some((*id, matrix.0.map(f64::to_bits))),
+            _ => None,
+        };
+        if let Some(hit) = key.and_then(|k| self.shading_cache.get(&k)) {
+            return *hit;
+        }
+        // PVec's gradient table holds 4,096.
+        let read = read_shading(self.doc, object, resources, matrix.0)
+            .filter(|_| self.shading_defs.len() < 4096);
+        let index = read.map(|shading| {
+            self.shading_defs.push(shading);
+            self.shading_defs.len() - 1
+        });
+        if index.is_none() {
+            self.shadings_not_sampled = self.shadings_not_sampled.saturating_add(1);
+        }
+        if let Some(k) = key {
+            self.shading_cache.insert(k, index);
+        }
+        index
+    }
+
+    /// `sh`: the named shading, over the clip in force, in the CTM's space.
+    fn paint_shading(&mut self, op: &Operation, resources: Option<&Dictionary>, ctm: &Matrix) {
+        let [Object::Name(name)] = op.operands.as_slice() else {
+            return;
+        };
+        let doc = self.doc;
+        let Some(object) = resources
+            .and_then(|r| r.get(b"Shading").ok())
+            .and_then(|x| as_dict(doc, x))
+            .and_then(|d| d.get(name).ok())
+        else {
+            return;
+        };
+        let Some(shading) = self.shading_index(object, resources, *ctm) else {
+            return;
+        };
+        self.shading_ops.push(PdfShadingPaint {
+            shading,
+            active_clips: self.clips.clone(),
+            soft_masked: self.soft_mask,
+            provenance: PdfProvenance {
+                page: self.page,
+                operator: op.operator.clone(),
+                form_path: self.form_path.clone(),
+                sequence: self.out.len() as u64,
+            },
+        });
+    }
+
+    /// `scn` with a pattern name: the shading pattern it selects, whose matrix maps pattern space
+    /// to the page (or form) the stream runs in, never the CTM in force (PDF 32000-1 8.7.3.1).
+    fn shading_pattern(
+        &mut self,
+        name: &[u8],
+        resources: Option<&Dictionary>,
+    ) -> Option<PdfFillPattern> {
+        let doc = self.doc;
+        let pattern = as_dict(
+            doc,
+            resources
+                .and_then(|r| r.get(b"Pattern").ok())
+                .and_then(|x| as_dict(doc, x))
+                .and_then(|d| d.get(name).ok())?,
+        )?;
+        if pattern.get(b"PatternType").ok().and_then(number) != Some(2.0) {
+            return None;
+        }
+        let matrix = match pattern
+            .get(b"Matrix")
+            .ok()
+            .and_then(|m| deref(doc, m))
+            .and_then(|m| m.as_array().ok())
+        {
+            Some(a) if a.len() == 6 => {
+                let mut m = [0.0; 6];
+                for (slot, o) in m.iter_mut().zip(a) {
+                    *slot = deref(doc, o).and_then(number).filter(|v| v.is_finite())?;
+                }
+                Matrix(m)
+            }
+            _ => Matrix::IDENTITY,
+        };
+        let shading = pattern.get(b"Shading").ok()?;
+        let base = self.pattern_base;
+        self.shading_index(shading, resources, matrix.then(&base))
+            .map(PdfFillPattern::Shading)
     }
 
     /// Record one painted image with the entries the bake reads. The encoded bytes are kept,
@@ -2162,6 +2305,7 @@ impl Run<'_> {
         let (clips, soft_mask) = (self.clips.len(), self.soft_mask);
         let (text_clip, render_mode) = (self.text_clip, self.render_mode);
         let stroke = self.stroke.clone();
+        let (fill_pattern, pattern_base) = (self.fill_pattern, self.pattern_base);
         // The `/BBox` clips everything the form paints (PDF 32000-1 8.10.2).
         let inner = matrix.then(ctm);
         let record = form_bbox(doc, xobj).map(|b| {
@@ -2175,6 +2319,7 @@ impl Run<'_> {
             });
             self.form_clips.len() - 1
         });
+        self.pattern_base = inner;
         let r = self.stream(&ops, own.or(resources), inner, observed);
         if let Some(i) = record {
             self.form_clips[i].end_sequence = self.out.len() as u64;
@@ -2184,6 +2329,7 @@ impl Run<'_> {
         self.text_clip = text_clip;
         self.render_mode = render_mode;
         self.stroke = stroke;
+        (self.fill_pattern, self.pattern_base) = (fill_pattern, pattern_base);
         self.form_path.pop();
         r
     }
