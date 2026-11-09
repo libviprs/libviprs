@@ -369,6 +369,10 @@ pvec-facade = { package = "pvec", git = "https://github.com/libviprs/pvec", rev 
 # polyline entry point for it, and the server's mapping, which this one is byte-identical to, has
 # always written through it. Same pin as the facade, which depends on it, so one copy builds.
 pvec-container = { git = "https://github.com/libviprs/pvec", rev = "1a9d972ef844d4258a641d3891473ce2f1c39ce4", version = "0.0.0" }
+# The component payload types `pvec::pdf_page_to_pvec` writes (text records, raster placements,
+# issue #1578): the facade re-exports the streams but not `TextRecord` or the raster encoder.
+# Same pin, so one copy builds.
+pvec-components = { git = "https://github.com/libviprs/pvec", rev = "1a9d972ef844d4258a641d3891473ce2f1c39ce4", version = "0.0.0" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -596,7 +600,7 @@ pvec-normalized = ["dep:pvec-geometry", "dep:pvec-numeric", "dep:pvec-entity"]
 # `pvec::writer` and `pvec::publish`: the one funnel that writes normalized geometry into a PVec
 # artifact through the facade's `PvecWriter`, and the atomic publish of the artifact and its report
 # (issue #1314). Pure Rust, the same git dependencies as `pvec-normalized` and `pvec-raster`.
-pvec-write = ["pvec-normalized", "dep:pvec-facade", "dep:pvec-capabilities", "dep:pvec-container"]
+pvec-write = ["pvec-normalized", "pvec-raster", "dep:pvec-facade", "dep:pvec-capabilities", "dep:pvec-container", "dep:pvec-components"]
 # `pvec_convert`: the conversion API (issue #1048). One call takes a DWG and a view profile and
 # publishes a `.pvec` artifact with its conversion report. Acadrust is the default provider
 # (`tests/pvec_1079_provider_default.rs`), so the feature pulls it in; `acadsharp-rs` stays opt-in.
@@ -755,6 +759,7 @@ pvec-capabilities = { workspace = true, optional = true }
 acadsharp-rs = { workspace = true, optional = true }
 pvec-geometry = { workspace = true, optional = true }
 pvec-container = { workspace = true, optional = true }
+pvec-components = { workspace = true, optional = true }
 pvec-entity = { workspace = true, optional = true }
 ab_glyph = { workspace = true }
 blake3 = { workspace = true }

@@ -44,6 +44,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object};
 use thiserror::Error;
 
+use super::pdf_text::{PdfTextRun, TextContext, TextParams, TextTracker};
 use super::text_policy::{TextFontOutcome, TextReport, font_outcome};
 use crate::pdf::{PageRotation, PdfError, page_object_id, page_rotation_of, page_visible_box};
 
@@ -263,6 +264,8 @@ pub struct PdfVectorPage {
     pub pattern_selections: u32,
     /// Images painted, in content-stream order, forms expanded in place (issue #1328).
     pub images: Vec<PdfImagePlacement>,
+    /// Text shown in a fill render mode, in content-stream order (issue #1578).
+    pub texts: Vec<PdfTextRun>,
     /// The page's `/VP` viewports, in array order (issue #1547).
     pub viewports: Vec<PdfViewport>,
     /// `/UserUnit`, the size of one user space unit in points: 1 unless the page says otherwise.
@@ -764,6 +767,7 @@ pub fn extract_page_paths_from_bytes(
         stroke: PdfStrokeParams::default(),
         colour_operators: std::collections::BTreeMap::new(),
         text: TextReport::default(),
+        tracker: TextTracker::new(),
         font: TextFontOutcome::Unresolved,
         fill: [0, 0, 0],
         stroke_colour: [0, 0, 0],
@@ -1000,6 +1004,7 @@ pub fn extract_page_paths_from_bytes(
         shading_paints: run.shadings,
         pattern_selections: run.patterns,
         images: run.images,
+        texts: run.tracker.runs,
         viewports: read_viewports(&doc, page_id, &base),
         lgidicts: read_lgidicts(&doc, page_id, &base),
         user_unit: doc
@@ -1535,6 +1540,8 @@ struct Run<'a> {
     colour_operators: std::collections::BTreeMap<String, u64>,
     /// Text omitted so far (N5.5).
     text: TextReport,
+    /// The text state, and the runs it has shown.
+    tracker: TextTracker,
     /// The font the last `Tf` named, part of the graphics state.
     font: TextFontOutcome,
     /// The fill colour in force as sRGB, for an image mask (issue #1332) and a path (issue #1544).
@@ -1561,6 +1568,8 @@ struct Saved {
     render_mode: i64,
     stroke: PdfStrokeParams,
     font: TextFontOutcome,
+    /// `Tc`, `Tw`, `Tz`, `TL`, `Tf` and `Ts`, which are part of the graphics state.
+    text: TextParams,
 }
 
 /// The path being built by one stream, in page space, plus the user-space current
@@ -1613,6 +1622,18 @@ impl Run<'_> {
                     observed: self.operations,
                 });
             }
+            self.tracker.operator(
+                self.doc,
+                resources,
+                &op.operator,
+                &op.operands,
+                &TextContext {
+                    ctm: ctm.0,
+                    render_mode: self.render_mode,
+                    fill: self.fill,
+                    sequence: self.out.len() as u64,
+                },
+            );
             match op.operator.as_str() {
                 "q" => {
                     let observed = self.stack.len() + 1;
@@ -1630,6 +1651,7 @@ impl Run<'_> {
                         render_mode: self.render_mode,
                         stroke: self.stroke.clone(),
                         font: self.font,
+                        text: self.tracker.params.clone(),
                         fill: self.fill,
                         stroke_colour: self.stroke_colour,
                         fill_alpha: self.fill_alpha,
@@ -1646,6 +1668,7 @@ impl Run<'_> {
                             self.render_mode = saved.render_mode;
                             self.stroke = saved.stroke;
                             self.font = saved.font;
+                            self.tracker.params = saved.text;
                             self.fill = saved.fill;
                             self.stroke_colour = saved.stroke_colour;
                             self.fill_alpha = saved.fill_alpha;

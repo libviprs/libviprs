@@ -888,7 +888,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1582 adds 1: `tests/pvec_1563_viewports.rs::issue_1582_the_paper_view_is_a_policy_reason_of_its_own`, which converts a sheet into a temp dir. It said 1129 before this line moved.
 /// #1583 adds 1: `tests/pvec_1564_layout_set.rs::issue_1583_a_blank_layout_is_empty_after_view_without_being_converted`, which converts a layout set into a temp dir. It said 1130 before this line moved.
 /// #1578 adds 3: the two `tests/pvec_1578_pdf_page_to_pvec.rs` cells that read `blueprint-mix.pdf`, and `tests/pvec_api_surface.rs::pvec_container_is_optional_and_named_by_its_one_file`, which reads the manifest. It said 1131 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1136;
+/// #1578 (L6 and L7) adds 2: the two `tests/pvec_1578_e_text_images.rs` cells that read `blueprint-mix.pdf`. It said 1136 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1138;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

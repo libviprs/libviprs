@@ -75,6 +75,7 @@ mod pdf_image_decode;
 #[cfg(feature = "pvec-write")]
 mod pdf_paint;
 pub mod pdf_ring_cut;
+mod pdf_text;
 #[cfg(feature = "pvec-write")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
 pub mod pdf_to_pvec;
@@ -128,8 +129,9 @@ pub use ordering::{
     EntityId, OrderedEntity, OrderedSource, OrderingBasis, OrderingPolicy, OrderingReport,
     canonical_cmp, order_entities,
 };
+pub use pdf_text::PdfTextRun;
 #[cfg(feature = "pvec-write")]
-pub use pdf_to_pvec::{PdfToPvecError, pdf_page_to_pvec};
+pub use pdf_to_pvec::{PdfToPvecError, pdf_page_to_pvec, pdf_page_to_pvec_with};
 pub use pdf_vector::{
     PdfDash, PdfFillRule, PdfGcs, PdfImagePlacement, PdfLgiDict, PdfMeasure, PdfNumberFormat,
     PdfPaintIntent, PdfPathEntity, PdfPathSegment, PdfPoint, PdfProvenance, PdfStrokeParams,

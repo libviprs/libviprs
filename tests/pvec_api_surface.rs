@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 /// crates (the curve model and the numeric policy under it).
 const ALLOWED_ROOTS: &[&str] = &[
     "pvec_capabilities",
+    "pvec_components",
     "pvec_entity",
     "pvec_facade",
     "pvec_geometry",
@@ -368,6 +369,7 @@ fn only_the_semantic_crates_are_named_today() {
         roots,
         [
             "pvec_capabilities",
+            "pvec_components",
             "pvec_entity",
             "pvec_facade",
             "pvec_geometry",
