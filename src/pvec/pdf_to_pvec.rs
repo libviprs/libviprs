@@ -1,4 +1,4 @@
-//! `pdf_page_to_pvec`: a PDF page's paths as a PVec artifact (issue #1578, L1).
+//! `pdf_page_to_pvec`: a PDF page's paths as a PVec artifact (issue #1578, L4).
 //!
 //! This is the mapping the server's `convert_pdf` carried before it moved here, so the server and
 //! PlanViewer's test generator share one copy. Each painted path becomes polylines in inches with
@@ -110,7 +110,49 @@ pub fn pdf_page_to_pvec(
                     }
                 }
             };
-            push_polyline(&mut writer, &mut next_id, style, &points, bounds)?;
+            // One polyline entity: repeated points dropped, a single point (or none) skipped, the
+            // cell the centre of its bounds falls in on a 16 by 16 grid over the page.
+            let points = points
+                .iter()
+                .copied()
+                .fold(Vec::new(), |mut points, point| {
+                    if points.last() != Some(&point) {
+                        points.push(point);
+                    }
+                    points
+                });
+            if points.len() < 2 {
+                continue;
+            }
+            let first = points[0];
+            let entity_bounds = points.iter().fold(
+                Bounds {
+                    min: first,
+                    max: first,
+                },
+                |bounds, point| Bounds {
+                    min: [bounds.min[0].min(point[0]), bounds.min[1].min(point[1])],
+                    max: [bounds.max[0].max(point[0]), bounds.max[1].max(point[1])],
+                },
+            );
+            let center_x = (entity_bounds.min[0] + entity_bounds.max[0]) / 2.0;
+            let center_y = (entity_bounds.min[1] + entity_bounds.max[1]) / 2.0;
+            let column = (center_x / bounds.max[0] * 16.0).floor().clamp(0.0, 15.0) as u32;
+            let row = (center_y / bounds.max[1] * 16.0).floor().clamp(0.0, 15.0) as u32;
+            let id = EntityId::new(next_id)
+                .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+            writer
+                .push_polyline(
+                    EntityMeta {
+                        id,
+                        style,
+                        cell: row * 16 + column + 1,
+                        bounds: entity_bounds,
+                    },
+                    &points,
+                )
+                .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
+            next_id += 1;
         }
     }
     if next_id == 1 {
@@ -119,60 +161,4 @@ pub fn pdf_page_to_pvec(
     writer
         .finish()
         .map_err(|error| PdfToPvecError::Write(error.to_string()))
-}
-
-/// One polyline entity: repeated points dropped, a single point (or none) skipped, the cell the
-/// centre of its bounds falls in on a 16 by 16 grid over the page.
-fn push_polyline(
-    writer: &mut ContainerWriter,
-    next_id: &mut u32,
-    style: u32,
-    points: &[[f64; 2]],
-    page_bounds: Bounds,
-) -> Result<(), PdfToPvecError> {
-    let points = points
-        .iter()
-        .copied()
-        .fold(Vec::new(), |mut points, point| {
-            if points.last() != Some(&point) {
-                points.push(point);
-            }
-            points
-        });
-    if points.len() < 2 {
-        return Ok(());
-    }
-    let first = points[0];
-    let bounds = points.iter().fold(
-        Bounds {
-            min: first,
-            max: first,
-        },
-        |bounds, point| Bounds {
-            min: [bounds.min[0].min(point[0]), bounds.min[1].min(point[1])],
-            max: [bounds.max[0].max(point[0]), bounds.max[1].max(point[1])],
-        },
-    );
-    let center_x = (bounds.min[0] + bounds.max[0]) / 2.0;
-    let center_y = (bounds.min[1] + bounds.max[1]) / 2.0;
-    let column = (center_x / page_bounds.max[0] * 16.0)
-        .floor()
-        .clamp(0.0, 15.0) as u32;
-    let row = (center_y / page_bounds.max[1] * 16.0)
-        .floor()
-        .clamp(0.0, 15.0) as u32;
-    let id = EntityId::new(*next_id).map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
-    writer
-        .push_polyline(
-            EntityMeta {
-                id,
-                style,
-                cell: row * 16 + column + 1,
-                bounds,
-            },
-            &points,
-        )
-        .map_err(|error| PdfToPvecError::Entity(error.to_string()))?;
-    *next_id += 1;
-    Ok(())
 }

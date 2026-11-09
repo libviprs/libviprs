@@ -788,13 +788,16 @@ pub fn target(t: &Value) -> (&str, &Value) {
 }
 
 /// The truth entities the artifact is expected to hold, in truth order: not an equivalent form of
-/// another, and not on a layer that is off or frozen (the view profile excludes those).
+/// another, not on a layer that is off or frozen (the view profile excludes those), and in model
+/// space (a record marks a paper-space entity `space: PAPER`, and the model-space conversion this
+/// checks never draws one).
 pub fn live(truth: &Value) -> Vec<&Value> {
     truth["entities"]
         .as_array()
         .map_or_else(Vec::new, |l| l.iter().collect::<Vec<_>>())
         .into_iter()
         .filter(|e| !e["id"].as_str().is_some_and(|i| i.contains("-equivalent-")))
+        .filter(|e| e["space"].as_str() != Some("PAPER"))
         .filter(|e| {
             let l = &e["layer"];
             l["on"].as_bool().unwrap_or(true) && !l["frozen"].as_bool().unwrap_or(false)

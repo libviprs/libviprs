@@ -882,8 +882,13 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1577 adds 1: `tests/pvec_1563_viewports.rs::issue_1577_a_viewport_on_a_no_plot_layer_draws_what_it_shows_and_hides_its_border`, which converts a sheet into a temp dir. It said 1107 before this line moved.
 /// #1580 adds 2: the `tests/pvec_1563_viewports.rs` cells that convert a sheet against a tight entity limit into a temp dir. It said 1108 before this line moved.
 /// #1581 adds 1: `tests/pvec_1563_viewports.rs::issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_is_inserted`, which converts a sheet into a temp dir. It said 1110 before this line moved.
-/// #1578 adds 3: the two `tests/pvec_1578_pdf_page_to_pvec.rs` cells that read `blueprint-mix.pdf`, and `tests/pvec_api_surface.rs::pvec_container_is_optional_and_named_by_its_one_file`, which reads the manifest. It said 1111 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1114;
+/// #1579 adds 2: the `tests/pvec_1579_probe_viewports.rs` cells that convert the gold multi-viewport probe and its DXF twin into a temp dir and read the artifact back. It said 1111 before this line moved.
+/// #1584 adds 7: the `tests/pvec_1584_print_probes.rs` cells that read the gold print-profile probes from disk and convert them into a temp dir. It said 1113 before this line moved.
+/// #1565 adds 9: the `tests/pvec_1565_viewport_curves.rs` cells that convert a sheet whose curves cross a viewport or the sheet into a temp dir and read the artifact back. Two #1562 and #1563 cells are renamed, not added. It said 1120 before this line moved.
+/// #1582 adds 1: `tests/pvec_1563_viewports.rs::issue_1582_the_paper_view_is_a_policy_reason_of_its_own`, which converts a sheet into a temp dir. It said 1129 before this line moved.
+/// #1583 adds 1: `tests/pvec_1564_layout_set.rs::issue_1583_a_blank_layout_is_empty_after_view_without_being_converted`, which converts a layout set into a temp dir. It said 1130 before this line moved.
+/// #1578 adds 3: the two `tests/pvec_1578_pdf_page_to_pvec.rs` cells that read `blueprint-mix.pdf`, and `tests/pvec_api_surface.rs::pvec_container_is_optional_and_named_by_its_one_file`, which reads the manifest. It said 1131 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1134;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

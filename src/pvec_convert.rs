@@ -86,6 +86,7 @@ use crate::observe::{EngineEvent, EngineObserver};
 use crate::pvec::bounds::BoundsReport;
 use crate::pvec::classify::{ElementClass, ElementRules};
 use crate::pvec::components::{ComponentSource, ComponentsError, StreamSelection, build_streams};
+use crate::pvec::curve_clip::{CurveClip, CurveClipError, clip_curve};
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
 use crate::pvec::dwg_basic::{self, BasicError};
@@ -118,7 +119,7 @@ use crate::pvec::{
 };
 use crate::pvec::{Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
-use pvec_geometry::{Curve, Curve2d, Line, Point2, Trimmed};
+use pvec_geometry::{Curve, Curve2d, CurveKind, Line, Point2, Polyline, Trimmed};
 
 /// Entities per batch: the cancel token is looked at, and a progress event is sent, once per batch.
 const BATCH: usize = 256;
@@ -532,11 +533,7 @@ impl<'a> PvecConversion<'a> {
                     .chain(v.view_center)
                     .chain(v.view_target)
                     .all(f64::is_finite);
-                let window = if v.id == 1 && v.center == v.view_center && v.height == v.view_height
-                {
-                    // AutoCAD's own paper view: number 1, showing paper space 1:1 centred on
-                    // itself (sample_AC1018). The reader numbers viewports, so the number alone
-                    // is not enough: the gold probes give 1 to a window onto the model.
+                let window = if paper_view(&v) {
                     Window::Paper
                 } else if !v.visible {
                     Window::Dropped("off")
@@ -557,17 +554,64 @@ impl<'a> PvecConversion<'a> {
                 } else if v.view_target[0] != 0.0 || v.view_target[1] != 0.0 {
                     // The view centre is in display coordinates, whose origin is the target (DXF,
                     // and acadrust's own docs), so a target off the origin moves the view. No
-                    // reference print measures that, and the gold probes are written reading the
-                    // centre as a world point with the target on it, so it is refused rather than
-                    // drawn somewhere that may be wrong.
+                    // reference print measures that, so it is refused rather than drawn somewhere
+                    // that may be wrong. The gold probes keep their targets at the origin
+                    // (pvec-gold-fixtures#102), as AutoCAD's plan views do.
                     Window::Refused("target")
                 } else {
-                    match &v.clip {
-                        ViewportClip::Rectangle(_) => {
+                    // A rectangle, or a polygon with straight edges (#1565), whose vertices are
+                    // in paper units and cut what the viewport shows. A bulged edge or a curved
+                    // boundary is not cut yet.
+                    let polygon = match &v.clip {
+                        ViewportClip::Rectangle(_) => Ok(None),
+                        ViewportClip::Polygon(vs) if vs.iter().any(|q| q.bulge != 0.0) => {
+                            Err("clip-bulge")
+                        }
+                        ViewportClip::Polygon(vs)
+                            if vs.len() < 3
+                                || !vs.iter().all(|q| q.x.is_finite() && q.y.is_finite()) =>
+                        {
+                            Err("clip-polygon")
+                        }
+                        ViewportClip::Polygon(vs) => {
+                            Ok(Some(vs.iter().map(|q| [q.x, q.y]).collect::<Vec<_>>()))
+                        }
+                        ViewportClip::Circle(_) => Err("clip-circle"),
+                        ViewportClip::Ellipse(_) => Err("clip-ellipse"),
+                        ViewportClip::Spline(_) => Err("clip-spline"),
+                        _ => Err("clip-other"),
+                    };
+                    match polygon {
+                        Err(why) => Window::Refused(why),
+                        Ok(ring) => {
                             // paper = centre + s * (model - view centre), for a plan view whose
                             // target is the origin.
                             let s = v.height / v.view_height;
                             let (hw, hh) = (v.width / 2.0, v.height / 2.0);
+                            let rect = match &ring {
+                                Some(r) => r.iter().fold(
+                                    [
+                                        f64::INFINITY,
+                                        f64::INFINITY,
+                                        f64::NEG_INFINITY,
+                                        f64::NEG_INFINITY,
+                                    ],
+                                    |b, q| {
+                                        [
+                                            b[0].min(q[0]),
+                                            b[1].min(q[1]),
+                                            b[2].max(q[0]),
+                                            b[3].max(q[1]),
+                                        ]
+                                    },
+                                ),
+                                None => [
+                                    v.center[0] - hw,
+                                    v.center[1] - hh,
+                                    v.center[0] + hw,
+                                    v.center[1] + hh,
+                                ],
+                            };
                             Window::Drawn {
                                 map: [
                                     s,
@@ -577,19 +621,10 @@ impl<'a> PvecConversion<'a> {
                                     v.center[0] - s * v.view_center[0],
                                     v.center[1] - s * v.view_center[1],
                                 ],
-                                rect: [
-                                    v.center[0] - hw,
-                                    v.center[1] - hh,
-                                    v.center[0] + hw,
-                                    v.center[1] + hh,
-                                ],
+                                rect,
+                                ring,
                             }
                         }
-                        ViewportClip::Polygon(_) => Window::Refused("clip-polygon"),
-                        ViewportClip::Circle(_) => Window::Refused("clip-circle"),
-                        ViewportClip::Ellipse(_) => Window::Refused("clip-ellipse"),
-                        ViewportClip::Spline(_) => Window::Refused("clip-spline"),
-                        _ => Window::Refused("clip-other"),
                     }
                 };
                 windows.push((v, window));
@@ -1239,11 +1274,14 @@ impl<'a> PvecConversion<'a> {
                         }
                         // The paper view keeps its row, under its own code.
                         Some((_, Window::Paper)) => without_geometry(
-                            Classification::ignored_by_policy("space", "VIEWPORT"),
-                            vec![
-                                "PAPER_VIEW: the sheet's own paper view, not a window onto the model"
-                                    .to_owned(),
-                            ],
+                            Classification::ignored_by_policy(
+                                PolicyReason::PaperView.field(),
+                                "VIEWPORT",
+                            ),
+                            vec![format!(
+                                "{}: the sheet's own paper view, not a window onto the model",
+                                PolicyReason::PaperView.code()
+                            )],
                         ),
                         Some((_, Window::Dropped(why))) => {
                             space(&format!("contributes nothing to a print ({why})"))
@@ -1306,9 +1344,10 @@ impl<'a> PvecConversion<'a> {
                         }
                     }
                 }
-                // What it is cut to: the sheet, or the part of a viewport's rectangle on it.
-                let (clip_box, edge) = match window.map(|k| &windows[k].1) {
-                    Some(Window::Drawn { rect, .. }) => (
+                // What it is cut to: the sheet, or the part of a viewport's rectangle on it, and
+                // the viewport's polygon when it is clipped to one (#1565).
+                let (clip_box, ring, edge) = match window.map(|k| &windows[k].1) {
+                    Some(Window::Drawn { rect, ring, .. }) => (
                         Some(frame.map_or(*rect, |b| {
                             [
                                 rect[0].max(b[0]),
@@ -1317,14 +1356,16 @@ impl<'a> PvecConversion<'a> {
                                 rect[3].min(b[3]),
                             ]
                         })),
+                        ring.as_ref(),
                         "viewport",
                     ),
-                    _ => (frame, "sheet"),
+                    _ => (frame, None, "sheet"),
                 };
-                // P-7: nothing is drawn outside the sheet. A line or a straight polyline is cut
-                // exactly and may become several pieces, each its own entity and row; any other
-                // curve is kept when wholly inside, dropped when wholly outside and refused when
-                // it crosses the edge. PVec's own box decides inside and outside.
+                // P-7: nothing is drawn outside the sheet. A line or a straight polyline against a
+                // rectangle is cut on x then y (#1562); any other curve, and anything against a
+                // polygon, is split by `curve_clip` (#1565): conics as arcs of their own carrier,
+                // splines as sub-ranges of themselves. Each piece is its own entity and row. PVec's
+                // own box decides wholly outside, and wholly inside a rectangle.
                 let mut more: Vec<Done> = Vec::new();
                 let mut whole = window.is_none();
                 if let (Some(b), Some(bounds), Some(curve), false) = (
@@ -1335,6 +1376,19 @@ impl<'a> PvecConversion<'a> {
                 ) {
                     let (lo, hi) = (bounds.min(), bounds.max());
                     let class = raw.provenance.class_name.as_str();
+                    let outside = |why: &str| {
+                        without_geometry(
+                            Classification::ignored_by_policy("viewport_clipping", class),
+                            vec![format!("{}: {why}", PolicyReason::OutsideViewport.code())],
+                        )
+                    };
+                    let boxed = lo.x >= b[0] && hi.x <= b[2] && lo.y >= b[1] && hi.y <= b[3];
+                    // `None`: kept whole. `Some(Ok((pieces, note)))`: cut, with a note for each
+                    // piece's row. `Some(Err((done, counter)))`: dropped or refused as `done` says,
+                    // counted under `clipped[counter]` (0 outside, 1 crossing and refused), or
+                    // under neither when a piece, not the clip, was the problem.
+                    type Pieces = (Vec<Normalized2DGeometry>, Option<String>);
+                    let mut cut: Option<Result<Pieces, (Done, Option<usize>)>> = None;
                     if b[0] > b[2]
                         || b[1] > b[3]
                         || hi.x < b[0]
@@ -1342,40 +1396,29 @@ impl<'a> PvecConversion<'a> {
                         || hi.y < b[1]
                         || lo.y > b[3]
                     {
-                        clipped[0] += 1;
-                        whole = false;
-                        done = without_geometry(
-                            Classification::ignored_by_policy("viewport_clipping", class),
-                            vec![format!(
-                                "{}: wholly outside the {edge}",
-                                PolicyReason::OutsideViewport.code()
-                            )],
-                        );
-                    } else if !(lo.x >= b[0] && hi.x <= b[2] && lo.y >= b[1] && hi.y <= b[3]) {
-                        whole = false;
-                        match sheet_cut(curve, b) {
-                            None => {
-                                clipped[1] += 1;
-                                done = without_geometry(
-                                    Classification::refused(ReasonCode::ViewNotEnabled, class),
-                                    vec![format!(
-                                        "VIEW_NOT_ENABLED (508): the curve crosses the {edge} edge, and a curve is not cut until curve splitting lands (#1565)"
-                                    )],
-                                );
+                        cut = Some(Err((
+                            outside(&format!("wholly outside the {edge}")),
+                            Some(0),
+                        )));
+                    } else if ring.is_some() || !boxed {
+                        let fidelity = done.geometry.fidelity();
+                        let degenerate = |e: String| {
+                            without_geometry(
+                                Classification::refused(ReasonCode::DegenerateGeometry, class),
+                                vec![format!(
+                                    "{class}: a piece cut at the {edge} edge is degenerate: {e}"
+                                )],
+                            )
+                        };
+                        match (ring, ring.is_none().then(|| sheet_cut(curve, b)).flatten()) {
+                            (None, Some(pieces)) if pieces.is_empty() => {
+                                cut = Some(Err((
+                                    outside(&format!("wholly outside the {edge}")),
+                                    Some(0),
+                                )));
                             }
-                            Some(pieces) if pieces.is_empty() => {
-                                clipped[0] += 1;
-                                done = without_geometry(
-                                    Classification::ignored_by_policy("viewport_clipping", class),
-                                    vec![format!(
-                                        "{}: wholly outside the {edge}",
-                                        PolicyReason::OutsideViewport.code()
-                                    )],
-                                );
-                            }
-                            Some(pieces) => {
+                            (None, Some(pieces)) => {
                                 let line = matches!(curve, Curve::Trimmed(_));
-                                let fidelity = done.geometry.fidelity();
                                 let built: Result<Vec<Normalized2DGeometry>, String> = pieces
                                     .iter()
                                     .map(|p| {
@@ -1404,42 +1447,198 @@ impl<'a> PvecConversion<'a> {
                                         }
                                     })
                                     .collect();
-                                match built {
-                                    Err(e) => {
-                                        done = without_geometry(
-                                            Classification::refused(
-                                                ReasonCode::DegenerateGeometry,
-                                                class,
-                                            ),
-                                            vec![format!(
-                                                "{class}: a piece cut at the {edge} edge is degenerate: {e}"
-                                            )],
-                                        );
-                                    }
-                                    Ok(records) => {
-                                        clipped[2] += 1;
-                                        clipped[3] += records.len() as u64;
-                                        let mut gated_pieces = Vec::with_capacity(records.len());
-                                        for r in records {
-                                            match gated(r, &raw.provenance, gate) {
-                                                Ok(d) => gated_pieces.push(d),
-                                                Err(e) => {
-                                                    failure = Some(e);
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                        if failure.is_some() {
+                                cut = Some(
+                                    built.map(|p| (p, None)).map_err(|e| (degenerate(e), None)),
+                                );
+                            }
+                            _ => {
+                                // The polygon, then the sheet; or the rectangle alone.
+                                let as_ring = |r: [f64; 4]| {
+                                    vec![[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]]
+                                };
+                                let rings: Vec<Vec<[f64; 2]>> = match ring {
+                                    Some(r) => std::iter::once(r.clone())
+                                        .chain(frame.map(as_ring))
+                                        .collect(),
+                                    None => vec![as_ring(b)],
+                                };
+                                let mut current = vec![curve.clone()];
+                                let mut split = false;
+                                let mut tolerance: Option<f64> = None;
+                                let mut refused: Option<(Done, Option<usize>)> = None;
+                                'rings: for r in &rings {
+                                    let points: Result<Vec<Point2>, _> =
+                                        r.iter().map(|q| Point2::checked(q[0], q[1])).collect();
+                                    let points = match points {
+                                        Ok(p) => p,
+                                        Err(e) => {
+                                            refused = Some((degenerate(e.to_string()), None));
                                             break;
                                         }
-                                        let mut it = gated_pieces.into_iter();
-                                        if let Some(first) = it.next() {
-                                            done = first;
+                                    };
+                                    let mut next = Vec::with_capacity(current.len());
+                                    for c in std::mem::take(&mut current) {
+                                        match clip_curve(&c, &points) {
+                                            Ok(CurveClip::Inside) => next.push(c),
+                                            Ok(CurveClip::Outside) => split = true,
+                                            Ok(CurveClip::Split {
+                                                pieces,
+                                                fidelity,
+                                                parameter_tolerance,
+                                            }) => {
+                                                split = true;
+                                                if fidelity == FidelityClass::SupportedEquivalent {
+                                                    tolerance = Some(
+                                                        tolerance
+                                                            .unwrap_or(0.0)
+                                                            .max(parameter_tolerance),
+                                                    );
+                                                }
+                                                next.extend(pieces);
+                                            }
+                                            Err(CurveClipError::Unsupported(kind)) => {
+                                                // Not cut exactly, but it may not need cutting: its
+                                                // own box (PVec's, enclosing it) as a closed outline
+                                                // tells wholly inside and wholly outside apart from
+                                                // crossing.
+                                                let bx = c.bounds().ok();
+                                                let outline = bx.and_then(|bx| {
+                                                    let (l, h) = (bx.min(), bx.max());
+                                                    let corners = [
+                                                        Point2::new(l.x, l.y),
+                                                        Point2::new(h.x, l.y),
+                                                        Point2::new(h.x, h.y),
+                                                        Point2::new(l.x, h.y),
+                                                        Point2::new(l.x, l.y),
+                                                    ];
+                                                    Polyline::new(corners.to_vec())
+                                                        .ok()
+                                                        .map(Curve::Polyline)
+                                                });
+                                                match outline.map(|o| clip_curve(&o, &points)) {
+                                                    Some(Ok(CurveClip::Inside)) => {
+                                                        next.push(c);
+                                                        continue;
+                                                    }
+                                                    // Outside also when the whole ring sits inside
+                                                    // the box, and then the curve may run through
+                                                    // it: only a ring with no vertex in the box is
+                                                    // clear of the curve.
+                                                    Some(Ok(CurveClip::Outside))
+                                                        if bx.is_some_and(|bx| {
+                                                            let (l, h) = (bx.min(), bx.max());
+                                                            !points.iter().any(|q| {
+                                                                q.x >= l.x
+                                                                    && q.x <= h.x
+                                                                    && q.y >= l.y
+                                                                    && q.y <= h.y
+                                                            })
+                                                        }) =>
+                                                    {
+                                                        split = true;
+                                                        continue;
+                                                    }
+                                                    _ => {}
+                                                }
+                                                let what = if kind == CurveKind::RationalBSpline {
+                                                    "a rational spline".to_owned()
+                                                } else {
+                                                    format!("a {kind:?}")
+                                                };
+                                                refused = Some((
+                                                    without_geometry(
+                                                        Classification::refused(
+                                                            ReasonCode::ViewNotEnabled,
+                                                            class,
+                                                        ),
+                                                        vec![format!(
+                                                            "VIEW_NOT_ENABLED (508): the curve crosses the {edge} edge, and {what} is not cut exactly yet"
+                                                        )],
+                                                    ),
+                                                    Some(1),
+                                                ));
+                                                break 'rings;
+                                            }
+                                            Err(e) => {
+                                                refused = Some((degenerate(e.to_string()), None));
+                                                break 'rings;
+                                            }
                                         }
-                                        more = it.collect();
+                                    }
+                                    current = next;
+                                }
+                                cut = match refused {
+                                    Some(d) => Some(Err(d)),
+                                    None if !split => None,
+                                    None if current.is_empty() => Some(Err((
+                                        outside(&format!("outside the {edge}")),
+                                        Some(0),
+                                    ))),
+                                    None => {
+                                        // A spline piece is the same locus up to its parameter
+                                        // tolerance: SupportedEquivalent, and the row says how far.
+                                        let fidelity = if tolerance.is_some() {
+                                            fidelity.max(FidelityClass::SupportedEquivalent)
+                                        } else {
+                                            fidelity
+                                        };
+                                        let note = tolerance.map(|t| {
+                                            format!(
+                                                "{class}: cut at the {edge} edge by knot insertion, parameter tolerance {t:e}"
+                                            )
+                                        });
+                                        let built: Result<Vec<Normalized2DGeometry>, String> =
+                                            current
+                                                .into_iter()
+                                                .map(|c| {
+                                                    Normalized2DGeometry::from_curve(c, fidelity)
+                                                        .map_err(|e| e.to_string())
+                                                })
+                                                .collect();
+                                        Some(
+                                            built
+                                                .map(|p| (p, note))
+                                                .map_err(|e| (degenerate(e), None)),
+                                        )
+                                    }
+                                };
+                            }
+                        }
+                    }
+                    match cut {
+                        None => {}
+                        Some(Err((d, counter))) => {
+                            whole = false;
+                            if let Some(k) = counter {
+                                clipped[k] += 1;
+                            }
+                            done = d;
+                        }
+                        Some(Ok((records, note))) => {
+                            whole = false;
+                            clipped[2] += 1;
+                            clipped[3] += records.len() as u64;
+                            let mut gated_pieces = Vec::with_capacity(records.len());
+                            for r in records {
+                                match gated(r, &raw.provenance, gate) {
+                                    Ok(mut d) => {
+                                        d.warnings.extend(note.clone());
+                                        gated_pieces.push(d);
+                                    }
+                                    Err(e) => {
+                                        failure = Some(e);
+                                        break;
                                     }
                                 }
                             }
+                            if failure.is_some() {
+                                break;
+                            }
+                            let mut it = gated_pieces.into_iter();
+                            if let Some(first) = it.next() {
+                                done = first;
+                            }
+                            more = it.collect();
                         }
                     }
                 }
@@ -1978,6 +2177,14 @@ struct Side {
     viewport: Option<crate::cad::ItemHandle>,
 }
 
+/// AutoCAD's own paper view: number 1, showing paper space 1:1 centred on itself
+/// (`sample_AC1018`). The reader numbers viewports, so the number alone is not enough: the gold
+/// probes give 1 to a window onto the model (#1563). A sheet's conversion and the layout set's
+/// sheet test both decide it here (#1583).
+fn paper_view(v: &ViewportEntity) -> bool {
+    v.id == 1 && v.center == v.view_center && v.height == v.view_height
+}
+
 /// What the print profile makes of one viewport of a sheet (#1563).
 enum Window {
     /// The sheet's own paper view, not a window onto the model.
@@ -1986,8 +2193,13 @@ enum Window {
     Dropped(&'static str),
     /// A view this slice cannot map, refused with 508, and why.
     Refused(&'static str),
-    /// Model space shows through it: the similarity onto the sheet, and its rectangle there.
-    Drawn { map: [f64; 6], rect: [f64; 4] },
+    /// Model space shows through it: the similarity onto the sheet, its rectangle there (for a
+    /// polygon clip, the polygon's box), and the polygon when it is clipped to one (#1565).
+    Drawn {
+        map: [f64; 6],
+        rect: [f64; 4],
+        ring: Option<Vec<[f64; 2]>>,
+    },
 }
 
 /// One entity's outcome on its way from the classifier to the consumer.

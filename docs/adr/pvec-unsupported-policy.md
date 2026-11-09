@@ -47,9 +47,9 @@ Frozen assignments so far, each with the spike that measured it:
 - Paper space and viewport clips: amended by [pvec-print-profile.md](pvec-print-profile.md) (#1559).
   Paper space is no longer `Unsupported` as a whole: a paper layout prints under the print profile.
   `VIEW_NOT_ENABLED` (508) stays, per viewport (a non-plan view direction, perspective,
-  `view_height <= 0`, a polygon clip until slice 6, a twist until its sign is measured) and
-  per entity (a curve crossing a clip until slice 6). Until the sheet lands (#1562) a paper
-  layout is still refused with 508.
+  `view_height <= 0`, a clip boundary with a bulge or a curve, a twist until its sign is
+  measured) and per entity (a rational spline crossing a clip, which PVec has no sub-range for).
+  Straight-edged polygon clips and every other crossing curve are cut since slice 6 (#1565).
 - An xref or an INSERT of no block: `Unsupported`, `UNRESOLVED_BLOCK` (105).
 - An entity on an off or frozen layer, or under such an INSERT: excluded and counted per layer
   (`LAYER_HIDDEN`, proposed). A viewport-only freeze: `IgnoredByPolicy` (`VIEWPORT_STATE_IGNORED`,
