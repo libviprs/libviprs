@@ -52,7 +52,10 @@ fn blueprint_mix_writes_only_features_the_driver_supports() {
         used.contains(&"23.stroke_item"),
         "the probe read almost nothing from the written streams: {used:?}"
     );
-    let outside: Vec<&&str> = used.iter().filter(|k| !SUPPORTED.contains(*k) && !CONSUMED.contains(*k)).collect();
+    let outside: Vec<&&str> = used
+        .iter()
+        .filter(|k| !SUPPORTED.contains(*k) && !CONSUMED.contains(*k))
+        .collect();
     assert!(
         outside.is_empty(),
         "pdf_page_to_pvec wrote {outside:?}, which neither pvec-scene::SUPPORTED nor CONSUMED lists; either the driver or the viewer learns \
