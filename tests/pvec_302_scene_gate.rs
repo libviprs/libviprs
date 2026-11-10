@@ -1,14 +1,14 @@
-//! libviprs/pvec#302 (A2.2): what `pdf_page_to_pvec` writes stays inside what the paint driver works out.
+//! libviprs/pvec#302 (A2.2): what `pdf_page_to_pvec` writes stays inside what the paint driver works out or the viewer consumes.
 //! The page is `blueprint-mix.pdf`. The feature keys are read from the component streams the writer put in
 //! the file (`pvec_scene::features_used`), so there is no mapping from `FillConstruct` or `ReasonCode` here
-//! that could drift, and the test pins no bytes, only the feature set. Needs `--features pvec-write`.
+//! that could drift, and the test pins no bytes, only the feature set. A key passes when it is in `SUPPORTED` (the driver) or `CONSUMED` (the viewer reads it from the stream). Needs `--features pvec-write`.
 
 #![cfg(feature = "pvec-write")]
 
 use libviprs::pvec::{PdfVectorLimits, extract_page_paths, pdf_page_to_pvec};
 use pvec_facade::PvecReader;
 use pvec_facade::components::{ClipStream, FillPaintStream, PaintOrderStream, StrokePaintStream};
-use pvec_scene::{SUPPORTED, features_used};
+use pvec_scene::{CONSUMED, SUPPORTED, features_used};
 use std::path::PathBuf;
 
 #[test]
@@ -52,10 +52,10 @@ fn blueprint_mix_writes_only_features_the_driver_supports() {
         used.contains(&"23.stroke_item"),
         "the probe read almost nothing from the written streams: {used:?}"
     );
-    let outside: Vec<&&str> = used.iter().filter(|k| !SUPPORTED.contains(*k)).collect();
+    let outside: Vec<&&str> = used.iter().filter(|k| !SUPPORTED.contains(*k) && !CONSUMED.contains(*k)).collect();
     assert!(
         outside.is_empty(),
-        "pdf_page_to_pvec wrote {outside:?}, which pvec-scene::SUPPORTED does not list; either the driver learns \
+        "pdf_page_to_pvec wrote {outside:?}, which neither pvec-scene::SUPPORTED nor CONSUMED lists; either the driver or the viewer learns \
          it (docs/features.toml in libviprs/pvec) or the writer stops emitting it"
     );
 }

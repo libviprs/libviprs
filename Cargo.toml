@@ -340,7 +340,7 @@ acadrust = { git = "https://github.com/libviprs/acadrust", rev = "f1e00c11f6371c
 # `pvec::dwg_spline` applies, so the numbers are PVec's and are not copied here. Optional
 # and off by default. Git dependency pinned by a full revision, same consequence as the
 # two above: this crate cannot be published to crates.io while the line below stands.
-pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24498207f1f1554b2f48edd8872a" }
+pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "7a6a1fbf6675c75607a0166475398ac0bc1b1e60" }
 # PVec's source-neutral curve model and the numeric policy under it (issue #1095),
 # optional and off by default. Both crates (`pvec-numeric` is the entry just above) live in
 # libviprs/pvec, are pure Rust with no dependency besides each other, and are `publish = false` at version 0.0.0 there.
@@ -350,29 +350,29 @@ pvec-numeric = { git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24
 # publishes PVec. Moving the revision means re-reading the citations in
 # `docs/adr/pvec-normalized-geometry.md` (the ADR pins fdf87de, so a move is also a
 # change to that pin).
-pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24498207f1f1554b2f48edd8872a", version = "0.0.0" }
+pvec-geometry = { git = "https://github.com/libviprs/pvec", rev = "7a6a1fbf6675c75607a0166475398ac0bc1b1e60", version = "0.0.0" }
 # PVec's file-local `EntityId` (issue #1091), the id type the bounds inputs carry. Same pin and
 # same publishing consequence as `pvec-geometry` above.
-pvec-entity = { git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24498207f1f1554b2f48edd8872a", version = "0.0.0" }
+pvec-entity = { git = "https://github.com/libviprs/pvec", rev = "7a6a1fbf6675c75607a0166475398ac0bc1b1e60", version = "0.0.0" }
 # PVec's capability registry (issue #1311). `tests/pvec_1311_registry.rs` checks the ids in
 # `src/pvec/mapping.rs` against it, and since #1093 `pvec::components` (behind `pvec-write`) asks it
 # for the version a component stream is written at. Same pin as the crates above.
-pvec-capabilities = { git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24498207f1f1554b2f48edd8872a", version = "0.0.0" }
+pvec-capabilities = { git = "https://github.com/libviprs/pvec", rev = "7a6a1fbf6675c75607a0166475398ac0bc1b1e60", version = "0.0.0" }
 # PVec's facade (the semantic reader and writer), for the raster stream (issue #1328): the
 # adapter in `raster_pvec::container` hands the tiles of a pyramid to its writer untouched and
 # reads them back through its reader. Renamed because `pvec` is this crate's own module, and the
 # fence in `tests/pvec_api_surface.rs` names the facade by this root. `unstable-stream` is the
 # feature that carries `PvecWriter::rasters`. Pure Rust like the crates above, optional and off
 # by default, and pinned by a full revision with the same consequence for publishing.
-pvec-facade = { package = "pvec", git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24498207f1f1554b2f48edd8872a", version = "0.0.0", features = ["unstable-stream"] }
+pvec-facade = { package = "pvec", git = "https://github.com/libviprs/pvec", rev = "7a6a1fbf6675c75607a0166475398ac0bc1b1e60", version = "0.0.0", features = ["unstable-stream"] }
 # The container writer `pvec::pdf_page_to_pvec` drives directly (issue #1578): the facade has no
 # polyline entry point for it, and the server's mapping, which this one is byte-identical to, has
 # always written through it. Same pin as the facade, which depends on it, so one copy builds.
-pvec-container = { git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24498207f1f1554b2f48edd8872a", version = "0.0.0" }
+pvec-container = { git = "https://github.com/libviprs/pvec", rev = "7a6a1fbf6675c75607a0166475398ac0bc1b1e60", version = "0.0.0" }
 # The component payload types `pvec::pdf_page_to_pvec` writes (text records, raster placements,
 # issue #1578): the facade re-exports the streams but not `TextRecord` or the raster encoder.
 # Same pin, so one copy builds.
-pvec-components = { git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24498207f1f1554b2f48edd8872a", version = "0.0.0" }
+pvec-components = { git = "https://github.com/libviprs/pvec", rev = "7a6a1fbf6675c75607a0166475398ac0bc1b1e60", version = "0.0.0" }
 # Pure-Rust FFT (MIT OR Apache-2.0) used by the frequency-domain filter
 # operations in `src/freqfilt.rs` (`fwfft`, `invfft`, `freqmult`, `spectrum`,
 # `phasecor`). Chosen over an FFTW binding to keep the crate pure Rust; its
@@ -848,7 +848,7 @@ required-features = ["pvec-write"]
 [dev-dependencies]
 # The paint driver's `SUPPORTED` list and `features_used`, which `tests/pvec_302_scene_gate.rs` holds the writer to
 # (libviprs/pvec#302). Same pin as the pvec crates above, so one copy of each builds.
-pvec-scene = { git = "https://github.com/libviprs/pvec", rev = "dd98cff0901a24498207f1f1554b2f48edd8872a", version = "0.0.0" }
+pvec-scene = { git = "https://github.com/libviprs/pvec", rev = "7a6a1fbf6675c75607a0166475398ac0bc1b1e60", version = "0.0.0" }
 # Runs the fuzz targets' bodies on their seed corpus in the ordinary suite (tests/pvec_1437_fuzz_seeds.rs).
 arbitrary = { workspace = true }
 loom = { workspace = true }
