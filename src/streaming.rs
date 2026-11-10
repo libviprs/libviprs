@@ -801,6 +801,8 @@ fn resolve_budget_dpi(
 /// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
 /// issues FPDF calls (load + page get + dim getter) that require
 /// process-wide pdfium serialization.
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 fn probe_page_dims(
     pdfium: &pdfium_render::prelude::Pdfium,

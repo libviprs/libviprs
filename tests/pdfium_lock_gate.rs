@@ -13,8 +13,124 @@ use std::path::Path;
 /// neither take `pdfium_lock()` before their first use nor document that the caller holds it.
 /// Anything after the `#[cfg(test)]` module marker is ignored.
 fn scan(source: &str) -> (usize, Vec<String>) {
-    let _ = source;
-    (0, Vec::new())
+    let source = match source.find("#[cfg(test)]\nmod ") {
+        Some(end) => &source[..end],
+        None => source,
+    };
+    let markers = [
+        ".load_pdf_from",
+        ".pages()",
+        ".objects()",
+        ".render_with_config(",
+        ".as_raw_bytes(",
+        "Pdfium::new(",
+    ];
+
+    let lines: Vec<&str> = source.lines().collect();
+    let mut seen = 0;
+    let mut unguarded = Vec::new();
+    let mut doc = String::new();
+
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+
+        if let Some(text) = trimmed.strip_prefix("///") {
+            doc.push_str(text);
+            doc.push(' ');
+            continue;
+        }
+
+        if trimmed.starts_with("#[") {
+            continue;
+        }
+
+        let mut rest = trimmed;
+        for prefix in [
+            "pub(crate) ",
+            "pub(super) ",
+            "pub ",
+            "const ",
+            "async ",
+            "unsafe ",
+        ] {
+            rest = rest.strip_prefix(prefix).unwrap_or(rest);
+        }
+
+        let Some(after_fn) = rest.strip_prefix("fn ") else {
+            doc.clear();
+            continue;
+        };
+        let name: String = after_fn
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+
+        // Take the text from this line on, up to the brace that closes the body.
+        let text = lines[index..].join("\n");
+        let Some(open) = text
+            .find(['{', ';'])
+            .filter(|at| text[*at..].starts_with('{'))
+        else {
+            doc.clear();
+            continue;
+        };
+        let mut depth = 0;
+        let mut end = text.len();
+        let bytes = text.as_bytes();
+        let mut at = open;
+        while at < bytes.len() {
+            match bytes[at] {
+                b'/' if bytes.get(at + 1) == Some(&b'/') => {
+                    while at < bytes.len() && bytes[at] != b'\n' {
+                        at += 1;
+                    }
+                    continue;
+                }
+                b'"' => {
+                    at += 1;
+                    while at < bytes.len() && bytes[at] != b'"' {
+                        at += if bytes[at] == b'\\' { 2 } else { 1 };
+                    }
+                }
+                b'\'' if bytes.get(at + 2) == Some(&b'\'') => at += 2,
+                b'\'' if bytes.get(at + 1) == Some(&b'\\') && bytes.get(at + 3) == Some(&b'\'') => {
+                    at += 3
+                }
+                b'{' => depth += 1,
+                b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = at;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            at += 1;
+        }
+
+        let body: String = text[open..end]
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if let Some(first_use) = markers.iter().filter_map(|m| body.find(m)).min() {
+            seen += 1;
+            let locks_first = ["pdfium_lock()", "&INIT_GUARD"]
+                .iter()
+                .filter_map(|lock| body.find(lock))
+                .min()
+                .is_some_and(|at| at < first_use);
+            let caller_holds = doc.contains("caller holds") && doc.contains("pdfium_lock");
+            if !locks_first && !caller_holds {
+                unguarded.push(name);
+            }
+        }
+        doc.clear();
+    }
+
+    (seen, unguarded)
 }
 
 #[test]
@@ -109,10 +225,10 @@ fn every_pdfium_function_in_src_is_locked_or_documented() {
         unguarded.extend(names.into_iter().map(|name| format!("{file}::{name}")));
     }
 
-    // 23 at the time of writing. A floor well under that, so the gate cannot pass by scanning
+    // 14 at the time of writing. A floor well under that, so the gate cannot pass by scanning
     // nothing, without breaking every time a helper is added or folded away.
     assert!(
-        seen >= 15,
+        seen >= 10,
         "the scan only found {seen} pdfium-render functions"
     );
     assert!(

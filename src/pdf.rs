@@ -998,6 +998,8 @@ fn extract_encrypted_page_pdfium(
 /// (filters and decryption included) into an 8-bit bitmap, which this turns
 /// into a `Gray8`, `Rgb8` or `Rgba8` [`Raster`]. Image masks and the object's
 /// transform are ignored, as they are on the `lopdf` path.
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 fn largest_image_object_raster(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
@@ -2014,6 +2016,11 @@ fn lock_recovering(mutex: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()
 /// held the lock are recovered from rather than propagated; pdfium is
 /// a C library and a Rust panic on the Rust side cannot corrupt its
 /// internal state, so poisoning here is benign.
+///
+/// This only serialises pdfium calls made through libviprs. Code elsewhere in
+/// the same process that calls pdfium-render directly does not take it.
+/// `tests/pdfium_lock_gate.rs` checks that every function here that uses
+/// pdfium-render takes this lock first, or documents that its caller holds it.
 #[cfg(feature = "pdfium")]
 #[inline]
 pub(crate) fn pdfium_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -2211,6 +2218,8 @@ fn sized_config(
 /// Render a page at the given pixel dimensions and return a Raster.
 /// `width` and `height` are the render target from
 /// [`PageSizing::render_target_dims`].
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_at_size(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
@@ -2267,6 +2276,8 @@ fn background_to_pdf_color(background: &[f64]) -> pdfium_render::prelude::PdfCol
 /// the page leaves transparent then shows `background` instead of the default
 /// white. `background` is read as `[r, g, b]` or `[r, g, b, a]`; see
 /// [`background_to_pdf_color`] for the per-channel handling.
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_at_size_with_background(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
@@ -2533,6 +2544,8 @@ pub(crate) fn exact_strip_scales(w_pt: f32, h_pt: f32, width: u32, height: u32) 
 ///
 /// `dpi`, `y_offset`, `strip_height` semantics match the device matrix
 /// documented at [`strip_matrix`].
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_page_strip_with_page(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
