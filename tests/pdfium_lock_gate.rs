@@ -213,6 +213,7 @@ mod tests {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)] // reads src/ from disk, blocked by Miri isolation
 fn every_pdfium_function_in_src_is_locked_or_documented() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut seen = 0;
