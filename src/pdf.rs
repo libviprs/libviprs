@@ -1052,6 +1052,8 @@ fn largest_image_object_raster(
 }
 
 /// Bytes per pixel of a decoded pdfium image bitmap in `format`.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn pdfium_image_bytes_per_pixel(format: pdfium_render::prelude::PdfBitmapFormat) -> u64 {
     use pdfium_render::prelude::PdfBitmapFormat;
@@ -1066,6 +1068,8 @@ fn pdfium_image_bytes_per_pixel(format: pdfium_render::prelude::PdfBitmapFormat)
 /// samples, each row padded to a stride) into a tightly packed `Rgb8`,
 /// `Rgba8` or `Gray8` [`Raster`]. The stride is whatever the buffer length
 /// divides into per row, which is how pdfium-render reads it too.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn raster_from_pdfium_image_bitmap(
     bytes: &[u8],
@@ -1196,6 +1200,8 @@ fn reject_pages_beyond_pdfium_index(path: &Path) -> Result<(), PdfError> {
 /// index type. The narrowing is still range-checked rather than cast so a
 /// future change to the bounds check can never silently reintroduce a
 /// wrapping conversion (#91).
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 pub(crate) fn pdfium_page_index(
     page: usize,
@@ -2116,6 +2122,8 @@ pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, P
 /// wrapper code, and a panic reaching a MapReduce render worker aborts
 /// the rendering thread. Any residual panic is converted into the same
 /// typed [`PdfError::Pdfium`] the caller can propagate.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn bitmap_to_raster<F>(as_image: F) -> Result<Raster, PdfError>
 where
@@ -2200,6 +2208,8 @@ fn pdfium_bitmap_span(width: u32, height: u32) -> Result<usize, PdfError> {
 /// [`PageSizing::Exact`] stretches the page into exactly that bitmap
 /// (`FPDF_RenderPageBitmap(bitmap, page, 0, 0, w, h, ..)`, the call libvips
 /// makes). [`PageSizing::LegacyTruncated`] keeps the 0.5.x aspect-fit.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn sized_config(
     sizing: PageSizing,
@@ -2249,6 +2259,8 @@ pub(crate) fn render_at_size(
 /// `0..=255`. Narrowing to pdfium's `u8` channels can therefore never wrap.
 /// This stays total (the public entry point validates the channel count up
 /// front), so a short slice can never panic here.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn background_to_pdf_color(background: &[f64]) -> pdfium_render::prelude::PdfColor {
     let channel = |index: usize, default: f64| -> u8 {
