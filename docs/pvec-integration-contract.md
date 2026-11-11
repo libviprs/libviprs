@@ -9,7 +9,7 @@ them to its recorded hash.
 ## The five pins
 
 **1. PVec: the revision, the container version and the capability set this build writes.** This build links
-`pvec` at revision `7a6a1fbf6675c75607a0166475398ac0bc1b1e60` and writes container version 1.0. The capabilities it
+`pvec` at revision `e1a768ba53b0fc4d530fc8b528c04159299c6f10` and writes container version 1.0. The capabilities it
 can write are the ones the mapping table (`pvec::mapping::NORMALIZED_TO_PVEC`) gives its ten kinds, ids 5 to 12 of
 PVec's registry. What a build does with other container versions is `docs/pvec-version-compatibility.md`.
 

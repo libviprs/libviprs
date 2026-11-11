@@ -52,13 +52,25 @@ fn blueprint_mix_writes_only_features_the_driver_supports() {
         used.contains(&"23.stroke_item"),
         "the probe read almost nothing from the written streams: {used:?}"
     );
-    let outside: Vec<&&str> = used
+    // `SUPPORTED` plus `CONSUMED` lists every key pvec knows, so "inside the union" can no longer fail. What
+    // bites is the exact set: the keys the writer emits for this page are pinned here. A new key shows up as
+    // a diff to review (and must be in the union, checked below); a key that stops being written does too.
+    // The feature keys the writer emits for page 1 of `blueprint-mix.pdf` at the pinned pvec rev.
+    const WRITTEN: &[&str] = &["23.stroke_item", "23.text_item", "24.colour"];
+    let written: std::collections::BTreeSet<String> = used.iter().map(|k| k.to_string()).collect();
+    let expected: std::collections::BTreeSet<String> =
+        WRITTEN.iter().map(|k| k.to_string()).collect();
+    assert_eq!(
+        written, expected,
+        "the feature set pdf_page_to_pvec writes for blueprint-mix.pdf changed; if the change is intended, update WRITTEN"
+    );
+    let outside: Vec<&&str> = WRITTEN
         .iter()
         .filter(|k| !SUPPORTED.contains(*k) && !CONSUMED.contains(*k))
         .collect();
     assert!(
         outside.is_empty(),
-        "pdf_page_to_pvec wrote {outside:?}, which neither pvec-scene::SUPPORTED nor CONSUMED lists; either the driver or the viewer learns \
+        "pdf_page_to_pvec writes {outside:?}, which neither pvec-scene::SUPPORTED nor CONSUMED lists; either the driver or the viewer learns \
          it (docs/features.toml in libviprs/pvec) or the writer stops emitting it"
     );
 }
