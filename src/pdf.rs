@@ -998,6 +998,8 @@ fn extract_encrypted_page_pdfium(
 /// (filters and decryption included) into an 8-bit bitmap, which this turns
 /// into a `Gray8`, `Rgb8` or `Rgba8` [`Raster`]. Image masks and the object's
 /// transform are ignored, as they are on the `lopdf` path.
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 fn largest_image_object_raster(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
@@ -1050,6 +1052,8 @@ fn largest_image_object_raster(
 }
 
 /// Bytes per pixel of a decoded pdfium image bitmap in `format`.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn pdfium_image_bytes_per_pixel(format: pdfium_render::prelude::PdfBitmapFormat) -> u64 {
     use pdfium_render::prelude::PdfBitmapFormat;
@@ -1064,6 +1068,8 @@ fn pdfium_image_bytes_per_pixel(format: pdfium_render::prelude::PdfBitmapFormat)
 /// samples, each row padded to a stride) into a tightly packed `Rgb8`,
 /// `Rgba8` or `Gray8` [`Raster`]. The stride is whatever the buffer length
 /// divides into per row, which is how pdfium-render reads it too.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn raster_from_pdfium_image_bitmap(
     bytes: &[u8],
@@ -1194,6 +1200,8 @@ fn reject_pages_beyond_pdfium_index(path: &Path) -> Result<(), PdfError> {
 /// index type. The narrowing is still range-checked rather than cast so a
 /// future change to the bounds check can never silently reintroduce a
 /// wrapping conversion (#91).
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 pub(crate) fn pdfium_page_index(
     page: usize,
@@ -2014,6 +2022,11 @@ fn lock_recovering(mutex: &std::sync::Mutex<()>) -> std::sync::MutexGuard<'_, ()
 /// held the lock are recovered from rather than propagated; pdfium is
 /// a C library and a Rust panic on the Rust side cannot corrupt its
 /// internal state, so poisoning here is benign.
+///
+/// This only serialises pdfium calls made through libviprs. Code elsewhere in
+/// the same process that calls pdfium-render directly does not take it.
+/// `tests/pdfium_lock_gate.rs` checks that every function here that uses
+/// pdfium-render takes this lock first, or documents that its caller holds it.
 #[cfg(feature = "pdfium")]
 #[inline]
 pub(crate) fn pdfium_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -2109,6 +2122,8 @@ pub(crate) fn init_pdfium() -> Result<&'static pdfium_render::prelude::Pdfium, P
 /// wrapper code, and a panic reaching a MapReduce render worker aborts
 /// the rendering thread. Any residual panic is converted into the same
 /// typed [`PdfError::Pdfium`] the caller can propagate.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn bitmap_to_raster<F>(as_image: F) -> Result<Raster, PdfError>
 where
@@ -2193,6 +2208,8 @@ fn pdfium_bitmap_span(width: u32, height: u32) -> Result<usize, PdfError> {
 /// [`PageSizing::Exact`] stretches the page into exactly that bitmap
 /// (`FPDF_RenderPageBitmap(bitmap, page, 0, 0, w, h, ..)`, the call libvips
 /// makes). [`PageSizing::LegacyTruncated`] keeps the 0.5.x aspect-fit.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn sized_config(
     sizing: PageSizing,
@@ -2211,6 +2228,8 @@ fn sized_config(
 /// Render a page at the given pixel dimensions and return a Raster.
 /// `width` and `height` are the render target from
 /// [`PageSizing::render_target_dims`].
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_at_size(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
@@ -2240,6 +2259,8 @@ pub(crate) fn render_at_size(
 /// `0..=255`. Narrowing to pdfium's `u8` channels can therefore never wrap.
 /// This stays total (the public entry point validates the channel count up
 /// front), so a short slice can never panic here.
+///
+/// The caller holds [`pdfium_lock`]; this only builds or reads pdfium-render values.
 #[cfg(feature = "pdfium")]
 fn background_to_pdf_color(background: &[f64]) -> pdfium_render::prelude::PdfColor {
     let channel = |index: usize, default: f64| -> u8 {
@@ -2267,6 +2288,8 @@ fn background_to_pdf_color(background: &[f64]) -> pdfium_render::prelude::PdfCol
 /// the page leaves transparent then shows `background` instead of the default
 /// white. `background` is read as `[r, g, b]` or `[r, g, b, a]`; see
 /// [`background_to_pdf_color`] for the per-channel handling.
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_at_size_with_background(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
@@ -2533,6 +2556,8 @@ pub(crate) fn exact_strip_scales(w_pt: f32, h_pt: f32, width: u32, height: u32) 
 ///
 /// `dpi`, `y_offset`, `strip_height` semantics match the device matrix
 /// documented at [`strip_matrix`].
+///
+/// The caller holds [`pdfium_lock`].
 #[cfg(feature = "pdfium")]
 pub(crate) fn render_page_strip_with_page(
     pdf_page: &pdfium_render::prelude::PdfPage<'_>,
