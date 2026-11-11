@@ -728,6 +728,7 @@ annotated   fs-detected  tests/pvec_1578_l2_stroke_paint.rs::blueprint_mix_every
 annotated   fs-detected  tests/pvec_1578_l3_paint_order.rs::blueprint_mix_paint_order_names_every_stroke_in_the_pdfs_order
 annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::a_page_with_nothing_painted_is_refused_with_the_servers_message
 annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::blueprint_mix_bytes_are_pinned_with_the_stroke_and_paint_streams
+annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_document_says_what_the_open_alone_costs

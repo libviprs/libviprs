@@ -13,7 +13,7 @@ written by this build declares, the DWG versions the provider takes, and the pro
 
 ## The PVec container
 
-This build links `pvec` at revision `1a9d972ef844d4258a641d3891473ce2f1c39ce4` and writes container version 1.0.
+This build links `pvec` at revision `e1a768ba53b0fc4d530fc8b528c04159299c6f10` and writes container version 1.0.
 
 | direction | container version | outcome |
 |---|---|---|
