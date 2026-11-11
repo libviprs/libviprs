@@ -367,6 +367,7 @@ annotated   fs-detected  tests/pdfium_dependency_contract.rs::pdfium_render_come
 annotated   fs-detected  tests/pdfium_dependency_contract.rs::the_floor_excludes_every_release_with_no_serialisation
 annotated   fs-detected  tests/pdfium_dependency_contract.rs::the_libpdfium_abi_is_pinned_explicitly
 annotated   fs-detected  tests/pdfium_dependency_contract.rs::thread_safe_is_requested_because_the_singleton_needs_send_and_sync
+annotated   fs-detected  tests/pdfium_lock_gate.rs::every_pdfium_function_in_src_is_locked_or_documented
 annotated   fs-detected  tests/pdfium_page_size_exact.rs::a_fractional_page_fills_the_bitmap_to_the_edge_in_every_route
 annotated   fs-detected  tests/pdfium_page_size_exact.rs::a_media_box_away_from_the_origin_has_the_same_size
 annotated   fs-detected  tests/pdfium_page_size_exact.rs::every_render_route_reports_the_libvips_size

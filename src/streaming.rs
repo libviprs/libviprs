@@ -801,6 +801,8 @@ fn resolve_budget_dpi(
 /// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
 /// issues FPDF calls (load + page get + dim getter) that require
 /// process-wide pdfium serialization.
+///
+/// The caller holds [`crate::pdf::pdfium_lock`].
 #[cfg(feature = "pdfium")]
 fn probe_page_dims(
     pdfium: &pdfium_render::prelude::Pdfium,
@@ -833,6 +835,8 @@ fn probe_page_dims(
 ///
 /// **Caller must hold `pdfium-render`'s thread-safety lock** — this function
 /// calls [`probe_page_dims`] internally, which is not standalone-locked.
+///
+/// The caller holds [`pdfium_lock`](crate::pdf::pdfium_lock).
 #[cfg(feature = "pdfium")]
 #[allow(clippy::too_many_arguments)]
 fn resolve_dpi_under_budget(
