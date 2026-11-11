@@ -21,6 +21,12 @@ fn blueprint_mix_writes_only_features_the_driver_supports() {
         });
     let path = fixtures.join("blueprint-mix.pdf");
     if !path.is_file() {
+        // Asking for a fixtures directory and not finding the file is a mistake, not a reason to pass.
+        assert!(
+            std::env::var_os("LIBVIPRS_TESTS_FIXTURES").is_none(),
+            "LIBVIPRS_TESTS_FIXTURES is set but {} is not there",
+            path.display()
+        );
         eprintln!(
             "skipped: {} is not there (set LIBVIPRS_TESTS_FIXTURES)",
             path.display()
