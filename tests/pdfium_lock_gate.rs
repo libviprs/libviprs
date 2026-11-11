@@ -37,6 +37,8 @@ fn scan(source: &str) -> (usize, Vec<String>) {
         "load_pdfium_document(",
         "render_page_strip_with_page(",
         "probe_page_dims(",
+        "render_pdfium_page_at_dpi(",
+        "largest_image_object_raster(",
     ];
 
     let lines: Vec<&str> = source.lines().collect();
