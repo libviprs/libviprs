@@ -2,7 +2,7 @@
 //! Needs `--features pvec-write`.
 //!
 //! The named fixture is `flattened_blocks`: two root lines, then two instances (INSERT 100 and
-//! INSERT 200) of a block of three lines. Eight curves come out of four source entities.
+//! INSERT 200) of a block of three lines. Eight curves come out of four source entities, and the provenance stream has a row for each curve.
 
 #![cfg(feature = "pvec-write")]
 
@@ -190,7 +190,7 @@ fn issue_1093_every_subset_of_streams_builds_writes_and_decodes() {
 }
 
 #[test]
-fn issue_1093_provenance_rows_equal_the_source_entities_not_the_curves() {
+fn issue_1093_provenance_rows_are_one_per_entity_and_block_members_carry_their_insert() {
     let f = flattened_blocks();
     let built = build_streams(
         StreamSelection {
@@ -205,11 +205,11 @@ fn issue_1093_provenance_rows_equal_the_source_entities_not_the_curves() {
     .streams;
     let p = ProvenanceStream::decode(&of(&built, ProvenanceStream::CAPABILITY).unwrap().payload)
         .unwrap();
-    // Eight curves, four source entities: two root lines and the two INSERTs.
-    assert_eq!(p.records.len(), 4);
+    // Eight curves, eight rows (#1606): two root lines, and the six block lines under their INSERTs.
+    assert_eq!(p.records.len(), 8);
     let mut handles: Vec<Vec<u8>> = p.records.iter().map(|r| r.handle.clone()).collect();
     handles.sort();
-    let want: Vec<Vec<u8>> = [1u64, 2, 100, 200]
+    let want: Vec<Vec<u8>> = [1u64, 2, 100, 100, 100, 200, 200, 200]
         .iter()
         .map(|h| h.to_be_bytes().to_vec())
         .collect();
@@ -318,7 +318,7 @@ fn issue_1500_every_stream_subset_reads_back_through_pvec_reader() {
         }
         if let Some(s) = of(&read, ProvenanceStream::CAPABILITY) {
             let p = ProvenanceStream::decode(&s.payload).unwrap();
-            assert_eq!(p.records.len(), 4, "mask {mask}: one row per source entity");
+            assert_eq!(p.records.len(), 8, "mask {mask}: one row per entity");
         }
     }
 }

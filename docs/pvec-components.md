@@ -11,10 +11,9 @@ provenance are separate streams a viewer may drop without changing a single coor
   the INSERT chain), builds a monochrome line style from them (`dwg_style_input`, `dwg_line_style`) and refuses a degenerate dash
   pattern. `pvec::components::build_streams` writes it as PVec's line style stream: width, dash, phase and visibility.
 - **Layer and provenance streams.** Also from `build_streams`. The layer stream names each entity's layer and carries the off, frozen
-  and locked flags of the layer table. The provenance stream has one row per source entity, not per curve: an entity reached through
-  an INSERT belongs to the outermost INSERT, so every curve one instance flattens into shares a row, written against the first of
-  them. The row holds the source handle only, because that is all the stream has room for; block path, layer and warnings stay in the
-  conversion report. On a sheet a model entity is a source entity per viewport that shows it (issue #1563): its row is `source_kind` 2,
+  and locked flags of the layer table. The provenance stream has one row per entity written (issue #1606), so a pick on any member of a block reference finds a handle. An entity reached through
+  an INSERT carries the outermost INSERT's handle, the same on every curve one instance flattens into. The row holds the source handle only, because that is all the stream has room for; block path, layer and warnings stay in the
+  conversion report. On a sheet a model entity seen through a viewport (issue #1563) has a row of `source_kind` 2,
   the 8 byte source handle followed by the 8 byte viewport handle; everything else stays kind 1.
 - **Rooms and corridors.** `pvec::regions` derives them from wall linework (see below) and `semantic_stream` writes them as the
   region records of PVec's semantic class stream.
