@@ -12,33 +12,32 @@ use libviprs::pvec::{
 };
 use pvec_facade::components::ProvenanceStream;
 
-/// One root line (handle 1) and, per INSERT, three block lines (handles 11 to 13).
-fn entities(inserts: &[u64]) -> Vec<RawEntity> {
-    let line = |handle: u64, path: InstancePath, x: f64| RawEntity {
-        style: EntityStyle::absent(),
-        geometry: RawGeometry::Line {
-            start: [x, 0.0, 0.0],
-            end: [x + 1.0, 1.0, 0.0],
-        },
-        provenance: ProvenanceStub {
-            handle: Some(ItemHandle::new(handle)),
-            class_name: "LINE".into(),
-            block_path: path,
-            layer: "0".into(),
-        },
-    };
-    let mut raw = vec![line(1, InstancePath::root(), 0.0)];
-    for (n, insert) in inserts.iter().enumerate() {
-        for k in 0..3u64 {
-            let path = InstancePath::root().child("BLK", ItemHandle::new(*insert));
-            raw.push(line(11 + k, path, 10.0 * (n as f64 + 1.0) + k as f64 * 3.0));
-        }
-    }
-    raw
-}
-
 fn provenance(inserts: &[u64]) -> (Vec<libviprs::pvec::EntityId>, ProvenanceStream) {
-    let ordered = order_entities("t", "1", &OrderingPolicy::new(), entities(inserts)).entities;
+    // One root line (handle 1) and, per INSERT, three block lines (handles 11 to 13).
+    let raw = {
+        let line = |handle: u64, path: InstancePath, x: f64| RawEntity {
+            style: EntityStyle::absent(),
+            geometry: RawGeometry::Line {
+                start: [x, 0.0, 0.0],
+                end: [x + 1.0, 1.0, 0.0],
+            },
+            provenance: ProvenanceStub {
+                handle: Some(ItemHandle::new(handle)),
+                class_name: "LINE".into(),
+                block_path: path,
+                layer: "0".into(),
+            },
+        };
+        let mut raw = vec![line(1, InstancePath::root(), 0.0)];
+        for (n, insert) in inserts.iter().enumerate() {
+            for k in 0..3u64 {
+                let path = InstancePath::root().child("BLK", ItemHandle::new(*insert));
+                raw.push(line(11 + k, path, 10.0 * (n as f64 + 1.0) + k as f64 * 3.0));
+            }
+        }
+        raw
+    };
+    let ordered = order_entities("t", "1", &OrderingPolicy::new(), raw).entities;
     let ids: Vec<_> = ordered.iter().map(|o| o.id).collect();
     let rows: Vec<_> = ordered
         .iter()
