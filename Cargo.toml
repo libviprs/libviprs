@@ -907,6 +907,10 @@ name = "pvec_1093_components"
 required-features = ["pvec-write"]
 
 [[test]]
+name = "pvec_1606_provenance_per_entity"
+required-features = ["pvec-write"]
+
+[[test]]
 name = "pvec_1093_dwg_style"
 required-features = ["dwg-acadrust"]
 
