@@ -19,7 +19,7 @@
 //! entity on the layout itself is its own source entity. The row holds the source handle, since the
 //! stream carries nothing else; the block path, layer and warnings are in the conversion report.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use pvec_capabilities::Registry;
 use pvec_facade::EntityId as PvecEntityId;
@@ -287,24 +287,16 @@ pub fn build_streams(
         }
     }
     if select.provenance {
-        // One row per source entity: the outermost INSERT when there is one, else the entity. A
-        // model entity seen through a viewport is a source entity per viewport (#1563).
-        let mut seen: BTreeSet<(Option<u64>, u64, Option<u64>)> = BTreeSet::new();
+        // One row per written entity, so a pick on any member of a block reference finds its handle
+        // (#1606). A block member carries the outermost INSERT's handle, an entity outside a block its
+        // own. A model entity seen through a viewport carries the viewport's too (#1563).
         let mut records = Vec::new();
         for (id, r) in &written {
             let handle = match r.stub.block_path.steps().first() {
                 Some(step) => Some(step.insert_handle.get()),
                 None => r.stub.handle.map(ItemHandle::get),
             };
-            // An entity with no handle is its own source entity, keyed by its id.
             let viewport = r.viewport.map(ItemHandle::get);
-            let key = match handle {
-                Some(h) => (Some(h), 0, viewport),
-                None => (None, r.id.get(), viewport),
-            };
-            if !seen.insert(key) {
-                continue;
-            }
             if records.len() >= MAX_RECORDS {
                 skip(r, "provenance", "stream-full");
                 continue;

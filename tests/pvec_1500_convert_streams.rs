@@ -107,8 +107,8 @@ fn issue_1525_the_three_streams_are_written_and_read_back_through_pvecs_reader()
     let prov =
         ProvenanceStream::decode(&of(&streams, ProvenanceStream::CAPABILITY).unwrap().payload)
             .unwrap();
-    // Twenty curves, sixteen source entities: the six block lines belong to their two INSERTs.
-    assert_eq!(prov.records.len(), SOURCE_ENTITIES);
+    // One row per curve (#1606): the six block lines carry their two INSERTs' handles.
+    assert_eq!(prov.records.len() as u64, GEOMETRY);
     let mut handles: Vec<Vec<u8>> = prov.records.iter().map(|r| r.handle.clone()).collect();
     handles.sort();
     handles.dedup();
