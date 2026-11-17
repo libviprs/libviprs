@@ -4,6 +4,14 @@ A fill is area display semantics. The convenient way to ship one is to tessellat
 
 The code is `src/pvec/fill_policy.rs`. `FILL_POLICY` there is the same table as this one, and `tests/pvec_1085_fill_policy.rs` reads this file back and fails if a construct or a reason code is missing from it.
 
+## Update, issue #1609
+
+The table below is the default. With `PvecConversion::annotations(true)` a DWG `HATCH` and `SOLID` are carried through PVec's hatch
+stream: each boundary loop becomes a hidden closed polyline (so the boundary is a curve entity, as the stream wants, and the fill
+points at it), solid fills carry the RGBA of the entity's colour and pattern fills their name, angle and scale. A hatch with a loop
+of elliptic or spline edges, or edges that do not join, is not carried (a part of a region is not the region) and is counted as
+`HATCH.unmapped`. No triangle or point set is produced.
+
 ## What this covers and what it does not
 
 Two things this task depends on are not in the tree yet, and I did not fake either of them.

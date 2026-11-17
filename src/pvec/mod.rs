@@ -27,6 +27,8 @@
 //! decoder it has, and this module only reuses two of its plain value types
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
+#[cfg(feature = "pvec-convert")]
+pub(crate) mod annotation;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod bounds;

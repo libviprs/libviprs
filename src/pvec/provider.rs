@@ -68,6 +68,22 @@ use crate::cad::{CadSource, ItemHandle};
 /// A source-space point, `[x, y, z]`, as the drawing stores it.
 pub type Point3 = [f64; 3];
 
+/// Whether an extrusion normal is the Z axis, and which way it points: `Some(false)` for +Z,
+/// `Some(true)` for -Z (the OCS mirror `x -> -x`), `None` for a normal that tilts the plane out of
+/// the drawing's, which the 2D model cannot carry.
+///
+/// A drawing computes its normals, so a Z axis often arrives with a rounding error in it
+/// (`1.0000000000000002`, or an `x` of `1e-16`). The test is therefore relative: `x` and `y` must
+/// be at most 1e-9 of `z`. At that size the plane is off by under a millionth of a millimetre on a
+/// kilometre of drawing, so snapping to the axis moves nothing anybody can see.
+#[cfg(feature = "pvec-normalized")]
+#[must_use]
+pub(crate) fn z_axis_flip(normal: Point3) -> Option<bool> {
+    let [x, y, z] = normal;
+    let limit = z.abs() * 1e-9;
+    (z.is_finite() && z != 0.0 && x.abs() <= limit && y.abs() <= limit).then_some(z < 0.0)
+}
+
 /// Why a provider call failed.
 ///
 /// Carries strings, never the reader's own error type, so no foreign type reaches

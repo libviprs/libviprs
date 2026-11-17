@@ -213,6 +213,8 @@ pub use primitive::{
     PrimitiveKind, Spline, Text, TextAnchor, Vector3, undecoded_escape,
 };
 pub use report::{DecodeReport, Diagnostic, DiagnosticCode, PrimitiveCounts, Severity};
+#[cfg(feature = "dwg-acadrust")]
+pub(crate) use text::decode_escapes;
 pub use text::{DisplayText, display_text};
 
 use thiserror::Error;

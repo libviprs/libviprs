@@ -17,9 +17,13 @@ provenance are separate streams a viewer may drop without changing a single coor
   the 8 byte source handle followed by the 8 byte viewport handle; everything else stays kind 1.
 - **Rooms and corridors.** `pvec::regions` derives them from wall linework (see below) and `semantic_stream` writes them as the
   region records of PVec's semantic class stream.
-- **Text.** Not carried in v1: text is counted and reported, with the font outcome (embedded, missing SHX, unresolved) in
+- **Text.** A PDF's text is carried (issue #1578). A DWG's `TEXT`, `MTEXT` and visible `ATTDEF` are carried when
+  `PvecConversion::annotations(true)` is on (issue #1609): a record on a hidden two point anchor, with the characters the
+  drawing shows, not its font or justification. Otherwise text is counted and reported, with the font outcome in
   `docs/pvec-text-policy.md`.
-- **Hatch and fill.** Geometry only; the fill rule stays on the source side. See `docs/pvec-hatch-policy.md`.
+- **Hatch and fill.** A DWG `HATCH` and `SOLID` are carried with `annotations(true)` (issue #1609): one hidden closed polyline
+  per boundary loop and a hatch record over them, solid or by pattern name, angle and scale, with the fill colour. A hatch with an
+  elliptic or spline loop is not carried. Otherwise geometry only; see `docs/pvec-hatch-policy.md`.
 - **Semantic class.** Walls and columns are classified from the DWG (`tests/pvec_classify_1233.rs`), the class stream itself is PVec's.
 
 ## Streams are optional
