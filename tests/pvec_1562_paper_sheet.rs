@@ -1124,3 +1124,19 @@ mod with_a_drawing {
         }
     }
 }
+
+/// Inches of model space on a millimetre sheet (#1610): 25.4 mm of paper to one drawing inch is
+/// full size, so a paper millimetre is a real millimetre, not a twenty-fifth of one.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1610_the_plot_scale_counts_drawing_units_in_the_drawings_own_unit() {
+    let (out, dir) = convert("1610-inches", scaled(25.4, 1.0), |c| {
+        c.unit(SourceUnit::Inches)
+    });
+    let s = out.unwrap().report.sheet.unwrap();
+    assert_eq!(s.scale.as_deref(), Some("127:5"));
+    let claim = stored_scale(&dir).expect("a scale record");
+    let metres = claim.metres_per_source_unit;
+    assert!((metres - 0.001).abs() < 1e-12, "{metres}");
+    let _ = fs::remove_dir_all(dir);
+}

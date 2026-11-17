@@ -632,8 +632,8 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     // A straight-edged polygon clip is drawn since #1565.
     assert_eq!(status(POLYGON), ("drawn", None));
     assert_eq!(status(ROUND), ("refused", Some("clip-circle")));
-    // A target off the origin moves the view in a way no reference print has measured.
-    assert_eq!(status(TARGETED), ("refused", Some("target")));
+    // A target off the origin shifts the view's display coordinates, and is drawn since #1610.
+    assert_eq!(status(TARGETED), ("drawn", None));
     // The scale is one paper unit to so many model units.
     assert_eq!(sheet_row(&report, VP_A).scale.as_deref(), Some("1:0.1"));
     assert_eq!(sheet_row(&report, VP_B).scale.as_deref(), Some("1:0.2"));
@@ -925,4 +925,20 @@ mod with_a_drawing {
             let _ = fs::remove_dir_all(dir);
         }
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1610_a_viewport_with_a_target_off_the_origin_draws_what_it_shows() {
+    // paper = centre + s * (model - target - view centre): s = 30 / 3 = 10, target (1, 1),
+    // view centre (0, 0), so model (0, 0)..(2, 0) lands on paper (200, 240)..(220, 240).
+    let mut mock = drawing(false);
+    mock.model.push(line(0x50, "0", [0.0, 0.0], [2.0, 0.0]));
+    let (out, dir) = convert("1610-target", mock, |c| c);
+    let report = out.expect("the sheet converts").report;
+    assert_eq!(
+        ends(&curve_of(&report, &dir, 0x50, TARGETED)),
+        [[200.0, 240.0], [220.0, 240.0]]
+    );
+    let _ = fs::remove_dir_all(dir);
 }

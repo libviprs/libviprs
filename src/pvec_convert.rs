@@ -225,6 +225,7 @@ pub struct PvecConversion<'a> {
     queue_capacity: usize,
     components: StreamSelection,
     regions: Option<RegionConfig>,
+    element_rules: Option<ElementRules>,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -245,7 +246,16 @@ impl<'a> PvecConversion<'a> {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             components: StreamSelection::NONE,
             regions: None,
+            element_rules: None,
         }
+    }
+
+    /// The layer, block, colour and lineweight rules that say which lines are walls for the
+    /// regions step, in place of [`ElementRules::default_profile`] (#1610).
+    #[must_use]
+    pub fn element_rules(mut self, rules: ElementRules) -> Self {
+        self.element_rules = Some(rules);
+        self
     }
 
     /// The component streams to write beside the geometry: layer, line style and provenance, each

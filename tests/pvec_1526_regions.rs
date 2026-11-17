@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use libviprs::cad::CadSource;
 use libviprs::pvec::SourceUnit;
+use libviprs::pvec::classify::{ElementClass, ElementRules, RuleMatch};
 use libviprs::pvec::components::StreamSelection;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::regions::RegionConfig;
@@ -264,5 +265,48 @@ fn issue_1526_a_dwg_with_walls_and_a_text_gives_one_named_room() {
     let classes = classes_of(&dest).unwrap();
     assert_eq!(classes.regions[0].kind, RegionKind::Room);
     assert_eq!(classes.regions[0].outer.len(), 4);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1610_generic_layer_names_fall_back_to_the_line_geometry() {
+    let (out, _, dir) = convert("generic", b"generic", StreamSelection::NONE, Some(config()));
+    let r = out.report.regions.expect("a regions section");
+    assert_eq!(
+        (r.rooms, r.corridors, r.gaps_closed),
+        (2, 1, 1),
+        "the same plan as the named layers"
+    );
+    assert_eq!(r.wall_source.as_deref(), Some("geometry"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1610_named_layers_still_decide_when_they_match() {
+    let (out, _, dir) = convert("named", b"plan", StreamSelection::NONE, Some(config()));
+    assert_eq!(
+        out.report.regions.unwrap().wall_source.as_deref(),
+        Some("layers")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1610_a_layer_mapping_names_the_walls() {
+    let rules = ElementRules::new().with_rule(RuleMatch::Layer("12".into()), ElementClass::Wall);
+    let dir = scratch("mapped");
+    let dest = dir.join("o.pvec");
+    let out = PvecConversion::new(CadSource::Bytes(b"generic"), &dest)
+        .unit(SourceUnit::Meters)
+        .element_rules(rules)
+        .regions(Some(config()))
+        .convert_with::<Mock>()
+        .unwrap();
+    let r = out.report.regions.unwrap();
+    assert_eq!((r.rooms, r.corridors), (2, 1));
+    assert_eq!(r.wall_source.as_deref(), Some("layers"));
     let _ = fs::remove_dir_all(dir);
 }
