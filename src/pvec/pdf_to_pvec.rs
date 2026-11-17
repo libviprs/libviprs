@@ -139,11 +139,13 @@ pub fn pdf_page_to_pvec_with(
             pieces
         }
 
-        // The viewer paints the page white, so a white fill adds nothing. One that is also stroked
-        // keeps its outline.
-        // A shading fill is not white whatever the last plain colour was.
+        // The viewer paints the page white, so an opaque white fill adds nothing. One that is also
+        // stroked keeps its outline. A white fill under 255 alpha is a wash over what is below it,
+        // so it stays. A shading fill is not white whatever the last plain colour was.
         let fills = entity.paint.fill.is_some()
-            && (entity.fill_pattern.is_some() || entity.fill_colour.iter().any(|&c| c < 250));
+            && (entity.fill_pattern.is_some()
+                || entity.fill_alpha < 255
+                || entity.fill_colour.iter().any(|&c| c < 250));
         let strokes = entity.paint.stroke;
         let mut runs = Vec::new();
         for (mut points, closed) in subpaths(entity) {
