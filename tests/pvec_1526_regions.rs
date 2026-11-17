@@ -151,12 +151,7 @@ fn issue_1526_geometry_is_identical_with_the_regions_step_on_and_off() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1526_a_text_inside_a_room_names_it_and_the_report_counts_the_named_ones() {
-    let (out, _, d1) = convert(
-        "1610-named",
-        b"labelled",
-        StreamSelection::NONE,
-        Some(config()),
-    );
+    let (out, _, d1) = convert("named", b"labelled", StreamSelection::NONE, Some(config()));
     assert_eq!(out.report.regions.unwrap().labelled, 2);
     let (out, _, d2) = convert("unnamed", b"plan", StreamSelection::NONE, Some(config()));
     assert_eq!(out.report.regions.unwrap().labelled, 0);
@@ -295,7 +290,12 @@ fn issue_1610_generic_layer_names_fall_back_to_the_line_geometry() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1610_named_layers_still_decide_when_they_match() {
-    let (out, _, dir) = convert("1610-named", b"plan", StreamSelection::NONE, Some(config()));
+    let (out, _, dir) = convert(
+        "1610-layers-match",
+        b"plan",
+        StreamSelection::NONE,
+        Some(config()),
+    );
     assert_eq!(
         out.report.regions.unwrap().wall_source.as_deref(),
         Some("layers")
