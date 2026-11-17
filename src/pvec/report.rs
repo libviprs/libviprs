@@ -283,6 +283,10 @@ pub struct RegionsSummary {
     /// `regions.face-limit`). The conversion carries on without regions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refused: Option<String>,
+    /// Where the walls came from: `layers` when the element rules named them, `geometry` when no
+    /// layer or block rule matched and every straight line stood in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wall_source: Option<String>,
 }
 
 /// What the print profile made of a paper layout (#1562): the sheet's frame, its unit, the plot

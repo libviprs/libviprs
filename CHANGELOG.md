@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sheet viewports and room detection on real plans** (issue #1610). A viewport whose view target is off the origin is drawn (`paper = centre + s * (model - target - view centre)`) instead of refused with `target`. The plot scale calibration counts drawing units in the drawing's own unit, so inches of model space on a millimetre sheet at 25.4:1 are 0.001 m per paper unit, not 0.001/25.4. The regions step falls back to every straight line that is not a column when no layer or block rule names a wall (the report's `regions.wall_source` says `geometry`), and `PvecConversion::element_rules` takes a layer mapping of its own.
+
 ### Added
 
 - **A plan's text and fills reach PVec's text and hatch streams, and a Z normal with rounding in it is the Z axis** (issue #1609). `PvecConversion::annotations(true)`, with the line style stream selected, carries DWG `TEXT`, `MTEXT`, a visible `ATTDEF`, `HATCH` and `SOLID` (through INSERTs too): a text is a record on a hidden two point anchor, a hatch or SOLID is a record over one hidden closed polyline per boundary loop, solid or by pattern name, angle and scale, in the entity's colour. `DwgProvider::annotation(handle)` (defaulted) is where a provider says what an entity draws. The report's `components.annotations` counts source entities by outcome (`TEXT.mapped`, `HATCH.unmapped`). Off by default. A hatch with an elliptic or spline loop stays unmapped. Separately, an extrusion normal that is the Z axis up to rounding (`1.0000000000000002`, an `x` of `1e-16`) now counts as the Z axis for INSERTs and for the conics and polylines `dwg_basic` reads, so those expand and map instead of coming back `extrusion-not-applied`; a block set in a vertical plane still has no footprint in a plan and is still skipped.

@@ -632,8 +632,8 @@ fn issue_1563_each_viewport_says_what_it_did_and_the_refused_ones_say_why() {
     // A straight-edged polygon clip is drawn since #1565.
     assert_eq!(status(POLYGON), ("drawn", None));
     assert_eq!(status(ROUND), ("refused", Some("clip-circle")));
-    // A target off the origin moves the view in a way no reference print has measured.
-    assert_eq!(status(TARGETED), ("refused", Some("target")));
+    // A target off the origin shifts the view's display coordinates, and is drawn since #1610.
+    assert_eq!(status(TARGETED), ("drawn", None));
     // The scale is one paper unit to so many model units.
     assert_eq!(sheet_row(&report, VP_A).scale.as_deref(), Some("1:0.1"));
     assert_eq!(sheet_row(&report, VP_B).scale.as_deref(), Some("1:0.2"));
@@ -880,8 +880,9 @@ fn issue_1563_draw_viewports_first_puts_what_they_show_under_the_sheet() {
 #[cfg_attr(miri, ignore)]
 fn issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note() {
     let mut mock = drawing(false);
-    // B and the no-plot one, and the polygon viewport, which is drawn since #1565.
-    let gone = |h: u64| h == VP_B || h == NO_PLOT_VP || h == POLYGON;
+    // B, the no-plot one, the polygon viewport (drawn since #1565) and the targeted one (drawn
+    // since #1610).
+    let gone = |h: u64| h == VP_B || h == NO_PLOT_VP || h == POLYGON || h == TARGETED;
     mock.viewports.retain(|v| !gone(v.handle.get()));
     mock.paper
         .retain(|e| !e.provenance.handle.is_some_and(|h| gone(h.get())));
@@ -925,4 +926,20 @@ mod with_a_drawing {
             let _ = fs::remove_dir_all(dir);
         }
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1610_a_viewport_with_a_target_off_the_origin_draws_what_it_shows() {
+    // paper = centre + s * (model - target - view centre): s = 30 / 3 = 10, target (1, 1),
+    // view centre (0, 0), so model (0, 0)..(2, 0) lands on paper (200, 240)..(220, 240).
+    let mut mock = drawing(false);
+    mock.model.push(line(0x50, "0", [0.0, 0.0], [2.0, 0.0]));
+    let (out, dir) = convert("1610-target", mock, |c| c);
+    let report = out.expect("the sheet converts").report;
+    assert_eq!(
+        ends(&curve_of(&report, &dir, 0x50, TARGETED)),
+        [[200.0, 240.0], [220.0, 240.0]]
+    );
+    let _ = fs::remove_dir_all(dir);
 }

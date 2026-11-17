@@ -103,7 +103,9 @@ use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::ordering::key_cmp;
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::publish::{PublishError, StreamedPublishError, publish_streamed_with};
-use crate::pvec::regions::{RegionConfig, RoomLabel, WallEdge, derive_regions, semantic_stream};
+use crate::pvec::regions::{
+    MAX_EDGES, RegionConfig, RoomLabel, WallEdge, derive_regions, semantic_stream,
+};
 use crate::pvec::report::{
     BoundsSplit, CapabilitySummary, ComponentsSummary, ConversionReport, EntityRow, RegionsSummary,
     ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, SheetViewport, UnresolvedXrefRow,
@@ -230,6 +232,7 @@ pub struct PvecConversion<'a> {
     components: StreamSelection,
     regions: Option<RegionConfig>,
     annotations: bool,
+    element_rules: Option<ElementRules>,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -251,6 +254,7 @@ impl<'a> PvecConversion<'a> {
             components: StreamSelection::NONE,
             regions: None,
             annotations: false,
+            element_rules: None,
         }
     }
 
@@ -266,6 +270,14 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// The layer, block, colour and lineweight rules that say which lines are walls for the
+    /// regions step, in place of [`ElementRules::default_profile`] (#1610).
+    #[must_use]
+    pub fn element_rules(mut self, rules: ElementRules) -> Self {
+        self.element_rules = Some(rules);
+        self
+    }
+
     /// The component streams to write beside the geometry: layer, line style and provenance, each
     /// on its own (#1525). Off by default, and the decoded geometry and the manifest box are the same either way.
     #[must_use]
@@ -276,7 +288,8 @@ impl<'a> PvecConversion<'a> {
 
     /// Derive rooms and corridors from the wall linework and write them as PVec's semantic class
     /// stream (#1526). Off (`None`) by default. The walls are the straight lines the default
-    /// [`ElementRules`] call a wall, the room names come from TEXT, and the decoded
+    /// [`ElementRules`] (or those given to [`element_rules`](Self::element_rules)) call a wall, and
+    /// when no rule matches anything, every straight line that is not a column (#1610), the room names come from TEXT, and the decoded
     /// geometry and the manifest box are the same either way: the segments that close a door gap are
     /// never written as geometry, so a room that runs along one is left out of the stream and counted
     /// in the report. Explicit rooms are not passed, so only inferred regions come out.
@@ -490,6 +503,7 @@ impl<'a> PvecConversion<'a> {
             components,
             regions,
             annotations,
+            element_rules,
             calibration: caller_calibration,
             ..
         } = self;
@@ -570,13 +584,6 @@ impl<'a> PvecConversion<'a> {
                 } else if v.twist != 0.0 {
                     // The twist sign is not measured against AutoCAD yet (the ADR's open item).
                     Window::Refused("twist")
-                } else if v.view_target[0] != 0.0 || v.view_target[1] != 0.0 {
-                    // The view centre is in display coordinates, whose origin is the target (DXF,
-                    // and acadrust's own docs), so a target off the origin moves the view. No
-                    // reference print measures that, so it is refused rather than drawn somewhere
-                    // that may be wrong. The gold probes keep their targets at the origin
-                    // (pvec-gold-fixtures#102), as AutoCAD's plan views do.
-                    Window::Refused("target")
                 } else {
                     // A rectangle, or a polygon with straight edges (#1565), whose vertices are
                     // in paper units and cut what the viewport shows. A bulged edge or a curved
@@ -603,8 +610,9 @@ impl<'a> PvecConversion<'a> {
                     match polygon {
                         Err(why) => Window::Refused(why),
                         Ok(ring) => {
-                            // paper = centre + s * (model - view centre), for a plan view whose
-                            // target is the origin.
+                            // paper = centre + s * (model - target - view centre), for a plan view.
+                            // The view centre is in display coordinates, whose origin is the target
+                            // (DXF), so a target off the origin shifts the view (#1610).
                             let s = v.height / v.view_height;
                             let (hw, hh) = (v.width / 2.0, v.height / 2.0);
                             let rect = match &ring {
@@ -637,8 +645,8 @@ impl<'a> PvecConversion<'a> {
                                     0.0,
                                     0.0,
                                     s,
-                                    v.center[0] - s * v.view_center[0],
-                                    v.center[1] - s * v.view_center[1],
+                                    v.center[0] - s * (v.view_center[0] + v.view_target[0]),
+                                    v.center[1] - s * (v.view_center[1] + v.view_target[1]),
                                 ],
                                 rect,
                                 ring,
@@ -800,6 +808,14 @@ impl<'a> PvecConversion<'a> {
                                 Some((u32::try_from(a / x).ok()?, u32::try_from(b / x).ok()?))
                             });
                             let paper = metres_per_unit(sheet_unit).ok();
+                            // The scale is paper units to drawing units, so a paper unit is
+                            // `den / num` drawing units, each the size of the drawing's own unit.
+                            // Inches of model space on a millimetre sheet are not millimetres
+                            // (#1610). A drawing that names no length unit stands in the sheet's.
+                            let drawing = unit
+                                .filter(|u| u.is_physical())
+                                .and_then(|u| metres_per_unit(u).ok())
+                                .or(paper);
                             let claim = reduced.zip(paper).map(|((num, den), paper)| {
                                 let raw = n / d;
                                 let mut note = if uncertain {
@@ -811,7 +827,9 @@ impl<'a> PvecConversion<'a> {
                                     note.push_str(&format!("; viewport {one}"));
                                 }
                                 ScaleClaim {
-                                    metres_per_source_unit: paper * f64::from(den) / f64::from(num),
+                                    metres_per_source_unit: drawing.unwrap_or(paper)
+                                        * f64::from(den)
+                                        / f64::from(num),
                                     provenance: ScaleProvenance::PlanScale {
                                         numerator: num,
                                         denominator: den,
@@ -1097,8 +1115,15 @@ impl<'a> PvecConversion<'a> {
         // record, a diagnostic and a tally entry. They meet in a bounded queue, so a slow consumer
         // makes the producer wait instead of letting outcomes pile up.
         // The wall lines and the room names the regions step reads, in canonical order.
-        let rules = regions.is_some().then(ElementRules::default_profile);
+        let rules = regions.is_some().then(|| {
+            element_rules
+                .clone()
+                .unwrap_or_else(ElementRules::default_profile)
+        });
         let mut walls: Vec<WallEdge> = Vec::new();
+        // Every straight line no rule calls a column, for a drawing whose layers name nothing (#1610).
+        // Used only when the rules find no wall at all; capped at what the step would refuse anyway.
+        let mut lines: Vec<WallEdge> = Vec::new();
         let mut labels: Vec<RoomLabel> = Vec::new();
         // The texts and hatches carried in streams (#1609): the entity a text hangs on, the entities
         // a hatch lists, and how many of each class were mapped or not.
@@ -1753,14 +1778,20 @@ impl<'a> PvecConversion<'a> {
                     if let (Some(rules), Item::Leaf(f), true) = (&rules, item, whole) {
                         match &raw.geometry {
                             RawGeometry::Line { start, end }
-                                if done.geometry.geometry().is_some()
-                                    && rules.classify(raw).class == ElementClass::Wall =>
+                                if done.geometry.geometry().is_some() =>
                             {
-                                walls.push(WallEdge {
+                                let class = rules.classify(raw).class;
+                                let edge = WallEdge {
                                     entity: id,
                                     start: f.map_point(*start),
                                     end: f.map_point(*end),
-                                });
+                                };
+                                if class == ElementClass::Wall {
+                                    walls.push(edge);
+                                } else if class != ElementClass::Column && lines.len() <= MAX_EDGES
+                                {
+                                    lines.push(edge);
+                                }
                             }
                             RawGeometry::Unmapped { .. }
                                 if matches!(
@@ -1914,6 +1945,14 @@ impl<'a> PvecConversion<'a> {
                 .collect(),
             resolved: Vec::new(),
         };
+        // No rule named a wall, so the layer names carry no meaning here: the straight lines are
+        // the walls, and the derivation drops the ones that join nothing (#1610).
+        let wall_source = if walls.is_empty() && !lines.is_empty() {
+            walls = lines;
+            "geometry"
+        } else {
+            "layers"
+        };
         Ok(Classified {
             geometries: consumed.geometries,
             stored: consumed.stored,
@@ -1926,6 +1965,7 @@ impl<'a> PvecConversion<'a> {
             peak_queue_depth: consumed.peak,
             sides: consumed.sides,
             walls,
+            wall_source,
             labels,
             texts,
             fills,
@@ -1951,6 +1991,7 @@ impl<'a> PvecConversion<'a> {
             peak_queue_depth,
             sides,
             walls,
+            wall_source,
             labels,
             texts,
             fills,
@@ -2138,7 +2179,10 @@ impl<'a> PvecConversion<'a> {
             }
             let mut found = None;
             if let Some(config) = &regions {
-                let mut report = RegionsSummary::default();
+                let mut report = RegionsSummary {
+                    wall_source: Some(wall_source.to_owned()),
+                    ..Default::default()
+                };
                 match derive_regions(&walls, &labels, &[], config) {
                     // A plan past a limit converts without regions, and the report says which limit.
                     Err(e) => report.refused = Some(e.reason_code().to_owned()),
@@ -2273,6 +2317,8 @@ struct Classified {
     sides: Vec<(EntityId, Side)>,
     /// The straight wall leaves and the text anchors the regions step reads; empty when it is off.
     walls: Vec<WallEdge>,
+    /// `geometry` when the walls are every straight line because no rule matched, else `layers`.
+    wall_source: &'static str,
     labels: Vec<RoomLabel>,
     /// The texts and hatches carried in streams, and the count of each class by outcome (#1609).
     texts: Vec<(EntityId, TextBody)>,
