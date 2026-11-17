@@ -151,7 +151,12 @@ fn issue_1526_geometry_is_identical_with_the_regions_step_on_and_off() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1526_a_text_inside_a_room_names_it_and_the_report_counts_the_named_ones() {
-    let (out, _, d1) = convert("named", b"labelled", StreamSelection::NONE, Some(config()));
+    let (out, _, d1) = convert(
+        "1610-named",
+        b"labelled",
+        StreamSelection::NONE,
+        Some(config()),
+    );
     assert_eq!(out.report.regions.unwrap().labelled, 2);
     let (out, _, d2) = convert("unnamed", b"plan", StreamSelection::NONE, Some(config()));
     assert_eq!(out.report.regions.unwrap().labelled, 0);
@@ -271,7 +276,12 @@ fn issue_1526_a_dwg_with_walls_and_a_text_gives_one_named_room() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1610_generic_layer_names_fall_back_to_the_line_geometry() {
-    let (out, _, dir) = convert("generic", b"generic", StreamSelection::NONE, Some(config()));
+    let (out, _, dir) = convert(
+        "1610-generic",
+        b"generic",
+        StreamSelection::NONE,
+        Some(config()),
+    );
     let r = out.report.regions.expect("a regions section");
     assert_eq!(
         (r.rooms, r.corridors, r.gaps_closed),
@@ -285,7 +295,7 @@ fn issue_1610_generic_layer_names_fall_back_to_the_line_geometry() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1610_named_layers_still_decide_when_they_match() {
-    let (out, _, dir) = convert("named", b"plan", StreamSelection::NONE, Some(config()));
+    let (out, _, dir) = convert("1610-named", b"plan", StreamSelection::NONE, Some(config()));
     assert_eq!(
         out.report.regions.unwrap().wall_source.as_deref(),
         Some("layers")
@@ -297,7 +307,7 @@ fn issue_1610_named_layers_still_decide_when_they_match() {
 #[cfg_attr(miri, ignore)]
 fn issue_1610_a_layer_mapping_names_the_walls() {
     let rules = ElementRules::new().with_rule(RuleMatch::Layer("12".into()), ElementClass::Wall);
-    let dir = scratch("mapped");
+    let dir = scratch("1610-mapped");
     let dest = dir.join("o.pvec");
     let out = PvecConversion::new(CadSource::Bytes(b"generic"), &dest)
         .unit(SourceUnit::Meters)

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Sheet viewports and room detection on real plans** (issue #1610). A viewport whose view target is off the origin is drawn (`paper = centre + s * (model - target - view centre)`) instead of refused with `target`. The plot scale calibration counts drawing units in the drawing's own unit, so inches of model space on a millimetre sheet at 25.4:1 are 0.001 m per paper unit, not 0.001/25.4. The regions step falls back to every straight line that is not a column when no layer or block rule names a wall (the report's `regions.wall_source` says `geometry`), and `PvecConversion::element_rules` takes a layer mapping of its own.
+
 ### Added
 
 - **`pdf_page_to_pvec` writes the text of the page, and its images when asked** (issue #1578, L6 and L7). Each fill-mode `Tj`, `TJ`, `'` and `"` becomes a text record (capability 1) on a hidden two point anchor that carries the text colour through the stroke paint stream, with its own `pdf-text-anchor` line style next to the `pdf-clip-ring` and `pdf-fill-ring` ones. The text parameters (`Tc`, `Tw`, `Tz`, `TL`, `Tf`, `Ts`) are saved and restored on `q` and `Q`. The strings are decoded through `/ToUnicode`; a Type0 font without one stays omitted, as `docs/pvec-text-policy.md` says. Baking every image takes minutes on a scanned sheet, so `pdf_page_to_pvec` leaves the images out and `pdf_page_to_pvec_with(.., true)` bakes them into the raster capability, each placed by its CTM. Tests in `tests/pvec_1578_e_text_images.rs` (blueprint-mix) and `tests/pvec_1578_e_text_state.rs` (small pages).

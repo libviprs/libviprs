@@ -800,7 +800,9 @@ fn scaled(numerator: f64, denominator: f64) -> Mock {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1562_the_plot_scale_is_the_calibration_record() {
-    let (out, dir) = convert("scale", scaled(1.0, 100.0), |c| c);
+    let (out, dir) = convert("scale", scaled(1.0, 100.0), |c| {
+        c.unit(SourceUnit::Millimeters)
+    });
     let s = out.unwrap().report.sheet.unwrap();
     assert_eq!(s.calibration, "plot-scale");
     assert_eq!(s.scale.as_deref(), Some("1:100"));
@@ -821,7 +823,9 @@ fn issue_1562_the_plot_scale_is_the_calibration_record() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1562_a_decimal_plot_scale_is_reduced_to_coprime_integers() {
-    let (out, dir) = convert("decimal", scaled(0.5, 1.25), |c| c);
+    let (out, dir) = convert("decimal", scaled(0.5, 1.25), |c| {
+        c.unit(SourceUnit::Millimeters)
+    });
     assert_eq!(
         out.unwrap().report.sheet.unwrap().scale.as_deref(),
         Some("2:5")

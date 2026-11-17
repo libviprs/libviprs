@@ -880,8 +880,9 @@ fn issue_1563_draw_viewports_first_puts_what_they_show_under_the_sheet() {
 #[cfg_attr(miri, ignore)]
 fn issue_1563_one_viewport_onto_the_model_puts_its_scale_in_the_calibration_note() {
     let mut mock = drawing(false);
-    // B and the no-plot one, and the polygon viewport, which is drawn since #1565.
-    let gone = |h: u64| h == VP_B || h == NO_PLOT_VP || h == POLYGON;
+    // B, the no-plot one, the polygon viewport (drawn since #1565) and the targeted one (drawn
+    // since #1610).
+    let gone = |h: u64| h == VP_B || h == NO_PLOT_VP || h == POLYGON || h == TARGETED;
     mock.viewports.retain(|v| !gone(v.handle.get()));
     mock.paper
         .retain(|e| !e.provenance.handle.is_some_and(|h| gone(h.get())));
