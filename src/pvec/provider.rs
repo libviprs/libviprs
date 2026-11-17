@@ -652,6 +652,45 @@ pub enum RawGeometry {
     },
 }
 
+/// What a text-like or fill-like entity draws, in the coordinates of the block it sits in, for the
+/// text and hatch component streams (#1609). A provider that cannot report one says nothing.
+///
+/// Not part of [`RawGeometry`]: PVec carries neither as a curve, so the entity stays
+/// [`RawGeometry::Unmapped`] and the conversion asks for this by handle.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Annotation {
+    /// One run of text: `TEXT`, `MTEXT` or a visible `ATTDEF`.
+    Text {
+        /// The insertion point.
+        position: Point3,
+        /// The text height, strictly positive.
+        height: f64,
+        /// The rotation in radians.
+        rotation: f64,
+        /// The characters to draw, with the drawing's formatting codes already read.
+        content: String,
+        /// The extrusion normal.
+        normal: Point3,
+    },
+    /// A filled region: `HATCH` or `SOLID`.
+    Fill {
+        /// One closed ring per boundary loop, in the plane at `elevation`.
+        rings: Vec<Vec<RawVertex>>,
+        /// The plane height of the rings.
+        elevation: f64,
+        /// The extrusion normal.
+        normal: Point3,
+        /// For a pattern fill, its name, angle in radians and scale; `None` for a solid fill.
+        pattern: Option<(String, f64, f64)>,
+        /// The fill colour as red, green, blue and alpha, one byte each.
+        rgba: u32,
+        /// Boundary loops the provider could not read (elliptic or spline edges, or edges that do
+        /// not join). A fill with any is not a region the stream can describe whole.
+        unread_loops: u32,
+    },
+}
+
 /// A colour as the drawing states it, after the BYLAYER rule has been applied.
 ///
 /// There is no `ByLayer` arm: a provider resolves BYLAYER through the layer table, so
@@ -1154,6 +1193,14 @@ pub trait DwgProvider {
     /// coordinates of the block it sits in, or `None` for any other entity (#1526). The conversion
     /// reads room names off it. The default has no text to give.
     fn text_anchor(&self, handle: ItemHandle) -> Option<(String, Point3)> {
+        let _ = handle;
+        None
+    }
+
+    /// What the `TEXT`, `MTEXT`, `ATTDEF`, `HATCH` or `SOLID` entity with this handle draws, or
+    /// `None` for any other entity, for one that is not drawn (an invisible attribute definition)
+    /// or when the provider has nothing to give (#1609). The default has none.
+    fn annotation(&self, handle: ItemHandle) -> Option<Annotation> {
         let _ = handle;
         None
     }

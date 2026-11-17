@@ -877,3 +877,23 @@ fn the_module_defines_no_tolerance() {
         }
     }
 }
+
+#[test]
+fn issue_1609_a_normal_that_is_the_z_axis_up_to_rounding_is_the_z_axis() {
+    // The ellipses of a real plan carry `1.0000000000000002` and `0.9999999999999998`.
+    for z in [1.000_000_000_000_000_2, 0.999_999_999_999_999_8] {
+        let src = ellipse([1.0, 2.0, 0.0], [3.0, 1.0, 0.0], 0.5, 0.0, 1.0);
+        let flat = extract_ellipse(&src).unwrap();
+        let up = extract_ellipse(&with_normal(src.clone(), [0.0, 0.0, z])).expect("mapped");
+        assert!(same_ends(ends(&up), ends(&flat)));
+        let down = extract_ellipse(&with_normal(src, [0.0, 0.0, -z])).expect("mapped");
+        assert!(same_ends(ends(&down), mirrored_ends(&flat)));
+    }
+}
+
+#[test]
+fn issue_1609_a_tilt_of_a_millionth_is_still_refused() {
+    let n = [0.0, 1e-6, 1.0];
+    let err = extract_arc(&with_normal(arc([0.0; 3], 1.0, 0.0, 1.0), n)).unwrap_err();
+    assert_eq!(err, BasicError::ExtrusionNotApplied { normal: n });
+}

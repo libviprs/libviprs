@@ -225,6 +225,7 @@ pub struct PvecConversion<'a> {
     queue_capacity: usize,
     components: StreamSelection,
     regions: Option<RegionConfig>,
+    annotations: bool,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -245,7 +246,20 @@ impl<'a> PvecConversion<'a> {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             components: StreamSelection::NONE,
             regions: None,
+            annotations: false,
         }
+    }
+
+    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Off by
+    /// default, and it only takes effect with the line style stream selected
+    /// ([`components`](Self::components)): each text is anchored on a short polyline and each hatch
+    /// boundary is an entity of its own, and the line style stream is what marks those hidden, so
+    /// without it they would draw as stray lines. With it off, or without the line style stream,
+    /// these classes are counted as unmapped, as before.
+    #[must_use]
+    pub fn annotations(mut self, on: bool) -> Self {
+        self.annotations = on;
+        self
     }
 
     /// The component streams to write beside the geometry: layer, line style and provenance, each
@@ -1996,6 +2010,7 @@ impl<'a> PvecConversion<'a> {
                     streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
                     dropped: BTreeMap::new(),
                     colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
+                    annotations: BTreeMap::new(),
                 };
                 let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
                 for d in &built.dropped {
