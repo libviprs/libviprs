@@ -24,8 +24,10 @@
 //! N1.5) is `transform::promote`'s, not repeated here.
 //!
 //! An INSERT whose extrusion normal is `-Z` is the OCS mirror `x -> -x`, applied outside the INSERT's
-//! own map. A normal that is not parallel to Z needs a 3D placement the 2D adapter does not carry, so
-//! that INSERT is skipped and classified `RequiresExtension`, never dropped.
+//! own map. A normal that is the Z axis up to rounding counts as the Z axis (#1609). A normal that is
+//! not parallel to Z needs a 3D placement the 2D adapter does not carry (a block set in a wall's
+//! plane has no footprint in a plan), so that INSERT is skipped and classified `RequiresExtension`,
+//! never dropped.
 //!
 //! # Lineage
 //!
@@ -48,7 +50,7 @@ use super::normalized::ProvenanceHandle;
 use super::provenance::{Provenance, ProvenanceSink};
 use super::provider::{
     BlockRef, DwgProvider, EntityCursor, EntityScope, InstancePath, InstanceStep, Point3,
-    ProviderError, RawEntity, RawGeometry,
+    ProviderError, RawEntity, RawGeometry, z_axis_flip,
 };
 use super::transform::{ComposeError, ComposedTransform, LineageLevel};
 
@@ -226,6 +228,20 @@ impl FlatEntity {
                 p * tx + q * ty + u,
                 r * tx + s * ty + v,
             ],
+            lineage: self.lineage,
+        }
+    }
+}
+
+impl FlatEntity {
+    /// This leaf's map and lineage over another entity: what stands in for it when it is carried by
+    /// entities of its own (#1609).
+    #[cfg(feature = "pvec-convert")]
+    #[must_use]
+    pub(crate) fn carrying(&self, entity: RawEntity) -> FlatEntity {
+        FlatEntity {
+            entity,
+            matrix: self.matrix,
             lineage: self.lineage,
         }
     }
@@ -592,7 +608,7 @@ impl<S: ProvenanceSink> Walk<'_, S> {
             );
             return Ok(None);
         };
-        let Some(mirror_x) = ocs_mirror(r.normal) else {
+        let Some(mirror_x) = z_axis_flip(r.normal) else {
             skip(
                 self,
                 SkipReason::NormalNotZ,
@@ -654,18 +670,6 @@ impl<S: ProvenanceSink> Walk<'_, S> {
             lineage: handle,
         });
         Ok(())
-    }
-}
-
-/// `Some(false)` for +Z, `Some(true)` for -Z (the OCS mirror `x -> -x`), `None` for anything the
-/// 2D adapter cannot carry. The tests are exact: a normal a drawing stores as the Z axis is
-/// exactly `(0, 0, +-1)`, and anything else is a 3D placement.
-fn ocs_mirror(normal: Point3) -> Option<bool> {
-    let [x, y, z] = normal;
-    if x == 0.0 && y == 0.0 && z.is_finite() && z != 0.0 {
-        Some(z < 0.0)
-    } else {
-        None
     }
 }
 

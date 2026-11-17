@@ -56,13 +56,13 @@ use acadrust as acr;
 use acr::objects::ObjectType;
 use acr::{DwgReader, DxfReader, EntityType};
 
-use crate::cad::{CadSource, Fill, ItemHandle};
+use crate::cad::{CadSource, Fill, ItemHandle, decode_escapes, display_text};
 use crate::pvec::provider::{
-    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
-    EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutPlot,
-    LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry,
-    RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform,
-    TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
+    EntityScope, EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind,
+    LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
+    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
+    SourceTransform, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -493,6 +493,27 @@ impl AcadrustProvider {
         }
     }
 
+    /// The colour a fill is drawn in, as red, green, blue and alpha: its own colour, or its layer's
+    /// for BYLAYER. A fill whose colour is BYBLOCK (the INSERT's, which the provider cannot see)
+    /// or has none is black.
+    fn fill_rgba(&self, common: &acr::entities::EntityCommon) -> u32 {
+        let layer_colour = || {
+            let found = self.doc.layers.get(&common.layer).or_else(|| {
+                self.doc
+                    .layers
+                    .iter()
+                    .find(|l| l.name.eq_ignore_ascii_case(&common.layer))
+            });
+            found.map(|l| l.color)
+        };
+        let colour = match common.color {
+            acr::Color::ByLayer => layer_colour().unwrap_or(acr::Color::None),
+            c => c,
+        };
+        let (r, g, b) = colour.rgb().unwrap_or((0, 0, 0));
+        u32::from_be_bytes([r, g, b, 255])
+    }
+
     fn capabilities() -> ProviderCaps {
         Facet::ALL.iter().fold(ProviderCaps::new(), |caps, f| {
             caps.with(*f, Availability::Reported, FacetSource::DecoderDirect)
@@ -776,6 +797,120 @@ impl DwgProvider for AcadrustProvider {
         self.text_fact(handle).map(|t| (t.content, t.position))
     }
 
+    fn inserted_attribute(&self, attdef: ItemHandle, insert: ItemHandle) -> Option<Annotation> {
+        let EntityType::AttributeDefinition(a) =
+            self.doc.get_entity(acr::Handle::new(attdef.get()))?
+        else {
+            return None;
+        };
+        // A constant definition carries its own value into every INSERT. Any other shows what the
+        // INSERT's ATTRIB with that tag holds, and nothing when there is none: the tag is the
+        // block editor's placeholder, not something AutoCAD draws in a drawing.
+        let content = if a.flags.constant {
+            (!a.flags.invisible).then(|| a.default_value.clone())?
+        } else {
+            let EntityType::Insert(i) = self.doc.get_entity(acr::Handle::new(insert.get()))? else {
+                return None;
+            };
+            i.attributes
+                .iter()
+                .find(|v| v.tag.eq_ignore_ascii_case(&a.tag))
+                .filter(|v| v.is_visible())?
+                .value
+                .clone()
+        };
+        text(
+            a.insertion_point,
+            a.height,
+            a.rotation,
+            a.normal,
+            decode_escapes(&content),
+        )
+    }
+
+    fn annotation(&self, handle: ItemHandle) -> Option<Annotation> {
+        let entity = self.doc.get_entity(acr::Handle::new(handle.get()))?;
+        match entity {
+            EntityType::Text(t) => text(
+                t.insertion_point,
+                t.height,
+                t.rotation,
+                t.normal,
+                decode_escapes(&t.value),
+            ),
+            EntityType::MText(m) => text(
+                m.insertion_point,
+                m.height,
+                m.rotation,
+                m.normal,
+                decode_escapes(&display_text(&m.value).text),
+            ),
+            // A definition outside any INSERT shows its tag, and an invisible one never. Inside an
+            // INSERT it goes through `inserted_attribute`.
+            EntityType::AttributeDefinition(a) if !a.flags.invisible => text(
+                a.insertion_point,
+                a.height,
+                a.rotation,
+                a.normal,
+                decode_escapes(if a.tag.is_empty() {
+                    &a.default_value
+                } else {
+                    &a.tag
+                }),
+            ),
+            EntityType::Hatch(h) => {
+                let mut drawn = DrawnFact::default();
+                hatch_rings(h, &mut drawn);
+                Some(Annotation::Fill {
+                    rings: drawn.rings,
+                    elevation: drawn.elevation,
+                    normal: drawn.normal,
+                    pattern: (!h.is_solid).then(|| {
+                        let scale = h.pattern_scale;
+                        (
+                            h.pattern.name.clone(),
+                            h.pattern_angle,
+                            if scale > 0.0 && scale.is_finite() {
+                                scale
+                            } else {
+                                1.0
+                            },
+                        )
+                    }),
+                    rgba: self.fill_rgba(&h.common),
+                    unread_loops: u32::try_from(drawn.skipped.len()).unwrap_or(u32::MAX),
+                })
+            }
+            EntityType::Solid(s) => {
+                // A triangle repeats a corner, and a ring with a repeated vertex is not a boundary.
+                let mut ring: Vec<RawVertex> = Vec::new();
+                for c in s.boundary_corners() {
+                    if ring.last().is_none_or(|v| (v.x, v.y) != (c.x, c.y)) {
+                        ring.push(RawVertex {
+                            x: c.x,
+                            y: c.y,
+                            bulge: 0.0,
+                        });
+                    }
+                }
+                if ring.len() > 1
+                    && (ring[0].x, ring[0].y) == (ring[ring.len() - 1].x, ring[ring.len() - 1].y)
+                {
+                    ring.pop();
+                }
+                Some(Annotation::Fill {
+                    elevation: s.boundary_corners().first().map_or(0.0, |c| c.z),
+                    rings: vec![ring],
+                    normal: p3(s.normal),
+                    pattern: None,
+                    rgba: self.fill_rgba(&s.common),
+                    unread_loops: 0,
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn text_styles(
         &self,
         scope: &EntityScope,
@@ -822,6 +957,24 @@ impl DwgProvider for AcadrustProvider {
             base_points: BTreeMap::new(),
         }))
     }
+}
+
+/// A run of text as an [`Annotation`], or `None` for one that draws nothing: with no height or no
+/// characters, which the stream refuses.
+fn text(
+    position: acr::Vector3,
+    height: f64,
+    rotation: f64,
+    normal: acr::Vector3,
+    content: String,
+) -> Option<Annotation> {
+    (height > 0.0 && height.is_finite() && !content.trim().is_empty()).then(|| Annotation::Text {
+        position: p3(position),
+        height,
+        rotation,
+        content,
+        normal: p3(normal),
+    })
 }
 
 impl AcadrustProvider {

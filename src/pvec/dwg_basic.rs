@@ -15,7 +15,7 @@ use pvec_geometry::{
 use pvec_numeric::{MAX_POLYLINE_VERTICES, NumericError};
 
 use super::fidelity::{Basis, Classification, ReasonCode};
-use super::provider::{Point3, RawEntity, RawGeometry, RawVertex};
+use super::provider::{Point3, RawEntity, RawGeometry, RawVertex, z_axis_flip};
 
 /// Which basic source class an extraction came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -216,18 +216,13 @@ fn z_of(field: &'static str, z: f64) -> Result<f64, BasicError> {
 
 /// Whether an entity's object coordinate system is mirrored against the world's.
 ///
-/// The arbitrary axis algorithm turns a normal of exactly (0, 0, -1) into the axes
+/// The arbitrary axis algorithm turns a normal of (0, 0, -1) into the axes
 /// `Ax = (-1, 0, 0)`, `Ay = (0, 1, 0)`, so a point `(x, y, z)` in the entity's own system is
-/// `(-x, y, -z)` in the world: a mirror about the y axis plus a flipped elevation. Any other
-/// normal tilts the plane out of the drawing's, which PVec's 2D model cannot carry.
+/// `(-x, y, -z)` in the world: a mirror about the y axis plus a flipped elevation. A normal that is
+/// the Z axis up to rounding counts as the Z axis ([`z_axis_flip`]). Any other normal tilts the
+/// plane out of the drawing's, which PVec's 2D model cannot carry.
 fn ocs_mirrored(normal: Point3) -> Result<bool, BasicError> {
-    if normal == [0.0, 0.0, 1.0] {
-        Ok(false)
-    } else if normal == [0.0, 0.0, -1.0] {
-        Ok(true)
-    } else {
-        Err(BasicError::ExtrusionNotApplied { normal })
-    }
+    z_axis_flip(normal).ok_or(BasicError::ExtrusionNotApplied { normal })
 }
 
 /// Maps a finished extraction out of a mirrored object coordinate system, through PVec's own

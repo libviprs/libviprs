@@ -804,3 +804,35 @@ fn n3_6a_1277_entity_override_set_on_the_profile_reaches_the_guard() {
     };
     assert_eq!((limit, ceiling), (Limit::Entities, 2));
 }
+
+#[test]
+fn issue_1609_an_insert_normal_that_is_z_up_to_rounding_expands() {
+    let m = [1.0, 0.0, 0.0, 1.0, 10.0, 0.0];
+    for (normal, x) in [
+        ([-2.2e-16, -7.4e-17, 1.0], 12.0),
+        ([7.2e-110, -6.3e-108, 1.0], 12.0),
+        ([0.0, 0.0, -1.000_000_000_000_000_2], -12.0),
+    ] {
+        let mock = Mock::new(
+            vec![insert_with(Some(0x10), "B", m, normal, ArrayGrid::SINGLE)],
+            vec![("B", vec![line(0x20, [2.0, 3.0], [4.0, 5.0])])],
+        );
+        let (out, _, _) = run(&mock, FlattenBounds::default()).unwrap();
+        assert!(out.skipped.is_empty(), "{normal:?}");
+        assert_eq!(out.entities[0].map_point([2.0, 3.0, 0.0]), [x, 3.0]);
+    }
+}
+
+#[test]
+fn issue_1609_a_wall_elevation_insert_is_still_skipped() {
+    // A block set in a vertical plane has no footprint in a plan view.
+    for normal in [[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [-1.8e-16, 1.0, 0.0]] {
+        let mock = Mock::new(
+            vec![insert_with(Some(0x10), "B", ID, normal, ArrayGrid::SINGLE)],
+            vec![("B", vec![line(0x20, [0.0, 0.0], [1.0, 0.0])])],
+        );
+        let (out, _, _) = run(&mock, FlattenBounds::default()).unwrap();
+        assert!(out.entities.is_empty(), "{normal:?}");
+        assert_eq!(out.skipped[0].reason, SkipReason::NormalNotZ);
+    }
+}

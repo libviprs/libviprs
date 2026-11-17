@@ -27,6 +27,8 @@
 //! decoder it has, and this module only reuses two of its plain value types
 //! ([`CadSource`](crate::cad::CadSource) and [`ItemHandle`](crate::cad::ItemHandle)).
 
+#[cfg(feature = "pvec-convert")]
+pub(crate) mod annotation;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod bounds;
@@ -145,11 +147,11 @@ pub use pdf_vector::{
     extract_page_paths_from_bytes,
 };
 pub use provider::{
-    ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts, EntityScope,
-    EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState, LayoutId,
-    LayoutKind, LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError,
-    RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
-    SourceTransform, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
+    EntityScope, EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState,
+    LayoutId, LayoutKind, LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps,
+    ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype,
+    SourceLineweight, SourceTransform, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,

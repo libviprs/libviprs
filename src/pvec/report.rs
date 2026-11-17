@@ -252,6 +252,11 @@ pub struct ComponentsSummary {
     /// DWG colour indices seen and dropped under the monochrome policy. Counted only when the line style
     /// stream is selected, because that is the pass that reads an entity's style.
     pub colours_ignored: u64,
+    /// What became of each text and fill entity when annotations were asked for (#1609), keyed
+    /// `CLASS.outcome`: `TEXT.mapped`, `HATCH.unmapped`. Counts source entities, not curves: a
+    /// hatch of three boundary loops is one `HATCH.mapped`. Empty when they were not asked for.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub annotations: BTreeMap<String, u64>,
 }
 
 /// What the room and corridor step of a conversion found (#1526). Optional and ignorable, like

@@ -83,9 +83,13 @@ pub use pdf::{PdfConversion, PdfConversionOutput, PdfConvertError};
 use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
+use crate::pvec::annotation::{self, Body};
 use crate::pvec::bounds::BoundsReport;
 use crate::pvec::classify::{ElementClass, ElementRules};
-use crate::pvec::components::{ComponentSource, ComponentsError, StreamSelection, build_streams};
+use crate::pvec::components::{
+    ComponentSource, ComponentsError, FillBody, StreamSelection, TextBody, annotation_streams,
+    build_streams,
+};
 use crate::pvec::curve_clip::{CurveClip, CurveClipError, clip_curve};
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::pvec::dwg_acadrust::AcadrustProvider;
@@ -227,6 +231,7 @@ pub struct PvecConversion<'a> {
     queue_capacity: usize,
     components: StreamSelection,
     regions: Option<RegionConfig>,
+    annotations: bool,
     element_rules: Option<ElementRules>,
 }
 
@@ -248,8 +253,21 @@ impl<'a> PvecConversion<'a> {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             components: StreamSelection::NONE,
             regions: None,
+            annotations: false,
             element_rules: None,
         }
+    }
+
+    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Off by
+    /// default, and it only takes effect with the line style stream selected
+    /// ([`components`](Self::components)): each text is anchored on a short polyline and each hatch
+    /// boundary is an entity of its own, and the line style stream is what marks those hidden, so
+    /// without it they would draw as stray lines. With it off, or without the line style stream,
+    /// these classes are counted as unmapped, as before.
+    #[must_use]
+    pub fn annotations(mut self, on: bool) -> Self {
+        self.annotations = on;
+        self
     }
 
     /// The layer, block, colour and lineweight rules that say which lines are walls for the
@@ -484,6 +502,7 @@ impl<'a> PvecConversion<'a> {
             queue_capacity,
             components,
             regions,
+            annotations,
             element_rules,
             calibration: caller_calibration,
             ..
@@ -1106,6 +1125,12 @@ impl<'a> PvecConversion<'a> {
         // Used only when the rules find no wall at all; capped at what the step would refuse anyway.
         let mut lines: Vec<WallEdge> = Vec::new();
         let mut labels: Vec<RoomLabel> = Vec::new();
+        // The texts and hatches carried in streams (#1609): the entity a text hangs on, the entities
+        // a hatch lists, and how many of each class were mapped or not.
+        let annotate = *annotations && components.line_style;
+        let mut texts: Vec<(EntityId, TextBody)> = Vec::new();
+        let mut fills: Vec<(Vec<EntityId>, FillBody)> = Vec::new();
+        let mut annotation_counts: BTreeMap<String, u64> = BTreeMap::new();
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         /// The pieces of a line or straight polyline inside the sheet `b`, `[min x, min y, max x,
@@ -1667,6 +1692,77 @@ impl<'a> PvecConversion<'a> {
                         }
                     }
                 }
+                // A text, a hatch or a SOLID goes in a stream when the provider can say what it
+                // draws, and is counted as unmapped otherwise (#1609). Its carriers are written
+                // hidden, so only the model space of a drawing with no sheet clip is mapped.
+                let mut pending: Option<Body> = None;
+                if annotate
+                    && window.is_none()
+                    && clip_box.is_none()
+                    && let Item::Leaf(f) = item
+                    && matches!(raw.geometry, RawGeometry::Unmapped { .. })
+                    && matches!(
+                        raw.provenance.class_name.as_str(),
+                        "TEXT" | "MTEXT" | "ATTDEF" | "HATCH" | "SOLID"
+                    )
+                {
+                    let class = raw.provenance.class_name.as_str();
+                    let made = raw
+                        .provenance
+                        .handle
+                        .and_then(|h| match raw.provenance.block_path.steps().last() {
+                            Some(via) if class == "ATTDEF" => {
+                                provider.inserted_attribute(h, via.insert_handle)
+                            }
+                            _ => provider.annotation(h),
+                        })
+                        .ok_or("it draws nothing the provider can report")
+                        .and_then(|a| annotation::map(f, a));
+                    let carried = match made {
+                        Ok((carriers, body)) => carriers
+                            .into_iter()
+                            .map(|c| classify_leaf(&f.carrying(c), gate, None))
+                            .collect::<Result<Vec<_>, _>>()
+                            .map(|pieces| {
+                                pieces
+                                    .iter()
+                                    .all(|d| d.geometry.geometry().is_some())
+                                    .then_some((pieces, body))
+                            }),
+                        Err(why) => {
+                            done.warnings.push(format!("{class}: not carried, {why}"));
+                            Ok(None)
+                        }
+                    };
+                    match carried {
+                        Err(e) => {
+                            failure = Some(e);
+                            break;
+                        }
+                        Ok(Some((mut pieces, body))) => {
+                            for piece in &mut pieces {
+                                piece.classification =
+                                    Classification::supported(Basis::Equivalent, class);
+                                piece.warnings.push(format!(
+                                    "{class}: carried in a PVec stream, on hidden geometry"
+                                ));
+                            }
+                            *annotation_counts
+                                .entry(format!("{class}.mapped"))
+                                .or_default() += 1;
+                            pending = Some(body);
+                            let mut it = pieces.into_iter();
+                            done = it.next().expect("a mapped annotation has a carrier");
+                            more = it.collect();
+                        }
+                        Ok(None) => {
+                            *annotation_counts
+                                .entry(format!("{class}.unmapped"))
+                                .or_default() += 1;
+                        }
+                    }
+                }
+                let mut carried_ids: Vec<EntityId> = Vec::new();
                 let mut stop = false;
                 for done in std::iter::once(done).chain(more) {
                     let mut diagnostic =
@@ -1676,6 +1772,9 @@ impl<'a> PvecConversion<'a> {
                     }
                     let id = EntityId::at(next_id);
                     next_id += 1;
+                    if pending.is_some() {
+                        carried_ids.push(id);
+                    }
                     if let (Some(rules), Item::Leaf(f), true) = (&rules, item, whole) {
                         match &raw.geometry {
                             RawGeometry::Line { start, end }
@@ -1718,7 +1817,12 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
-                        let (style, colour, bad_style) = if components.line_style {
+                        let (style, colour, bad_style) = if pending.is_some() {
+                            // A carrier is never drawn: the stream record is what shows.
+                            let c = LineStyleComponent::new(id, None, None, false).ok();
+                            let bad = c.is_none();
+                            (c, false, bad)
+                        } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
                             // P-8: a layout that does not print lineweights has none on its sheet.
                             if drop_widths {
@@ -1769,6 +1873,11 @@ impl<'a> PvecConversion<'a> {
                         break;
                     }
                     sent.fetch_add(1, Ordering::Release);
+                }
+                match pending {
+                    Some(Body::Text(t)) => texts.push((carried_ids[0], t)),
+                    Some(Body::Fill(f)) => fills.push((carried_ids, f)),
+                    None => {}
                 }
                 if stop {
                     break;
@@ -1858,6 +1967,9 @@ impl<'a> PvecConversion<'a> {
             walls,
             wall_source,
             labels,
+            texts,
+            fills,
+            annotation_counts,
             sheet,
         })
     }
@@ -1881,6 +1993,9 @@ impl<'a> PvecConversion<'a> {
             walls,
             wall_source,
             labels,
+            texts,
+            fills,
+            annotation_counts,
             sheet,
         } = self.classify(provider, Some(unit))?;
         let Self {
@@ -2037,6 +2152,7 @@ impl<'a> PvecConversion<'a> {
                     streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
                     dropped: BTreeMap::new(),
                     colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
+                    annotations: annotation_counts.clone(),
                 };
                 let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
                 for d in &built.dropped {
@@ -2050,6 +2166,15 @@ impl<'a> PvecConversion<'a> {
                         .insert("line-style.bad-style".to_owned(), style_bad);
                 }
                 streams = built.streams;
+                let (carried, dropped) = annotation_streams(&texts, &fills, &open.source_ids)
+                    .map_err(PvecConvertError::Components)?;
+                streams.extend(carried);
+                for d in &dropped {
+                    *made
+                        .dropped
+                        .entry(format!("{}.{}", d.stream, d.reason))
+                        .or_default() += 1;
+                }
                 summary = Some(made);
             }
             let mut found = None;
@@ -2195,6 +2320,10 @@ struct Classified {
     /// `geometry` when the walls are every straight line because no rule matched, else `layers`.
     wall_source: &'static str,
     labels: Vec<RoomLabel>,
+    /// The texts and hatches carried in streams, and the count of each class by outcome (#1609).
+    texts: Vec<(EntityId, TextBody)>,
+    fills: Vec<(Vec<EntityId>, FillBody)>,
+    annotation_counts: BTreeMap<String, u64>,
     /// The paper sheet, for a paper layout under the print profile.
     sheet: Option<Sheet>,
 }

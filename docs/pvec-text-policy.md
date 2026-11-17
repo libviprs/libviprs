@@ -4,6 +4,14 @@ Status: decided by N5.5 (#1084), part of the integration epic #1039. Feeds N5.6,
 The code is `src/pvec/text_policy.rs`, and the numbers below come from
 `examples/text_policy_measure.rs`.
 
+## Update, issue #1609
+
+The decision below is the default. A DWG conversion can now carry `TEXT`, `MTEXT` and visible `ATTDEF` through PVec's text
+stream with `PvecConversion::annotations(true)`, the same record the PDF path writes: position, height, rotation and the characters
+shown (MTEXT formatting codes read, `%%c` style escapes decoded), on a hidden two point anchor. No font, width factor or
+justification travels, and an INSERT's map is applied to position, height and rotation. The conversion report's
+`components.annotations` counts what was mapped per class.
+
 ## Decision
 
 Decision: omit text and report the counts.

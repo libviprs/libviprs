@@ -22,6 +22,8 @@
 use std::collections::BTreeMap;
 
 use pvec_capabilities::Registry;
+#[cfg(feature = "pvec-convert")]
+use pvec_components::{HatchRecord, TextRecord, TextStream};
 use pvec_facade::EntityId as PvecEntityId;
 // Also reached by `pdf_to_pvec` and `pdf_clip_stream`, which write streams of their own (#1578).
 pub(super) use pvec_facade::components::{
@@ -336,4 +338,134 @@ pub fn build_streams(
         names: stream_names,
         dropped,
     })
+}
+
+#[cfg(feature = "pvec-convert")]
+/// A text for the text stream: where it sits in the drawing, how big and which way, and what it says.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct TextBody {
+    pub x: f64,
+    pub y: f64,
+    pub height: f64,
+    pub rotation: f64,
+    pub text: String,
+}
+
+#[cfg(feature = "pvec-convert")]
+/// A fill for the hatch stream: the pattern's name, angle and scale (`None` for a solid fill) and the
+/// colour as red, green, blue and alpha.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct FillBody {
+    pub pattern: Option<(String, f64, f64)>,
+    pub rgba: u32,
+}
+
+#[cfg(feature = "pvec-convert")]
+/// The text and hatch streams for the annotations a run mapped, against the artifact written with
+/// `source_ids`. A text hangs on its anchor, a hatch lists its boundary entities; one the writer
+/// refused is left out of a boundary (and the hatch with it when none is left), and a record PVec
+/// cannot hold is dropped on its own and listed, so one bad record costs itself and not the stream.
+///
+/// # Errors
+///
+/// [`ComponentsError::Refused`] when PVec's encoder refuses a payload for a reason not covered above.
+pub(crate) fn annotation_streams(
+    texts: &[(EntityId, TextBody)],
+    fills: &[(Vec<EntityId>, FillBody)],
+    source_ids: &[EntityId],
+) -> Result<(Vec<Stream>, Vec<DroppedRow>), ComponentsError> {
+    // PVec's bounds, as for `build_streams`.
+    const MAX_NAME: usize = 255;
+    const MAX_TEXT: usize = 4_096;
+    const MAX_BOUNDARY: usize = 4_096;
+    let registry = Registry::v1();
+    let pvec_ids: BTreeMap<EntityId, PvecEntityId> = source_ids
+        .iter()
+        .enumerate()
+        .filter_map(|(n, id)| Some((*id, PvecEntityId::new(u32::try_from(n).ok()?).ok()?)))
+        .collect();
+    let refused = |e: &dyn std::fmt::Display| ComponentsError::Refused(e.to_string());
+    let mut out = Vec::new();
+    let mut dropped = Vec::new();
+    let mut drop_row = |entity: EntityId, stream, reason| {
+        dropped.push(DroppedRow {
+            entity,
+            stream,
+            reason,
+        });
+    };
+    let mut records = Vec::new();
+    for (id, t) in texts {
+        let Some(&entity) = pvec_ids.get(id) else {
+            continue;
+        };
+        if ![t.x, t.y, t.rotation].iter().all(|v| v.is_finite())
+            || !(t.height.is_finite() && t.height > 0.0)
+        {
+            drop_row(*id, "text", "bad-number");
+            continue;
+        }
+        let mut text = t.text.as_str();
+        if text.len() > MAX_TEXT {
+            text = &text[..text.floor_char_boundary(MAX_TEXT)];
+        }
+        records.push(TextRecord {
+            entity,
+            x: t.x,
+            y: t.y,
+            height: t.height,
+            rotation: t.rotation,
+            text: text.to_owned(),
+        });
+    }
+    if !records.is_empty() {
+        out.push(
+            TextStream { records }
+                .into_stream(&registry)
+                .map_err(|e| refused(&e))?,
+        );
+    }
+    let mut records = Vec::new();
+    for (ids, f) in fills {
+        let boundary: Vec<PvecEntityId> = ids
+            .iter()
+            .filter_map(|id| pvec_ids.get(id).copied())
+            .collect();
+        let Some(first) = ids.first() else { continue };
+        if boundary.is_empty() {
+            continue;
+        }
+        if boundary.len() > MAX_BOUNDARY {
+            drop_row(*first, "hatch", "too-many-loops");
+            continue;
+        }
+        let fill = match &f.pattern {
+            None => Fill::Solid { rgba: f.rgba },
+            Some((name, angle, scale)) => {
+                if name.len() > MAX_NAME {
+                    drop_row(*first, "hatch", "name-too-long");
+                    continue;
+                }
+                if !(angle.is_finite() && scale.is_finite() && *scale > 0.0) {
+                    drop_row(*first, "hatch", "bad-number");
+                    continue;
+                }
+                Fill::Pattern {
+                    name: name.clone(),
+                    angle: *angle,
+                    scale: *scale,
+                    rgba: f.rgba,
+                }
+            }
+        };
+        records.push(HatchRecord { boundary, fill });
+    }
+    if !records.is_empty() {
+        out.push(
+            HatchStream { records }
+                .into_stream(&registry)
+                .map_err(|e| refused(&e))?,
+        );
+    }
+    Ok((out, dropped))
 }

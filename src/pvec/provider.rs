@@ -68,6 +68,22 @@ use crate::cad::{CadSource, ItemHandle};
 /// A source-space point, `[x, y, z]`, as the drawing stores it.
 pub type Point3 = [f64; 3];
 
+/// Whether an extrusion normal is the Z axis, and which way it points: `Some(false)` for +Z,
+/// `Some(true)` for -Z (the OCS mirror `x -> -x`), `None` for a normal that tilts the plane out of
+/// the drawing's, which the 2D model cannot carry.
+///
+/// A drawing computes its normals, so a Z axis often arrives with a rounding error in it
+/// (`1.0000000000000002`, or an `x` of `1e-16`). The test is therefore relative: `x` and `y` must
+/// be at most 1e-9 of `z`. At that size the plane is off by under a millionth of a millimetre on a
+/// kilometre of drawing, so snapping to the axis moves nothing anybody can see.
+#[cfg(feature = "pvec-normalized")]
+#[must_use]
+pub(crate) fn z_axis_flip(normal: Point3) -> Option<bool> {
+    let [x, y, z] = normal;
+    let limit = z.abs() * 1e-9;
+    (z.is_finite() && z != 0.0 && x.abs() <= limit && y.abs() <= limit).then_some(z < 0.0)
+}
+
 /// Why a provider call failed.
 ///
 /// Carries strings, never the reader's own error type, so no foreign type reaches
@@ -652,6 +668,45 @@ pub enum RawGeometry {
     },
 }
 
+/// What a text-like or fill-like entity draws, in the coordinates of the block it sits in, for the
+/// text and hatch component streams (#1609). A provider that cannot report one says nothing.
+///
+/// Not part of [`RawGeometry`]: PVec carries neither as a curve, so the entity stays
+/// [`RawGeometry::Unmapped`] and the conversion asks for this by handle.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum Annotation {
+    /// One run of text: `TEXT`, `MTEXT` or a visible `ATTDEF`.
+    Text {
+        /// The insertion point.
+        position: Point3,
+        /// The text height, strictly positive.
+        height: f64,
+        /// The rotation in radians.
+        rotation: f64,
+        /// The characters to draw, with the drawing's formatting codes already read.
+        content: String,
+        /// The extrusion normal.
+        normal: Point3,
+    },
+    /// A filled region: `HATCH` or `SOLID`.
+    Fill {
+        /// One closed ring per boundary loop, in the plane at `elevation`.
+        rings: Vec<Vec<RawVertex>>,
+        /// The plane height of the rings.
+        elevation: f64,
+        /// The extrusion normal.
+        normal: Point3,
+        /// For a pattern fill, its name, angle in radians and scale; `None` for a solid fill.
+        pattern: Option<(String, f64, f64)>,
+        /// The fill colour as red, green, blue and alpha, one byte each.
+        rgba: u32,
+        /// Boundary loops the provider could not read (elliptic or spline edges, or edges that do
+        /// not join). A fill with any is not a region the stream can describe whole.
+        unread_loops: u32,
+    },
+}
+
 /// A colour as the drawing states it, after the BYLAYER rule has been applied.
 ///
 /// There is no `ByLayer` arm: a provider resolves BYLAYER through the layer table, so
@@ -1155,6 +1210,23 @@ pub trait DwgProvider {
     /// reads room names off it. The default has no text to give.
     fn text_anchor(&self, handle: ItemHandle) -> Option<(String, Point3)> {
         let _ = handle;
+        None
+    }
+
+    /// What the `TEXT`, `MTEXT`, `ATTDEF`, `HATCH` or `SOLID` entity with this handle draws, or
+    /// `None` for any other entity, for one that is not drawn (an invisible attribute definition)
+    /// or when the provider has nothing to give (#1609). The default has none.
+    fn annotation(&self, handle: ItemHandle) -> Option<Annotation> {
+        let _ = handle;
+        None
+    }
+
+    /// What the `ATTDEF` with this handle draws when it is reached through the `INSERT` with that
+    /// handle, or `None` when it draws nothing there (#1609). AutoCAD draws a constant definition's
+    /// value and the INSERT's own `ATTRIB` value for any other, never the definition's tag. The
+    /// default draws nothing.
+    fn inserted_attribute(&self, attdef: ItemHandle, insert: ItemHandle) -> Option<Annotation> {
+        let _ = (attdef, insert);
         None
     }
 
