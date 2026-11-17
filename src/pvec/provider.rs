@@ -1221,6 +1221,15 @@ pub trait DwgProvider {
         None
     }
 
+    /// What the `ATTDEF` with this handle draws when it is reached through the `INSERT` with that
+    /// handle, or `None` when it draws nothing there (#1609). AutoCAD draws a constant definition's
+    /// value and the INSERT's own `ATTRIB` value for any other, never the definition's tag. The
+    /// default draws nothing.
+    fn inserted_attribute(&self, attdef: ItemHandle, insert: ItemHandle) -> Option<Annotation> {
+        let _ = (attdef, insert);
+        None
+    }
+
     /// Opens one traversal pass.
     ///
     /// # Errors

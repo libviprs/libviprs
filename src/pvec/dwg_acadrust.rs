@@ -797,20 +797,39 @@ impl DwgProvider for AcadrustProvider {
         self.text_fact(handle).map(|t| (t.content, t.position))
     }
 
+    fn inserted_attribute(&self, attdef: ItemHandle, insert: ItemHandle) -> Option<Annotation> {
+        let EntityType::AttributeDefinition(a) =
+            self.doc.get_entity(acr::Handle::new(attdef.get()))?
+        else {
+            return None;
+        };
+        // A constant definition carries its own value into every INSERT. Any other shows what the
+        // INSERT's ATTRIB with that tag holds, and nothing when there is none: the tag is the
+        // block editor's placeholder, not something AutoCAD draws in a drawing.
+        let content = if a.flags.constant {
+            (!a.flags.invisible).then(|| a.default_value.clone())?
+        } else {
+            let EntityType::Insert(i) = self.doc.get_entity(acr::Handle::new(insert.get()))? else {
+                return None;
+            };
+            i.attributes
+                .iter()
+                .find(|v| v.tag.eq_ignore_ascii_case(&a.tag))
+                .filter(|v| v.is_visible())?
+                .value
+                .clone()
+        };
+        text(
+            a.insertion_point,
+            a.height,
+            a.rotation,
+            a.normal,
+            decode_escapes(&content),
+        )
+    }
+
     fn annotation(&self, handle: ItemHandle) -> Option<Annotation> {
         let entity = self.doc.get_entity(acr::Handle::new(handle.get()))?;
-        let text = |position: acr::Vector3, height: f64, rotation: f64, normal, content: String| {
-            // A run with no height or no characters draws nothing, and the stream refuses it.
-            (height > 0.0 && height.is_finite() && !content.trim().is_empty()).then(|| {
-                Annotation::Text {
-                    position: p3(position),
-                    height,
-                    rotation,
-                    content,
-                    normal: p3(normal),
-                }
-            })
-        };
         match entity {
             EntityType::Text(t) => text(
                 t.insertion_point,
@@ -826,7 +845,8 @@ impl DwgProvider for AcadrustProvider {
                 m.normal,
                 decode_escapes(&display_text(&m.value).text),
             ),
-            // A definition shows its tag until a block is inserted, and an invisible one never.
+            // A definition outside any INSERT shows its tag, and an invisible one never. Inside an
+            // INSERT it goes through `inserted_attribute`.
             EntityType::AttributeDefinition(a) if !a.flags.invisible => text(
                 a.insertion_point,
                 a.height,
@@ -937,6 +957,24 @@ impl DwgProvider for AcadrustProvider {
             base_points: BTreeMap::new(),
         }))
     }
+}
+
+/// A run of text as an [`Annotation`], or `None` for one that draws nothing: with no height or no
+/// characters, which the stream refuses.
+fn text(
+    position: acr::Vector3,
+    height: f64,
+    rotation: f64,
+    normal: acr::Vector3,
+    content: String,
+) -> Option<Annotation> {
+    (height > 0.0 && height.is_finite() && !content.trim().is_empty()).then(|| Annotation::Text {
+        position: p3(position),
+        height,
+        rotation,
+        content,
+        normal: p3(normal),
+    })
 }
 
 impl AcadrustProvider {

@@ -361,3 +361,70 @@ fn issue_1609_without_the_line_style_stream_nothing_is_mapped() {
     assert_eq!(run.written, 1);
     assert!(texts(&run).is_none() && hatches(&run).is_none());
 }
+
+/// A real drawing: the block `ATT` holds a plain ATTDEF (ROOMNO), a constant one (NOTE) and one
+/// nobody fills in (EMPTY), and its INSERT carries a value for ROOMNO. A bare ATTDEF in model
+/// space (TOP) is the one place a tag is drawn.
+fn attribute_drawing() -> Vec<u8> {
+    use acadrust::entities::{AttributeDefinition, AttributeEntity, Insert, Line};
+    use acadrust::tables::BlockRecord;
+    use acadrust::types::Vector3;
+    use acadrust::{CadDocument, DwgWriter, EntityType};
+
+    let mut doc = CadDocument::new();
+    let mut record = BlockRecord::new("ATT");
+    record.handle = doc.allocate_handle();
+    let owner = record.handle;
+    doc.block_records.add(record).unwrap();
+    let mut def = |tag: &str, value: &str, constant: bool, owner| {
+        let mut d = AttributeDefinition::new(tag.into(), String::new(), value.into());
+        d.height = 1.0;
+        d.flags.constant = constant;
+        let mut e = EntityType::AttributeDefinition(d);
+        if let Some(owner) = owner {
+            e.common_mut().owner_handle = owner;
+        }
+        doc.add_entity(e).unwrap();
+    };
+    def("ROOMNO", "000", false, Some(owner));
+    def("NOTE", "Fixed note", true, Some(owner));
+    def("EMPTY", "unset", false, Some(owner));
+    def("TOP", "top default", false, None);
+    let mut insert = Insert::new("ATT", Vector3::new(100.0, 0.0, 0.0));
+    let mut value = AttributeEntity::new("ROOMNO".into(), "101".into());
+    value.height = 1.0;
+    insert.attributes.push(value);
+    doc.add_entity(EntityType::Insert(insert)).unwrap();
+    doc.add_entity(EntityType::Line(Line::from_coords(
+        0.0, 0.0, 0.0, 9.0, 0.0, 0.0,
+    )))
+    .unwrap();
+    DwgWriter::write_to_vec(&doc).unwrap()
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1609_an_attdef_in_an_insert_draws_the_inserts_value_or_its_constant_never_its_tag() {
+    let dir = scratch("1609-attdef");
+    let dest = dir.join("o.pvec");
+    let bytes = attribute_drawing();
+    let out = PvecConversion::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Meters)
+        .components(StreamSelection::ALL)
+        .annotations(true)
+        .convert()
+        .unwrap();
+    let (streams, _) = open_published(&dest).unwrap().streams().unwrap();
+    let _ = fs::remove_dir_all(dir);
+    let t = streams
+        .iter()
+        .find(|s| s.capability == TextStream::CAPABILITY)
+        .map(|s| TextStream::decode(&s.payload).unwrap())
+        .expect("a text stream");
+    let mut got: Vec<_> = t.records.iter().map(|r| r.text.as_str()).collect();
+    got.sort_unstable();
+    assert_eq!(got, ["101", "Fixed note", "TOP"]);
+    let counts = out.report.components.unwrap().annotations;
+    let n = |k: &str| counts.get(k).copied().unwrap_or(0);
+    assert_eq!((n("ATTDEF.mapped"), n("ATTDEF.unmapped")), (3, 1));
+}

@@ -1685,7 +1685,12 @@ impl<'a> PvecConversion<'a> {
                     let made = raw
                         .provenance
                         .handle
-                        .and_then(|h| provider.annotation(h))
+                        .and_then(|h| match raw.provenance.block_path.steps().last() {
+                            Some(via) if class == "ATTDEF" => {
+                                provider.inserted_attribute(h, via.insert_handle)
+                            }
+                            _ => provider.annotation(h),
+                        })
                         .ok_or("it draws nothing the provider can report")
                         .and_then(|a| annotation::map(f, a));
                     let carried = match made {
