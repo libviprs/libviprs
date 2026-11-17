@@ -169,6 +169,16 @@ impl DwgProvider for Mock {
                 });
                 v
             }
+            // Walls on numbered layers whose names mean nothing (#1610).
+            CadSource::Bytes(b"generic") => {
+                let mut v = plan();
+                for e in &mut v {
+                    if e.provenance.layer == "A-WALL" {
+                        e.provenance.layer = "12".into();
+                    }
+                }
+                v
+            }
             CadSource::Bytes(b"longlayer") => {
                 let mut v = plan();
                 v[1].provenance.layer = "L".repeat(300);
