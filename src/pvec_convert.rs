@@ -1838,7 +1838,6 @@ impl<'a> PvecConversion<'a> {
         };
         // No rule named a wall, so the layer names carry no meaning here: the straight lines are
         // the walls, and the derivation drops the ones that join nothing (#1610).
-        let mut walls = walls;
         let wall_source = if walls.is_empty() && !lines.is_empty() {
             walls = lines;
             "geometry"
@@ -2055,8 +2054,10 @@ impl<'a> PvecConversion<'a> {
             }
             let mut found = None;
             if let Some(config) = &regions {
-                let mut report = RegionsSummary::default();
-                report.wall_source = Some(wall_source.to_owned());
+                let mut report = RegionsSummary {
+                    wall_source: Some(wall_source.to_owned()),
+                    ..Default::default()
+                };
                 match derive_regions(&walls, &labels, &[], config) {
                     // A plan past a limit converts without regions, and the report says which limit.
                     Err(e) => report.refused = Some(e.reason_code().to_owned()),
