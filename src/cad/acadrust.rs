@@ -34,7 +34,7 @@
 //! set by PDMODE), ATTDEF (a template, not drawn in an INSERT), polyface and polygon meshes,
 //! MESH, 3DSOLID and REGION (3D bodies), RAY and XLINE (infinite), MLINE (style offsets),
 //! SHAPE (SHX outline), WIPEOUT (a mask), IMAGE and PDFUNDERLAY (files the drawing names) and
-//! ACAD_TABLE (cell layout). Also out: hatch loops with elliptic or spline edges, a
+//! ACAD_TABLE (cell layout). Also out: a
 //! MULTILEADER's block content, and attributes of INSERTs nested in blocks. The adapter's
 //! three extra circles, four lines and three texts are not attributed to a class: its output
 //! needs the .NET library, which this default build does not have, and nothing in the drawing's

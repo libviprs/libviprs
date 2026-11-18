@@ -701,8 +701,8 @@ pub enum Annotation {
         pattern: Option<(String, f64, f64)>,
         /// The fill colour as red, green, blue and alpha, one byte each.
         rgba: u32,
-        /// Boundary loops the provider could not read (elliptic or spline edges, or edges that do
-        /// not join). A fill with any is not a region the stream can describe whole.
+        /// Boundary loops the provider could not read (an edge that is not a curve, or edges that
+        /// do not join). A fill with any is not a region the stream can describe whole.
         unread_loops: u32,
     },
 }

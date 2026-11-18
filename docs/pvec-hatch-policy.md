@@ -8,9 +8,11 @@ The code is `src/pvec/fill_policy.rs`. `FILL_POLICY` there is the same table as 
 
 The table below is the default. With `PvecConversion::annotations(true)` a DWG `HATCH` and `SOLID` are carried through PVec's hatch
 stream: each boundary loop becomes a hidden closed polyline (so the boundary is a curve entity, as the stream wants, and the fill
-points at it), solid fills carry the RGBA of the entity's colour and pattern fills their name, angle and scale. A hatch with a loop
-of elliptic or spline edges, or edges that do not join, is not carried (a part of a region is not the region) and is counted as
-`HATCH.unmapped`. No triangle or point set is produced.
+points at it), solid fills carry the RGBA of the entity's colour and pattern fills their name, angle and scale. Arcs, elliptic
+arcs and spline edges become short straight chords, because PVec's container stores straight polylines and refuses a ring with
+arcs in it; a corner repeated up to rounding noise is one corner. A hatch with a loop that cannot be read (an edge that is not a
+curve, or edges that do not join) is not carried (a part of a region is not the region), and neither is a fill whose corners are all
+on one line; both are counted as `HATCH.unmapped` or `SOLID.unmapped`, with the reason in the entity's warnings. No triangle or point set is produced.
 
 ## What this covers and what it does not
 
