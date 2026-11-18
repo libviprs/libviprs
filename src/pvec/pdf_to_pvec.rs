@@ -22,7 +22,7 @@ use super::components::{
 use super::limits::SourceLimits;
 use super::pdf_clip::{ClipCase, ClipLimits, ExactBounds, LinesOnlyBounds, apply_clip_policy};
 use super::pdf_clip_stream::{build as build_clip_stream, general_clips};
-use super::pdf_image::{PdfImageOptions, bake_page_images};
+use super::pdf_image::{PdfImageOptions, PdfImageReport, bake_page_images};
 use super::pdf_paint::PaintLog;
 use super::pdf_ring_cut::cut_ring;
 use super::pdf_shading::PdfFillPattern;
@@ -54,24 +54,41 @@ pub enum PdfToPvecError {
     Write(String),
 }
 
-/// Writes `page` as a PVec artifact, with its text but without its images, and returns its bytes.
-/// The bounds are the page in inches. See [`pdf_page_to_pvec_with`] to bake the images as well.
+/// Writes `page` as a PVec artifact, with its text and its images, and returns its bytes. The
+/// images are baked into the raster capability at their own resolution (PAINT.md 6.8). The bounds
+/// are the page in inches. See [`pdf_page_to_pvec_report`] for what the bake did, and
+/// [`pdf_page_to_pvec_with`] to leave the images out.
 pub fn pdf_page_to_pvec(
     page: &PdfVectorPage,
     producer_id: &str,
     producer_version: &str,
 ) -> Result<Vec<u8>, PdfToPvecError> {
-    pdf_page_to_pvec_with(page, producer_id, producer_version, false)
+    pdf_page_to_pvec_with(page, producer_id, producer_version, true)
 }
 
-/// [`pdf_page_to_pvec`], and with `bake_images` the page's images baked into the raster capability
-/// as well. Baking decodes and tiles every image, so a scanned sheet takes minutes in a debug build.
+/// [`pdf_page_to_pvec`], with `bake_images` to choose whether the page's images are baked into the
+/// raster capability. Without it the pictures live only in the pyramid of the whole page. Baking
+/// decodes and tiles every image, so a scanned sheet takes minutes in a debug build.
 pub fn pdf_page_to_pvec_with(
     page: &PdfVectorPage,
     producer_id: &str,
     producer_version: &str,
     bake_images: bool,
 ) -> Result<Vec<u8>, PdfToPvecError> {
+    pdf_page_to_pvec_report(page, producer_id, producer_version, bake_images)
+        .map(|(bytes, _)| bytes)
+}
+
+/// [`pdf_page_to_pvec_with`], and the [`PdfImageReport`] of the bake beside the bytes. A viewer
+/// that wants to skip the pyramid of the whole page reads [`PdfImageReport::baked`]: true means
+/// every image is a raster of the artifact (or there is none), false means the pyramid still
+/// carries at least one, and [`PdfImageReport::not_baked`] or the refused counts say why.
+pub fn pdf_page_to_pvec_report(
+    page: &PdfVectorPage,
+    producer_id: &str,
+    producer_version: &str,
+    bake_images: bool,
+) -> Result<(Vec<u8>, PdfImageReport), PdfToPvecError> {
     /// The polylines one PDF path becomes, as (style, points in inches). Style 2 is a closed fill
     /// polygon the viewer can fill, style 1 a stroke. `clip` is the page-space rectangle the path is
     /// drawn inside, when there is one.
@@ -125,13 +142,31 @@ pub fn pdf_page_to_pvec_with(
                     if t1 == 1.0 { b } else { at(t1) },
                 ))
             }
+            // The clip is a closed region: a stroke on its edge is inside it. The edge sits a hair
+            // off where the PDF's own numbers put it (161.88 is not exact in binary), so the cut
+            // runs against the rectangle grown by a tolerance in source units, and the ends are
+            // pulled back onto the real edge.
+            const EDGE_TOLERANCE: f64 = 1e-4;
+            let grown = ExactBounds {
+                min: [rect.min[0] - EDGE_TOLERANCE, rect.min[1] - EDGE_TOLERANCE],
+                max: [rect.max[0] + EDGE_TOLERANCE, rect.max[1] + EDGE_TOLERANCE],
+            };
+            let snap = |p: [f64; 2]| {
+                [
+                    p[0].clamp(rect.min[0], rect.max[0]),
+                    p[1].clamp(rect.min[1], rect.max[1]),
+                ]
+            };
             let mut pieces: Vec<Vec<[f64; 2]>> = Vec::new();
             for pair in points.windows(2) {
-                match clip_segment(pair[0], pair[1], rect) {
-                    Some((start, end)) => match pieces.last_mut() {
-                        Some(piece) if piece.last() == Some(&start) => piece.push(end),
-                        _ => pieces.push(vec![start, end]),
-                    },
+                match clip_segment(pair[0], pair[1], grown) {
+                    Some((start, end)) => {
+                        let (start, end) = (snap(start), snap(end));
+                        match pieces.last_mut() {
+                            Some(piece) if piece.last() == Some(&start) => piece.push(end),
+                            _ => pieces.push(vec![start, end]),
+                        }
+                    }
                     None => pieces.push(Vec::new()),
                 }
             }
@@ -247,17 +282,24 @@ pub fn pdf_page_to_pvec_with(
     // Images (L6), only when the caller asks: baking decodes and tiles every image, which takes
     // minutes on a scanned sheet. They go into the raster capability in content-stream order, each
     // placed by its CTM. The pyramid of the whole page stays the first picture under them.
-    let bake = bake_images
-        .then(|| {
-            bake_page_images(
-                page,
-                &PdfImageOptions {
-                    page_to_source: [1.0 / 72.0, 0.0, 0.0, -1.0 / 72.0, 0.0, page.height / 72.0],
-                    ..PdfImageOptions::default()
-                },
-            )
-        })
-        .filter(|bake| !bake.written.is_empty());
+    let bake = bake_images.then(|| {
+        bake_page_images(
+            page,
+            &PdfImageOptions {
+                page_to_source: [1.0 / 72.0, 0.0, 0.0, -1.0 / 72.0, 0.0, page.height / 72.0],
+                ..PdfImageOptions::default()
+            },
+        )
+    });
+    let image_report = bake.as_ref().map_or_else(
+        || PdfImageReport {
+            images: page.images.len() as u64,
+            not_baked: (!page.images.is_empty()).then(|| "not-requested".to_owned()),
+            ..PdfImageReport::default()
+        },
+        |bake| bake.report.clone(),
+    );
+    let bake = bake.filter(|bake| !bake.written.is_empty());
     // The text runs that get a record, in order: a baseline with a length and a height, and not
     // under a clip that leaves nothing.
     let empty_clips: Vec<u64> = clips
@@ -737,6 +779,7 @@ pub fn pdf_page_to_pvec_with(
     }
     writer
         .finish()
+        .map(|bytes| (bytes, image_report))
         .map_err(|error| PdfToPvecError::Write(error.to_string()))
 }
 

@@ -8,8 +8,8 @@
 mod fixture;
 
 use fixture::*;
-use libviprs::pvec::pdf_page_to_pvec;
 use libviprs::pvec::pdf_vector::{PdfVectorLimits, extract_page_paths};
+use libviprs::pvec::{pdf_page_to_pvec, pdf_page_to_pvec_with};
 use lopdf::{Object, dictionary};
 use pvec_facade::PvecReader;
 use pvec_facade::components::{LineStyleStream, StrokePaintStream, StrokeWidth};
@@ -146,7 +146,7 @@ fn blueprint_mix() -> Option<PathBuf> {
 fn blueprint_mix_every_stroke_carries_the_colour_and_width_the_pdf_painted_it_with() {
     let Some(path) = blueprint_mix() else { return };
     let page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
-    let (paint, styles) = streams(pdf_page_to_pvec(&page, "test", "0").unwrap());
+    let (paint, styles) = streams(pdf_page_to_pvec_with(&page, "test", "0", false).unwrap());
     let (paint, styles) = (paint.unwrap(), styles.unwrap());
     // The oracle: the distinct (colour, alpha) of every stroked path of the page, and the distinct
     // widths of the same, read straight from the PDF's entities.

@@ -62,7 +62,12 @@ fn blueprint_mix_writes_only_features_the_driver_supports() {
     // bites is the exact set: the keys the writer emits for this page are pinned here. A new key shows up as
     // a diff to review (and must be in the union, checked below); a key that stops being written does too.
     // The feature keys the writer emits for page 1 of `blueprint-mix.pdf` at the pinned pvec rev.
-    const WRITTEN: &[&str] = &["23.stroke_item", "23.text_item", "24.colour"];
+    const WRITTEN: &[&str] = &[
+        "23.raster_item",
+        "23.stroke_item",
+        "23.text_item",
+        "24.colour",
+    ];
     let written: std::collections::BTreeSet<String> = used.iter().map(|k| k.to_string()).collect();
     let expected: std::collections::BTreeSet<String> =
         WRITTEN.iter().map(|k| k.to_string()).collect();

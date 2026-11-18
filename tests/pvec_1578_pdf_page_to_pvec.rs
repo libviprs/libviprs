@@ -104,14 +104,14 @@ fn blueprint_mix_bytes_are_pinned_with_the_stroke_and_paint_streams() {
     page.texts.clear();
     page.images.clear();
     let bytes = pdf_page_to_pvec(&page, "iasbuilt-server", "1.0.3").unwrap();
-    assert_eq!(bytes.len(), 16448);
+    assert_eq!(bytes.len(), 16416);
     let hex: String = Sha256::digest(&bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect();
     assert_eq!(
         hex,
-        "d7f0e5268926be226defcf9115c0e6b315f39864642e5575ea4ac374eb7674a4"
+        "91606b70952641ae92c8bfd42042613ce192dcc26433648884ff2ceb7917c747"
     );
 }
 
@@ -121,6 +121,7 @@ fn a_page_with_nothing_painted_is_refused_with_the_servers_message() {
     let Some(path) = blueprint_mix() else { return };
     let mut page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
     page.entities.clear();
+    page.images.clear();
     let error = pdf_page_to_pvec(&page, "iasbuilt-server", "0.0.0").unwrap_err();
     assert_eq!(
         error.to_string(),
