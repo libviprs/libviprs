@@ -98,6 +98,9 @@ impl DwgProvider for Notes {
             (15, "SOLID"),
             (16, "ATTDEF"),
             (17, "HATCH"),
+            (18, "HATCH"),
+            (19, "SOLID"),
+            (21, "SOLID"),
         ]
         .into_iter()
         .map(|(h, c)| unmapped(h, c))
@@ -148,6 +151,49 @@ impl DwgProvider for Notes {
                 rgba: 0,
                 unread_loops: 1,
             }),
+            // A disc, as a hatch draws one: two half turns, a ring of two vertices.
+            18 => Some(fill(
+                vec![vec![
+                    RawVertex {
+                        x: 0.0,
+                        y: 0.0,
+                        bulge: 1.0,
+                    },
+                    RawVertex {
+                        x: 2.0,
+                        y: 0.0,
+                        bulge: 1.0,
+                    },
+                ]],
+                None,
+                0x1234_56FF,
+            )),
+            // A SOLID far from the origin whose second corner repeats the first up to rounding
+            // noise: a sliver triangle, which still has an area.
+            19 => Some(fill(
+                vec![
+                    [
+                        (50_000.0, 40_000.0),
+                        (50_000.0 - 9.1e-13, 40_000.0),
+                        (50_000.0 - 9.1e-13, 40_000.000_149),
+                        (49_887.4, 40_000.000_149),
+                    ]
+                    .map(|(x, y)| RawVertex { x, y, bulge: 0.0 })
+                    .to_vec(),
+                ],
+                None,
+                0x00FF_00FF,
+            )),
+            // A SOLID whose corners are on one line has no area to fill.
+            21 => Some(fill(
+                vec![
+                    [(0.0, 0.0), (1.0, -11.8), (1.0 + 7e-12, -11.8)]
+                        .map(|(x, y)| RawVertex { x, y, bulge: 0.0 })
+                        .to_vec(),
+                ],
+                None,
+                0x00FF_00FF,
+            )),
             20 => Some(text([1.0, 0.0, 0.0], 1.0, 0.0, "In block")),
             // 16 is an invisible ATTDEF: nothing is drawn.
             _ => None,
@@ -282,7 +328,7 @@ fn issue_1609_text_mtext_and_attdef_are_text_records() {
 fn issue_1609_hatch_and_solid_are_hatch_records_over_boundary_entities() {
     let run = convert("1609-hatch", true, StreamSelection::ALL);
     let h = hatches(&run).expect("a hatch stream");
-    assert_eq!(h.records.len(), 3);
+    assert_eq!(h.records.len(), 5);
     let pattern = h
         .records
         .iter()
@@ -307,7 +353,7 @@ fn issue_1609_hatch_and_solid_are_hatch_records_over_boundary_entities() {
         .iter()
         .filter(|r| matches!(r.fill, pvec_facade::components::Fill::Solid { .. }))
         .count();
-    assert_eq!(solids, 2);
+    assert_eq!(solids, 4);
     assert!(h.records.iter().all(|r| {
         r.boundary
             .iter()
@@ -345,9 +391,38 @@ fn issue_1609_the_report_counts_each_kind() {
     assert_eq!(n("MTEXT.mapped"), 1);
     assert_eq!(n("ATTDEF.mapped"), 1);
     assert_eq!(n("ATTDEF.unmapped"), 1);
-    assert_eq!(n("HATCH.mapped"), 2);
+    assert_eq!(n("HATCH.mapped"), 3);
     assert_eq!(n("HATCH.unmapped"), 1);
-    assert_eq!(n("SOLID.mapped"), 1);
+    assert_eq!(n("SOLID.mapped"), 2);
+    assert_eq!(n("SOLID.unmapped"), 1);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1609_a_disc_and_a_sliver_are_stored_and_a_line_is_said_to_have_no_area() {
+    let run = convert("1609-rings", true, StreamSelection::ALL);
+    // PVec's container stores straight polylines and refuses a bulged ring, so a disc made of two
+    // arcs has to reach it as a polygon, or its hatch record would lose its boundary quietly.
+    assert_eq!(run.report.totals.by_fidelity["RequiresPVecCapability"], 0);
+    let h = hatches(&run).expect("a hatch stream");
+    let disc = h
+        .records
+        .iter()
+        .find(|r| {
+            matches!(
+                r.fill,
+                pvec_facade::components::Fill::Solid { rgba: 0x1234_56FF }
+            )
+        })
+        .expect("the disc has a record");
+    assert_eq!(disc.boundary.len(), 1);
+    let said = run
+        .report
+        .entities
+        .iter()
+        .flat_map(|e| &e.warnings)
+        .any(|w| w.contains("SOLID") && w.contains("line"));
+    assert!(said, "the collapsed SOLID is reported with its reason");
 }
 
 #[test]

@@ -1335,9 +1335,11 @@ impl AcadrustCursor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::arc_span;
-    use acadrust::entities::CircularArcEdge;
-    use acadrust::types::Vector2;
+    use super::{DrawnFact, arc_span, hatch_rings};
+    use acadrust::entities::{
+        BoundaryEdge, BoundaryPath, CircularArcEdge, EllipticArcEdge, Hatch, LineEdge, SplineEdge,
+    };
+    use acadrust::types::{Vector2, Vector3};
     use std::f64::consts::{FRAC_PI_2, PI};
 
     fn edge(start: f64, end: f64, counter_clockwise: bool) -> CircularArcEdge {
@@ -1377,5 +1379,192 @@ mod tests {
         let mut e = edge(0.0, 1.0, true);
         e.radius = 0.0;
         assert!(arc_span(&e).is_none());
+    }
+
+    fn rings_of(edges: Vec<BoundaryEdge>) -> DrawnFact {
+        let mut path = BoundaryPath::new();
+        for e in edges {
+            path.add_edge(e);
+        }
+        let mut hatch = Hatch::solid();
+        hatch.add_path(path);
+        let mut out = DrawnFact::default();
+        hatch_rings(&hatch, &mut out);
+        out
+    }
+
+    fn half_ellipse(center: [f64; 2], major: [f64; 2], ratio: f64, from: f64) -> BoundaryEdge {
+        BoundaryEdge::EllipticArc(EllipticArcEdge {
+            center: Vector2 {
+                x: center[0],
+                y: center[1],
+            },
+            major_axis_endpoint: Vector2 {
+                x: major[0],
+                y: major[1],
+            },
+            minor_axis_ratio: ratio,
+            start_angle: from,
+            end_angle: from + PI,
+            counter_clockwise: true,
+        })
+    }
+
+    #[test]
+    fn issue_1609_a_loop_of_two_elliptic_arcs_is_one_ring_on_the_ellipse() {
+        let out = rings_of(vec![
+            half_ellipse([10.0, 5.0], [4.0, 0.0], 0.5, 0.0),
+            half_ellipse([10.0, 5.0], [4.0, 0.0], 0.5, PI),
+        ]);
+        assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+        assert_eq!(out.rings.len(), 1);
+        let ring = &out.rings[0];
+        assert!(
+            ring.len() >= 32,
+            "{} vertices is a polygon, not a curve",
+            ring.len()
+        );
+        for v in ring {
+            let on = ((v.x - 10.0) / 4.0).powi(2) + ((v.y - 5.0) / 2.0).powi(2);
+            assert!(
+                (on - 1.0).abs() < 1e-9,
+                "({}, {}) is off the ellipse",
+                v.x,
+                v.y
+            );
+            assert_eq!(v.bulge, 0.0);
+        }
+        assert_eq!(out.fills.len(), 1);
+    }
+
+    #[test]
+    fn issue_1609_an_elliptic_arc_follows_a_tilted_major_axis_and_closes_on_a_line() {
+        // The major axis points along (0, 4), so the ellipse is 1 wide and 4 tall around (0, 0).
+        // The arc runs a quarter turn from the major axis to the minor one, and two lines close it.
+        let arc = BoundaryEdge::EllipticArc(EllipticArcEdge {
+            center: Vector2 { x: 0.0, y: 0.0 },
+            major_axis_endpoint: Vector2 { x: 0.0, y: 4.0 },
+            minor_axis_ratio: 0.25,
+            start_angle: 0.0,
+            end_angle: FRAC_PI_2,
+            counter_clockwise: true,
+        });
+        let line = |a: [f64; 2], b: [f64; 2]| {
+            BoundaryEdge::Line(LineEdge {
+                start: Vector2 { x: a[0], y: a[1] },
+                end: Vector2 { x: b[0], y: b[1] },
+            })
+        };
+        // Parameter 0 is the major axis end (0, 4), parameter 90 degrees is (-1, 0).
+        let out = rings_of(vec![
+            arc,
+            line([-1.0, 0.0], [0.0, 0.0]),
+            line([0.0, 0.0], [0.0, 4.0]),
+        ]);
+        assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+        let ring = &out.rings[0];
+        let (first, last_arc) = (&ring[0], &ring[ring.len() - 3]);
+        assert!(
+            first.x.abs() < 1e-9 && (first.y - 4.0).abs() < 1e-9,
+            "{first:?}"
+        );
+        assert!(
+            ring.iter()
+                .all(|v| (v.x * v.x + (v.y / 4.0).powi(2) - 1.0).abs() < 1e-9
+                    || v.x == 0.0 && (v.y == 0.0 || v.y == 4.0))
+        );
+        assert!(last_arc.x < 0.0);
+    }
+
+    fn spline(degree: i32, knots: &[f64], points: &[[f64; 3]]) -> BoundaryEdge {
+        BoundaryEdge::Spline(SplineEdge {
+            degree,
+            rational: points.iter().any(|p| p[2] != 1.0),
+            periodic: false,
+            knots: knots.to_vec(),
+            control_points: points
+                .iter()
+                .map(|p| Vector3::new(p[0], p[1], p[2]))
+                .collect(),
+            fit_points: Vec::new(),
+            start_tangent: Vector2 { x: 0.0, y: 0.0 },
+            end_tangent: Vector2 { x: 0.0, y: 0.0 },
+        })
+    }
+
+    #[test]
+    fn issue_1609_a_spline_edge_is_sampled_along_its_curve() {
+        // A quadratic Bezier from (0, 0) over (5, 10) to (10, 0) is the parabola y = 2x(1 - x/10).
+        let curve = spline(
+            2,
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[[0.0, 0.0, 1.0], [5.0, 10.0, 1.0], [10.0, 0.0, 1.0]],
+        );
+        let close = BoundaryEdge::Line(LineEdge {
+            start: Vector2 { x: 10.0, y: 0.0 },
+            end: Vector2 { x: 0.0, y: 0.0 },
+        });
+        let out = rings_of(vec![curve, close]);
+        assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+        let ring = &out.rings[0];
+        assert!(ring.len() >= 16, "{}", ring.len());
+        assert!(
+            ring.iter()
+                .all(|v| (v.y - 2.0 * v.x * (1.0 - v.x / 10.0)).abs() < 1e-9 || v.y == 0.0)
+        );
+        let top = ring.iter().map(|v| v.y).fold(f64::MIN, f64::max);
+        assert!((top - 5.0).abs() < 0.05, "the arch peaks at 5, not {top}");
+    }
+
+    #[test]
+    fn issue_1609_a_rational_spline_edge_is_a_circle_arc() {
+        // A quarter circle of radius 3 as a rational quadratic: weight cos(45 degrees) in the middle.
+        let w = std::f64::consts::FRAC_1_SQRT_2;
+        let curve = spline(
+            2,
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[[3.0, 0.0, 1.0], [3.0, 3.0, w], [0.0, 3.0, 1.0]],
+        );
+        let back = BoundaryEdge::Line(LineEdge {
+            start: Vector2 { x: 0.0, y: 3.0 },
+            end: Vector2 { x: 3.0, y: 0.0 },
+        });
+        let out = rings_of(vec![curve, back]);
+        assert!(out.skipped.is_empty(), "{:?}", out.skipped);
+        assert!(
+            out.rings[0]
+                .iter()
+                .filter(|v| v.x * v.x + v.y * v.y > 1e-9)
+                .all(|v| ((v.x * v.x + v.y * v.y).sqrt() - 3.0).abs() < 1e-9
+                    || (v.x == 0.0 || v.y == 0.0))
+        );
+    }
+
+    #[test]
+    fn issue_1609_a_spline_edge_that_does_not_join_its_neighbour_still_leaves_the_loop_unread() {
+        let curve = spline(
+            2,
+            &[0.0, 0.0, 0.0, 1.0, 1.0, 1.0],
+            &[[0.0, 0.0, 1.0], [5.0, 10.0, 1.0], [10.0, 0.0, 1.0]],
+        );
+        let far = BoundaryEdge::Line(LineEdge {
+            start: Vector2 { x: 50.0, y: 50.0 },
+            end: Vector2 { x: 0.0, y: 0.0 },
+        });
+        let out = rings_of(vec![curve, far]);
+        assert!(out.rings.is_empty());
+        assert_eq!(out.skipped.len(), 1);
+    }
+
+    #[test]
+    fn issue_1609_a_spline_with_a_broken_knot_vector_is_left_unread_not_guessed() {
+        let curve = spline(
+            2,
+            &[0.0, 1.0],
+            &[[0.0, 0.0, 1.0], [5.0, 10.0, 1.0], [10.0, 0.0, 1.0]],
+        );
+        let out = rings_of(vec![curve]);
+        assert!(out.rings.is_empty());
+        assert_eq!(out.skipped.len(), 1);
     }
 }
