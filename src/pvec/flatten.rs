@@ -25,9 +25,20 @@
 //!
 //! An INSERT whose extrusion normal is `-Z` is the OCS mirror `x -> -x`, applied outside the INSERT's
 //! own map. A normal that is the Z axis up to rounding counts as the Z axis (#1609). A normal that is
-//! not parallel to Z needs a 3D placement the 2D adapter does not carry (a block set in a wall's
-//! plane has no footprint in a plan), so that INSERT is skipped and classified `RequiresExtension`,
-//! never dropped.
+//! not parallel to Z needs a 3D placement the 2D adapter does not carry, so by default that INSERT is
+//! skipped and classified `RequiresExtension`, never dropped.
+//!
+//! # Out of the plan's plane
+//!
+//! A resolver made [`projecting`](BlockResolver::projecting) draws such a block the way a plan sees
+//! it from above instead (#1609). From that INSERT down, each level's map is the full 3D one (the
+//! arbitrary axis algorithm, the INSERT's elevation and Z scale), and a leaf's map to the plan is
+//! that map with z dropped. In a tilted plane the map is still invertible on the leaf's own plane,
+//! so a curve keeps an exact affine image. In a vertical plane every curve is seen edge on: its
+//! image is the segment it covers, which is written as a line in plan coordinates, so PVec's 2x3
+//! maps never need to be singular. A curve that is a point from above, and anything that is not a
+//! line, arc, circle, ellipse or polyline, has nothing to draw and is listed in
+//! [`Flattened::unplaced`].
 //!
 //! # Lineage
 //!
@@ -40,6 +51,7 @@
 
 use std::fmt;
 
+use pvec_geometry::Curve2d;
 use thiserror::Error;
 
 use crate::cad::ItemHandle;
@@ -48,6 +60,7 @@ use super::fidelity::FidelityClass;
 use super::limits::{Limit, LimitError, SourceGuard, SourceLimits};
 use super::normalized::ProvenanceHandle;
 use super::provenance::{Provenance, ProvenanceSink};
+
 use super::provider::{
     BlockRef, DwgProvider, EntityCursor, EntityScope, InstancePath, InstanceStep, Point3,
     ProviderError, RawEntity, RawGeometry, z_axis_flip,
@@ -189,6 +202,7 @@ pub struct FlatEntity {
     pub entity: RawEntity,
     matrix: [f64; 6],
     lineage: Option<ProvenanceHandle>,
+    edge_on: bool,
 }
 
 impl FlatEntity {
@@ -229,7 +243,16 @@ impl FlatEntity {
                 r * tx + s * ty + v,
             ],
             lineage: self.lineage,
+            edge_on: self.edge_on,
         }
+    }
+
+    /// Whether this leaf is a curve of a block seen edge on, rewritten as the segment it projects
+    /// to in plan coordinates (#1609). Only a [`projecting`](BlockResolver::projecting) resolver
+    /// makes one.
+    #[must_use]
+    pub const fn edge_on(&self) -> bool {
+        self.edge_on
     }
 }
 
@@ -243,6 +266,7 @@ impl FlatEntity {
             entity,
             matrix: self.matrix,
             lineage: self.lineage,
+            edge_on: self.edge_on,
         }
     }
 }
@@ -307,6 +331,15 @@ impl LineageStore {
     }
 }
 
+/// A leaf of a block out of the plan's plane that has no image in the plan, with why.
+#[derive(Debug, Clone)]
+pub struct UnplacedLeaf {
+    /// The leaf as the provider reported it, its provenance carrying the full block path.
+    pub entity: RawEntity,
+    /// Why nothing is drawn for it.
+    pub why: &'static str,
+}
+
 /// What one flatten run produced.
 #[derive(Debug, Clone, Default)]
 pub struct Flattened {
@@ -314,6 +347,9 @@ pub struct Flattened {
     pub entities: Vec<FlatEntity>,
     /// The INSERTs that were not expanded.
     pub skipped: Vec<SkippedInsert>,
+    /// The leaves of blocks out of the plan's plane that a [`projecting`](BlockResolver::projecting)
+    /// resolver met and could not draw. Always empty otherwise.
+    pub unplaced: Vec<UnplacedLeaf>,
     /// How many block instances were opened (a MINSERT counts rows times columns).
     pub instances: u64,
     /// Bytes the guard charged for the run, always within the configured allocation ceiling.
@@ -324,6 +360,7 @@ pub struct Flattened {
 pub struct BlockResolver<'a, P: DwgProvider + ?Sized> {
     provider: &'a P,
     bounds: FlattenBounds,
+    project: bool,
 }
 
 impl<P: DwgProvider + ?Sized> fmt::Debug for BlockResolver<'_, P> {
@@ -339,7 +376,19 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
     /// A resolver over `provider` under `bounds`.
     #[must_use]
     pub fn new(provider: &'a P, bounds: FlattenBounds) -> Self {
-        Self { provider, bounds }
+        Self {
+            provider,
+            bounds,
+            project: false,
+        }
+    }
+
+    /// This resolver, drawing a block whose normal is not the Z axis as the plan sees it when `on`,
+    /// instead of skipping its INSERT (see the module docs, #1609).
+    #[must_use]
+    pub fn projecting(mut self, on: bool) -> Self {
+        self.project = on;
+        self
     }
 
     /// Flattens everything `scope` reaches.
@@ -371,6 +420,7 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
             })
             .unwrap_or_default();
         let mut walk = Walk {
+            project: self.project,
             xrefs,
             guard: SourceGuard::new(self.bounds.limits),
             sink,
@@ -383,6 +433,7 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
         let mut stack = vec![Frame::Cursor {
             cursor: root,
             composed: ComposedTransform::identity(),
+            plan: None,
             path: InstancePath::root(),
             block: None,
             seen: 0,
@@ -392,11 +443,13 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
                 Frame::Cursor {
                     cursor,
                     composed,
+                    plan,
                     path,
                     block,
                     seen,
                 } => {
-                    let Some(entity) = cursor.next_entity().map_err(FlattenError::Provider)? else {
+                    let Some(mut entity) = cursor.next_entity().map_err(FlattenError::Provider)?
+                    else {
                         stack.pop();
                         continue;
                     };
@@ -416,8 +469,19 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
                         .map_err(|e| limit_error(e, path, path.depth()))?;
                     if let RawGeometry::Insert(r) = &entity.geometry {
                         let (parent, parent_path) = (composed.clone(), path.clone());
-                        if let Some(grid) = walk.enter(&entity, r, parent, &parent_path)? {
+                        if let Some(grid) = walk.enter(&entity, r, parent, *plan, &parent_path)? {
                             stack.push(grid);
+                        }
+                    } else if let Some(g) = plan {
+                        entity.provenance.block_path = path.clone();
+                        match place(&entity, g) {
+                            Ok((entity, matrix, edge_on)) => walk.out.entities.push(FlatEntity {
+                                entity,
+                                matrix,
+                                lineage: None,
+                                edge_on,
+                            }),
+                            Err(why) => walk.out.unplaced.push(UnplacedLeaf { entity, why }),
                         }
                     } else {
                         walk.leaf(entity, composed, path)?;
@@ -431,7 +495,7 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
                     }
                     let index = g.next;
                     g.next += 1;
-                    let (composed, cell_path) = g.cell(index)?;
+                    let (composed, plan, cell_path) = g.cell(index)?;
                     let name = g.name.clone();
                     let handle = g.handle;
                     let scope = EntityScope::BlockDefinition {
@@ -444,6 +508,7 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
                             stack.push(Frame::Cursor {
                                 cursor,
                                 composed,
+                                plan,
                                 path: cell_path,
                                 block: Some(name),
                                 seen: 0,
@@ -485,11 +550,17 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
     }
 }
 
+/// A map from a block's 3D coordinates to the plan: rows x and y over `[x, y, z, 1]`.
+type PlanMap = [[f64; 4]; 2];
+
 enum Frame<'a> {
     /// One block instance (or the root scope) being read.
     Cursor {
         cursor: Box<dyn EntityCursor + 'a>,
         composed: ComposedTransform,
+        /// The map from this block's 3D coordinates to the plan, rows x and y, once an INSERT out
+        /// of the plan's plane was met above. `composed` stops at that INSERT.
+        plan: Option<PlanMap>,
         path: InstancePath,
         block: Option<String>,
         seen: u64,
@@ -505,6 +576,11 @@ struct GridFrame {
     parent_path: InstancePath,
     coefficients: [f64; 6],
     mirror_x: bool,
+    /// The parent's map to the plan, for an INSERT met out of the plan's plane or below one.
+    plan: Option<PlanMap>,
+    normal: Point3,
+    elevation: f64,
+    z_scale: f64,
     columns: u64,
     row_spacing: f64,
     column_spacing: f64,
@@ -513,8 +589,12 @@ struct GridFrame {
 }
 
 impl GridFrame {
-    /// The composed map and block path of one cell. Cells run row-major.
-    fn cell(&self, index: u64) -> Result<(ComposedTransform, InstancePath), FlattenError> {
+    /// The composed map, the map to the plan out of the plan's plane, and the block path of one
+    /// cell. Cells run row-major.
+    fn cell(
+        &self,
+        index: u64,
+    ) -> Result<(ComposedTransform, Option<PlanMap>, InstancePath), FlattenError> {
         let mut m = self.coefficients;
         if self.cells > 1 {
             let (row, col) = (index / self.columns, index % self.columns);
@@ -542,6 +622,31 @@ impl GridFrame {
             m[4] += dc * ux + dr * vx;
             m[5] += dc * uy + dr * vy;
         }
+        let path = self.parent_path.child(self.name.clone(), self.handle);
+        if let Some(g) = self.plan {
+            // OCS to the container through the arbitrary axis algorithm, then the parent's map.
+            let (ax, ay) = crate::vector::tessellate::arbitrary_axes(self.normal);
+            let n = [
+                ax[1] * ay[2] - ax[2] * ay[1],
+                ax[2] * ay[0] - ax[0] * ay[2],
+                ax[0] * ay[1] - ax[1] * ay[0],
+            ];
+            let local = [
+                [m[0], m[1], 0.0, m[4]],
+                [m[2], m[3], 0.0, m[5]],
+                [0.0, 0.0, self.z_scale, self.elevation],
+            ];
+            let mut out = [[0.0; 4]; 2];
+            for (row, g) in out.iter_mut().zip(g) {
+                // What one unit along each OCS axis moves the parent's row by.
+                let along = [ax, ay, n].map(|v| g[0] * v[0] + g[1] * v[1] + g[2] * v[2]);
+                for (j, x) in row.iter_mut().enumerate() {
+                    *x = (0..3).map(|k| along[k] * local[k][j]).sum::<f64>();
+                }
+                row[3] += g[3];
+            }
+            return Ok((self.parent.clone(), Some(out), path));
+        }
         if self.mirror_x {
             m = [-m[0], -m[1], m[2], m[3], -m[4], m[5]];
         }
@@ -551,16 +656,87 @@ impl GridFrame {
         };
         let composed = self
             .parent
-            .push_inner_coefficients(step.clone(), m)
+            .push_inner_coefficients(step, m)
             .map_err(FlattenError::Compose)?;
-        Ok((
-            composed,
-            self.parent_path.child(step.block_name, step.insert_handle),
-        ))
+        Ok((composed, None, path))
     }
 }
 
+/// What a leaf below an INSERT out of the plan's plane draws, under its map `g` to the plan: the
+/// entity to classify, the 2x3 map that goes with it, and whether it is seen edge on. `Err` says
+/// why there is nothing to draw.
+fn place(entity: &RawEntity, g: &PlanMap) -> Result<(RawEntity, [f64; 6], bool), &'static str> {
+    const POINT: &str = "seen edge on from above, it is a point";
+    const NOT_A_CURVE: &str =
+        "only its lines, arcs, circles, ellipses and polylines have an image in the plan";
+    const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let [r0, r1] = g;
+    let (a, b, c, d) = (r0[0], r0[1], r1[0], r1[1]);
+    // Basic arithmetic only, so the test below gives the same answer on every architecture.
+    let size = a * a + b * b + c * c + d * d;
+    let flat = (a * d - b * c).abs() <= 1e-9 * size;
+    let at = |p: Point3| {
+        [
+            r0[0] * p[0] + r0[1] * p[1] + r0[2] * p[2] + r0[3],
+            r1[0] * p[0] + r1[1] * p[1] + r1[2] * p[2] + r1[3],
+        ]
+    };
+    let segment = |p: [f64; 2], q: [f64; 2]| {
+        let mut e = entity.clone();
+        e.geometry = RawGeometry::Line {
+            start: [p[0], p[1], 0.0],
+            end: [q[0], q[1], 0.0],
+        };
+        e
+    };
+    // A line is its two ends under any map, so even a 3D one is exact.
+    if let RawGeometry::Line { start, end } = entity.geometry {
+        let (p, q) = (at(start), at(end));
+        let long = (0..3).map(|k| (end[k] - start[k]).powi(2)).sum::<f64>();
+        let short = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2);
+        if short <= 1e-18 * long {
+            return Err(POINT);
+        }
+        return Ok((segment(p, q), IDENTITY, flat));
+    }
+    let basic = super::dwg_basic::extract(entity).map_err(|_| NOT_A_CURVE)?;
+    let z = basic.elevation;
+    let shift = [r0[2] * z + r0[3], r1[2] * z + r1[3]];
+    if !flat {
+        return Ok((entity.clone(), [a, b, c, d, shift[0], shift[1]], false));
+    }
+    // Rank one: both rows are multiples of the longer one, `w`, so the plan point is `dir` times
+    // `w . p` plus the shift, and the curve covers the span of `w . p` along its length.
+    let (w, dir) = if a * a + b * b >= c * c + d * d {
+        let k = (a * c + b * d) / (a * a + b * b);
+        ([a, b], [1.0, k])
+    } else {
+        let k = (a * c + b * d) / (c * c + d * d);
+        ([c, d], [k, 1.0])
+    };
+    let len = (w[0] * w[0] + w[1] * w[1]).sqrt();
+    if len.is_nan() || len == 0.0 {
+        return Err(POINT);
+    }
+    let (ux, uy) = (w[0] / len, w[1] / len);
+    let span = pvec_geometry::Transform2::new([ux, uy, -uy, ux, 0.0, 0.0])
+        .and_then(|turn| basic.curve.transform(&turn))
+        .and_then(|(turned, _)| Ok((turned.bounds()?, basic.curve.bounds()?)));
+    let Ok((turned, whole)) = span else {
+        return Err(NOT_A_CURVE);
+    };
+    let (lo, hi) = (turned.min().x * len, turned.max().x * len);
+    if hi - lo <= 1e-9 * len * whole.diagonal() {
+        return Err(POINT);
+    }
+    let p = [shift[0] + dir[0] * lo, shift[1] + dir[1] * lo];
+    let q = [shift[0] + dir[0] * hi, shift[1] + dir[1] * hi];
+    Ok((segment(p, q), IDENTITY, true))
+}
+
 struct Walk<'s, S: ProvenanceSink> {
+    /// Whether an INSERT out of the plan's plane is drawn as the plan sees it.
+    project: bool,
     /// Lowercased names of the external-reference block records.
     xrefs: std::collections::BTreeSet<String>,
     guard: SourceGuard,
@@ -578,6 +754,7 @@ impl<S: ProvenanceSink> Walk<'_, S> {
         entity: &RawEntity,
         r: &BlockRef,
         parent: ComposedTransform,
+        parent_plan: Option<PlanMap>,
         parent_path: &InstancePath,
     ) -> Result<Option<Frame<'a>>, FlattenError> {
         let skip = |walk: &mut Self, reason: SkipReason, class: FidelityClass| {
@@ -608,13 +785,23 @@ impl<S: ProvenanceSink> Walk<'_, S> {
             );
             return Ok(None);
         };
-        let Some(mirror_x) = z_axis_flip(r.normal) else {
-            skip(
-                self,
-                SkipReason::NormalNotZ,
-                FidelityClass::RequiresExtension,
-            );
-            return Ok(None);
+        let mirror_x = z_axis_flip(r.normal);
+        // Once a level is out of the plan's plane, every level below it is placed in 3D.
+        let plan = match (parent_plan, mirror_x) {
+            (Some(g), _) => Some(g),
+            (None, Some(_)) => None,
+            (None, None) if self.project => {
+                let [a, b, c, d, tx, ty] = parent.matrix();
+                Some([[a, b, 0.0, tx], [c, d, 0.0, ty]])
+            }
+            (None, None) => {
+                skip(
+                    self,
+                    SkipReason::NormalNotZ,
+                    FidelityClass::RequiresExtension,
+                );
+                return Ok(None);
+            }
         };
         let child = parent_path.child(r.block_name.clone(), handle);
         self.guard
@@ -627,7 +814,11 @@ impl<S: ProvenanceSink> Walk<'_, S> {
             parent,
             parent_path: parent_path.clone(),
             coefficients: r.transform.coefficients(),
-            mirror_x,
+            mirror_x: mirror_x.unwrap_or(false),
+            plan,
+            normal: r.normal,
+            elevation: r.elevation,
+            z_scale: r.z_scale,
             columns: u64::from(r.grid.columns).max(1),
             row_spacing: r.grid.row_spacing,
             column_spacing: r.grid.column_spacing,
@@ -668,6 +859,7 @@ impl<S: ProvenanceSink> Walk<'_, S> {
             entity,
             matrix: composed.matrix(),
             lineage: handle,
+            edge_on: false,
         });
         Ok(())
     }

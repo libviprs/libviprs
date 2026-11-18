@@ -97,7 +97,8 @@ use crate::pvec::dwg_basic::{self, BasicError};
 use crate::pvec::dwg_spline::{self, SplineError};
 use crate::pvec::fidelity::{Basis, Classification, FidelityReport, ReasonCode, Tally, TallyError};
 use crate::pvec::flatten::{
-    BlockResolver, FlatEntity, FlattenBounds, FlattenError, LineageStore, SkipReason, SkippedInsert,
+    BlockResolver, FlatEntity, FlattenBounds, FlattenError, LineageStore, SkipReason,
+    SkippedInsert, UnplacedLeaf,
 };
 use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::ordering::key_cmp;
@@ -882,6 +883,7 @@ impl<'a> PvecConversion<'a> {
             CadSource::Bytes(_) => "(bytes)".to_owned(),
         };
         let flat = BlockResolver::new(provider, FlattenBounds::from_profile(view_profile))
+            .projecting(true)
             .flatten(
                 &EntityScope::Layout(layout.id),
                 &source_name,
@@ -911,6 +913,16 @@ impl<'a> PvecConversion<'a> {
                 p.class_name.clone(),
             )) {
                 items.push(Item::Leaf(f));
+            }
+        }
+        for u in &flat.unplaced {
+            let p = &u.entity.provenance;
+            if kept.contains(&(
+                p.handle.map(|h| h.get()),
+                p.block_path.to_string(),
+                p.class_name.clone(),
+            )) {
+                items.push(Item::Unplaced(u));
             }
         }
         drop(kept);
@@ -968,6 +980,7 @@ impl<'a> PvecConversion<'a> {
             );
             model_flat = Some(
                 BlockResolver::new(provider, FlattenBounds::from_profile(view_profile))
+                    .projecting(true)
                     .flatten(
                         &EntityScope::Layout(model.id),
                         &source_name,
@@ -1047,7 +1060,8 @@ impl<'a> PvecConversion<'a> {
                 .saturating_mul(count(drawn.len()))
                 .saturating_add(count(items.len()))
                 .saturating_add(count(mv.excluded.len()))
-                .saturating_add(count(mf.skipped.len()));
+                .saturating_add(count(mf.skipped.len()))
+                .saturating_add(count(mf.unplaced.len()));
             let ceiling = view_profile.limits.max_entities;
             if observed > ceiling {
                 return Err(PvecConvertError::Flatten(FlattenError::Limit {
@@ -1088,6 +1102,17 @@ impl<'a> PvecConversion<'a> {
                 items.push(Item::Skipped(s));
                 via.push((once, None));
             }
+            for u in &mf.unplaced {
+                let p = &u.entity.provenance;
+                if model_layers.contains_key(&(
+                    p.handle.map(|h| h.get()),
+                    p.block_path.to_string(),
+                    p.class_name.clone(),
+                )) {
+                    items.push(Item::Unplaced(u));
+                    via.push((once, None));
+                }
+            }
         }
 
         // Ids are positions in the canonical order, which is decided by block path, handle and
@@ -1103,6 +1128,11 @@ impl<'a> PvecConversion<'a> {
             ),
             Item::Excluded(x) => (&x.block_path, x.handle, i as u64),
             Item::Skipped(s) => (&s.block_path, s.insert_handle, i as u64),
+            Item::Unplaced(u) => (
+                &u.entity.provenance.block_path,
+                u.entity.provenance.handle,
+                i as u64,
+            ),
         };
         perm.sort_by(|&a, &b| {
             via[a]
@@ -1262,6 +1292,7 @@ impl<'a> PvecConversion<'a> {
                 let stand_in;
                 let raw: &RawEntity = match item {
                     Item::Leaf(f) => &f.entity,
+                    Item::Unplaced(u) => &u.entity,
                     Item::Excluded(x) => {
                         stand_in = stub(
                             x.handle.map(|h| h.get()),
@@ -2493,12 +2524,13 @@ impl Gate {
     }
 }
 
-/// What the conversion met: a drawn leaf, a leaf the profile excluded, or an INSERT that was not
-/// expanded.
+/// What the conversion met: a drawn leaf, a leaf the profile excluded, an INSERT that was not
+/// expanded, or a leaf of a block out of the plan's plane with no image in the plan (#1609).
 enum Item<'a> {
     Leaf(&'a FlatEntity),
     Excluded(&'a ExcludedEntity),
     Skipped(&'a SkippedInsert),
+    Unplaced(&'a UnplacedLeaf),
 }
 
 /// One entity's outcome: its class, its record (with geometry when it has any) and the warnings.
@@ -2581,6 +2613,13 @@ fn classify_item(
                 vec![format!("INSERT of `{}`: {}", s.block_name, s.reason.code())],
             )
         }
+        Item::Unplaced(u) => without_geometry(
+            Classification::refused(ReasonCode::ExtrusionNotApplied, class),
+            vec![format!(
+                "{class}: in a block out of the plan's plane, {}",
+                u.why
+            )],
+        ),
         Item::Leaf(f) => classify_leaf(f, gate, viewport)?,
     })
 }
@@ -2601,7 +2640,14 @@ fn classify_leaf(
             ));
         }
     };
-    let record = match Normalized2DGeometry::from_curve(basic.curve, basic.classification.class()) {
+    // A curve seen edge on is drawn as the segment it projects to: what a plan shows, and not the
+    // curve itself (#1609).
+    let fidelity = if f.edge_on() {
+        FidelityClass::SupportedEquivalent
+    } else {
+        basic.classification.class()
+    };
+    let record = match Normalized2DGeometry::from_curve(basic.curve, fidelity) {
         Ok(r) => r,
         Err(e) => {
             return Ok(without_geometry(
@@ -2610,7 +2656,13 @@ fn classify_leaf(
             ));
         }
     };
-    promote_leaf(f, record, gate, viewport)
+    let mut done = promote_leaf(f, record, gate, viewport)?;
+    if f.edge_on() && done.geometry.geometry().is_some() {
+        done.warnings.push(format!(
+            "{class}: in a block in a vertical plane, seen edge on and drawn as the segment it covers"
+        ));
+    }
+    Ok(done)
 }
 
 /// Pushes `record` through the map flattening composed for its leaf, and checks it against the
