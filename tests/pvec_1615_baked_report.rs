@@ -103,3 +103,17 @@ fn over_the_image_limit_the_report_names_the_limit() {
     assert_eq!(json["pdf"]["images_baked"], false, "{json}");
     assert_eq!(json["pdf"]["images_not_baked_reason"], "max-images");
 }
+
+#[test]
+fn an_image_a_clip_leaves_nothing_of_does_not_count_against_baked() {
+    let clipped = one(
+        gray8(4, 4, &[7u8; 16]),
+        &format!("{RULE}q 200 200 5 5 re W n q 100 0 0 50 50 20 cm /Im1 Do Q Q"),
+    );
+    let bake = bake_page_images(&page(&clipped), &PdfImageOptions::default());
+    assert!(bake.written.is_empty());
+    assert_eq!(bake.report.images, 1);
+    assert_eq!(bake.report.refused.get("fully-clipped"), Some(&1));
+    assert!(bake.report.baked());
+    assert_eq!(bake.report.not_baked, None);
+}
