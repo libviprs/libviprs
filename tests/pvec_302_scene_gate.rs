@@ -5,7 +5,7 @@
 
 #![cfg(feature = "pvec-write")]
 
-use libviprs::pvec::{PdfVectorLimits, extract_page_paths, pdf_page_to_pvec};
+use libviprs::pvec::{PdfVectorLimits, extract_page_paths, pdf_page_to_pvec_with};
 use pvec_facade::PvecReader;
 use pvec_facade::components::{ClipStream, FillPaintStream, PaintOrderStream, StrokePaintStream};
 use pvec_scene::{CONSUMED, SUPPORTED, features_used};
@@ -34,7 +34,7 @@ fn blueprint_mix_writes_only_features_the_driver_supports() {
         return;
     }
     let page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
-    let bytes = pdf_page_to_pvec(&page, "test", "0").unwrap();
+    let bytes = pdf_page_to_pvec_with(&page, "test", "0", false).unwrap();
     let (streams, _) = PvecReader::open(bytes).unwrap().streams().unwrap();
     // `features_used` drops a stream it cannot decode without saying so, so a bad stream would only show up as
     // a smaller feature set. Decode every paint stream the writer put in the file here, so that fails loudly.

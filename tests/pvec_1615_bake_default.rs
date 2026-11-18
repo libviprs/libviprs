@@ -54,6 +54,7 @@ fn the_baked_image_keeps_its_own_resolution() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_report_says_the_images_were_baked() {
     let bytes = one(gray8(4, 4, &[7u8; 16]), &format!("{RULE}{IMAGE}"));
     let json = report_json(&bytes, None);
@@ -63,12 +64,14 @@ fn the_report_says_the_images_were_baked() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_page_with_no_image_counts_as_baked() {
     let bytes = pdf(doc(), Resources::images(Vec::new()), RULE.as_bytes());
     assert_eq!(report_json(&bytes, None)["pdf"]["images_baked"], true);
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_refused_image_means_the_page_is_not_baked() {
     let jpx = image(
         1,

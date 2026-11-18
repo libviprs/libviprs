@@ -121,6 +121,7 @@ fn a_page_with_nothing_painted_is_refused_with_the_servers_message() {
     let Some(path) = blueprint_mix() else { return };
     let mut page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
     page.entities.clear();
+    page.images.clear();
     let error = pdf_page_to_pvec(&page, "iasbuilt-server", "0.0.0").unwrap_err();
     assert_eq!(
         error.to_string(),

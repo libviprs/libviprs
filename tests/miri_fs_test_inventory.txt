@@ -739,6 +739,10 @@ annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_text_mtext_a
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_the_report_counts_each_kind
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_without_the_line_style_stream_nothing_is_mapped
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_without_the_option_nothing_is_carried
+annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_page_with_no_image_counts_as_baked
+annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_refused_image_means_the_page_is_not_baked
+annotated   fs-detected  tests/pvec_1615_bake_default.rs::the_report_says_the_images_were_baked
+annotated   fs-detected  tests/pvec_1615_baked_report.rs::over_the_image_limit_the_report_names_the_limit
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage

@@ -68,6 +68,16 @@ fn over_max_image_bytes_nothing_is_baked_and_the_limit_is_named() {
 }
 
 #[test]
+fn over_max_image_pixels_nothing_is_baked_and_the_limit_is_named() {
+    let mut options = PdfImageOptions::default();
+    options.max_image_pixels = 15;
+    let bake = bake_page_images(&page(&with_image()), &options);
+    assert!(bake.written.is_empty());
+    assert!(!bake.report.baked());
+    assert_eq!(bake.report.not_baked.as_deref(), Some("max-image-pixels"));
+}
+
+#[test]
 fn within_the_limits_the_limit_fields_stay_out_of_the_way() {
     let bake = bake_page_images(&page(&with_image()), &PdfImageOptions::default());
     assert_eq!(bake.report.written, 1);
@@ -75,6 +85,7 @@ fn within_the_limits_the_limit_fields_stay_out_of_the_way() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn over_the_image_limit_the_report_names_the_limit() {
     let bytes = one(gray8(4, 4, &[7u8; 16]), &format!("{RULE}{IMAGE}"));
     let mut options = PdfImageOptions::default();
