@@ -14,8 +14,11 @@
 //!
 //! What it does not carry: a text's font, width factor, oblique angle and justification (the record
 //! has one anchor, the insertion point), an MTEXT's formatting beyond the characters it shows, and
-//! a hatch that has a loop of elliptic or spline edges (a part of a region is not the region). A
-//! hatch pattern is carried by name, angle and scale, not by its lines.
+//! the exact curve of a boundary: the container stores straight polylines, so an arc, an elliptic
+//! arc or a spline in a boundary is carried as short chords. A hatch with a loop the provider could
+//! not read at all (an edge that is not a curve, or edges that do not join) is not carried, since a
+//! part of a region is not the region. A hatch pattern is carried by name, angle and scale, not by
+//! its lines.
 
 use super::components::{FillBody, TextBody};
 use super::flatten::FlatEntity;
@@ -97,14 +100,68 @@ pub(crate) fn map(
             unread_loops,
         } => {
             if unread_loops > 0 {
-                return Err("a boundary loop is not a ring of lines and arcs");
+                return Err("a boundary loop could not be read as a ring of curves");
             }
-            if rings.is_empty() || rings.iter().any(|r| r.len() < 3) {
+            if rings.is_empty() {
                 return Err("it has no boundary");
             }
             z_axis_flip(normal).ok_or("its normal is not the Z axis")?;
-            let carriers = rings
-                .into_iter()
+            // PVec's container stores straight polylines and refuses a ring with arcs in it, so an
+            // arc becomes short chords. A corner repeated up to rounding noise is one corner, and
+            // a ring left with fewer than three has no area, so it adds nothing to the fill.
+            fn straight(ring: &[RawVertex]) -> Option<Vec<RawVertex>> {
+                let mut points: Vec<[f64; 2]> = Vec::new();
+                for (i, a) in ring.iter().enumerate() {
+                    let b = &ring[(i + 1) % ring.len()];
+                    points.push([a.x, a.y]);
+                    let theta = 4.0 * a.bulge.atan();
+                    let chord = (b.x - a.x).hypot(b.y - a.y);
+                    if a.bulge == 0.0 || !theta.is_finite() || chord == 0.0 {
+                        continue;
+                    }
+                    // The centre sits on the chord's left for a counter-clockwise span.
+                    let h = chord / 2.0 * (1.0 - a.bulge * a.bulge) / (2.0 * a.bulge);
+                    let centre = [
+                        (a.x + b.x) / 2.0 - (b.y - a.y) / chord * h,
+                        (a.y + b.y) / 2.0 + (b.x - a.x) / chord * h,
+                    ];
+                    let steps = (theta.abs() / (std::f64::consts::PI / 48.0))
+                        .ceil()
+                        .max(1.0) as usize;
+                    for k in 1..steps {
+                        let (sin, cos) = (theta * k as f64 / steps as f64).sin_cos();
+                        let (dx, dy) = (a.x - centre[0], a.y - centre[1]);
+                        points.push([
+                            centre[0] + dx * cos - dy * sin,
+                            centre[1] + dx * sin + dy * cos,
+                        ]);
+                    }
+                }
+                let reach = points.iter().flatten().fold(1.0_f64, |m, v| m.max(v.abs()));
+                // PVec refuses a span shorter than 1e-12 or 8 ulps of the coordinates, so noise up
+                // to a few times that is merged and a real sliver, orders of magnitude longer, is not.
+                let floor = (reach * 1e-14).max(2e-12);
+                let same = |p: [f64; 2], q: [f64; 2]| {
+                    (p[0] - q[0]).abs().max((p[1] - q[1]).abs()) <= floor
+                };
+                let mut kept: Vec<[f64; 2]> = Vec::new();
+                for p in points {
+                    if kept.last().is_none_or(|q| !same(*q, p)) {
+                        kept.push(p);
+                    }
+                }
+                while kept.len() > 1 && same(kept[0], kept[kept.len() - 1]) {
+                    kept.pop();
+                }
+                (kept.len() >= 3).then(|| {
+                    kept.into_iter()
+                        .map(|[x, y]| RawVertex { x, y, bulge: 0.0 })
+                        .collect()
+                })
+            }
+            let carriers: Vec<RawEntity> = rings
+                .iter()
+                .filter_map(|ring| straight(ring))
                 .map(|vertices| {
                     carrier(RawGeometry::Polyline {
                         vertices,
@@ -114,6 +171,9 @@ pub(crate) fn map(
                     })
                 })
                 .collect();
+            if carriers.is_empty() {
+                return Err("its corners are on one line, so there is no area to fill");
+            }
             Ok((carriers, Body::Fill(FillBody { pattern, rgba })))
         }
     }

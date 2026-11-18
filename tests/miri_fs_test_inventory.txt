@@ -732,6 +732,7 @@ annotated   fs-detected  tests/pvec_1578_l2_stroke_paint.rs::blueprint_mix_every
 annotated   fs-detected  tests/pvec_1578_l3_paint_order.rs::blueprint_mix_paint_order_names_every_stroke_in_the_pdfs_order
 annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::a_page_with_nothing_painted_is_refused_with_the_servers_message
 annotated   fs-detected  tests/pvec_1578_pdf_page_to_pvec.rs::blueprint_mix_bytes_are_pinned_with_the_stroke_and_paint_streams
+annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_a_disc_and_a_sliver_are_stored_and_a_line_is_said_to_have_no_area
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_an_attdef_in_an_insert_draws_the_inserts_value_or_its_constant_never_its_tag
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_anchors_and_boundaries_are_hidden_by_the_line_style_stream
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_hatch_and_solid_are_hatch_records_over_boundary_entities

@@ -187,7 +187,7 @@ impl DwgProvider for Notes {
             // A SOLID whose corners are on one line has no area to fill.
             21 => Some(fill(
                 vec![
-                    [(0.0, 0.0), (1.0, -11.8), (1.0 + 7e-12, -11.8)]
+                    [(0.0, 0.0), (1.0, -11.8), (1.0 + 1e-13, -11.8)]
                         .map(|(x, y)| RawVertex { x, y, bulge: 0.0 })
                         .to_vec(),
                 ],
