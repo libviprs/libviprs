@@ -385,6 +385,10 @@ impl<'a, P: DwgProvider + ?Sized> BlockResolver<'a, P> {
 
     /// This resolver, drawing a block whose normal is not the Z axis as the plan sees it when `on`,
     /// instead of skipping its INSERT (see the module docs, #1609).
+    ///
+    /// Leaves placed under such an INSERT are not sent to the provenance sink and carry no
+    /// lineage (`FlatEntity::lineage` is `None`), so a caller with a real `ProvenanceSink` gets
+    /// no records for them. The conversion passes `NoProvenance`, so nothing is lost there.
     #[must_use]
     pub fn projecting(mut self, on: bool) -> Self {
         self.project = on;
