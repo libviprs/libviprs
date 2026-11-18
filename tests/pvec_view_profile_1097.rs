@@ -107,6 +107,8 @@ fn insert_grid(handle: u64, layer: &str, block: &str, grid: ArrayGrid) -> RawEnt
             transform: SourceTransform::IDENTITY,
             normal: [0.0, 0.0, 1.0],
             grid,
+            elevation: 0.0,
+            z_scale: 1.0,
         }),
         provenance: ProvenanceStub {
             handle: Some(ItemHandle::new(handle)),

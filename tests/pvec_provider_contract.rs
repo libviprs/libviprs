@@ -52,6 +52,8 @@ fn insert(handle: u64, layer: &str, block: &str, at: [f64; 2], rot: f64, scale: 
             transform,
             normal: [0.0, 0.0, 1.0],
             grid: ArrayGrid::SINGLE,
+            elevation: 0.0,
+            z_scale: 1.0,
         }),
         provenance: prov(handle, "INSERT", layer),
     }

@@ -86,6 +86,8 @@ impl DwgProvider for Notes {
                 transform: SourceTransform::new([0.0, -2.0, 2.0, 0.0, 100.0, 0.0]).unwrap(),
                 normal: [1e-17, 0.0, 1.000_000_000_000_000_2],
                 grid: ArrayGrid::SINGLE,
+                elevation: 0.0,
+                z_scale: 1.0,
             }),
             provenance: stub(50, "INSERT", "0"),
         };

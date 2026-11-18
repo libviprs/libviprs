@@ -338,7 +338,8 @@ impl ArrayGrid {
 /// then translate by the insertion point, with the block's base point taken out
 /// first. It is in the INSERT's own coordinate system: `normal` is reported
 /// verbatim, and an INSERT whose normal is not the Z axis needs the arbitrary-axis
-/// step N4.4 owns.
+/// step N4.4 owns. `elevation` and `z_scale` are the third axis of the same map, which
+/// a plan can ignore while the normal is the Z axis and cannot once it is not (#1609).
 #[derive(Debug, Clone)]
 pub struct BlockRef {
     /// The referenced block's name, as the INSERT spells it.
@@ -349,6 +350,11 @@ pub struct BlockRef {
     pub normal: Point3,
     /// MINSERT rows and columns.
     pub grid: ArrayGrid,
+    /// Where the block's `z = 0` lands along `normal`: the insertion point's z less the base
+    /// point's z times `z_scale`, in the INSERT's own coordinate system.
+    pub elevation: f64,
+    /// The Z scale factor.
+    pub z_scale: f64,
 }
 
 /// One step of an [`InstancePath`].

@@ -393,6 +393,8 @@ fn drawing(draw_viewports_first: bool) -> Mock {
                     transform: SourceTransform::IDENTITY,
                     normal: [0.0, 0.0, 1.0],
                     grid: ArrayGrid::SINGLE,
+                    elevation: 0.0,
+                    z_scale: 1.0,
                 }),
             ),
         ],
@@ -692,6 +694,8 @@ fn issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_i
                 transform: SourceTransform::IDENTITY,
                 normal: [0.0, 0.0, 1.0],
                 grid: ArrayGrid::SINGLE,
+                elevation: 0.0,
+                z_scale: 1.0,
             }),
         ));
         mock.inner = vec![line(0x61, "0", [4.0, 4.0], [6.0, 4.0])];
@@ -705,6 +709,8 @@ fn issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_i
                     transform: SourceTransform::IDENTITY,
                     normal: [0.0, 0.0, 1.0],
                     grid: ArrayGrid::SINGLE,
+                    elevation: 0.0,
+                    z_scale: 1.0,
                 }),
             ));
         }

@@ -404,6 +404,8 @@ fn insert(handle: u64, block: &str, m: [f64; 6]) -> RawEntity {
             transform: SourceTransform::new(m).unwrap(),
             normal: [0.0, 0.0, 1.0],
             grid: ArrayGrid::SINGLE,
+            elevation: 0.0,
+            z_scale: 1.0,
         }),
         provenance: stub(handle, "INSERT"),
     }

@@ -217,6 +217,8 @@ fn geometry(u: &mut Unstructured<'_>, blocks: u8) -> AResult<(RawGeometry, &'sta
                         point(u)?
                     },
                     grid,
+                    elevation: 0.0,
+                    z_scale: 1.0,
                 }),
                 "INSERT",
             )
@@ -406,6 +408,8 @@ pub fn recursion_bomb(levels: u8) -> Mock {
                 transform: SourceTransform::IDENTITY,
                 normal: [0.0, 0.0, 1.0],
                 grid: ArrayGrid::SINGLE,
+                elevation: 0.0,
+                z_scale: 1.0,
             }),
             style: EntityStyle::absent(),
             provenance: ProvenanceStub {
