@@ -670,11 +670,22 @@ fn place(entity: &RawEntity, g: &PlanMap) -> Result<(RawEntity, [f64; 6], bool),
     const NOT_A_CURVE: &str =
         "only its lines, arcs, circles, ellipses and polylines have an image in the plan";
     const IDENTITY: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    let policy = pvec_numeric::Policy::V1;
     let [r0, r1] = g;
     let (a, b, c, d) = (r0[0], r0[1], r1[0], r1[1]);
-    // Basic arithmetic only, so the test below gives the same answer on every architecture.
-    let size = a * a + b * b + c * c + d * d;
-    let flat = (a * d - b * c).abs() <= 1e-9 * size;
+    // Whether the plan sees the block edge on is PVec's singularity rule (NP-19), and whether a
+    // segment is a point is its length floor (NP-06): no tolerance of this crate's own.
+    let flat = matches!(
+        policy.validate_affine([a, b, c, d, 0.0, 0.0]),
+        Err(pvec_numeric::NumericError::SingularTransform)
+    );
+    let point = |p: [f64; 2], q: [f64; 2]| {
+        let mag = [p[0], p[1], q[0], q[1]]
+            .iter()
+            .fold(0.0f64, |m, x| m.max(x.abs()));
+        let len = ((q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2)).sqrt();
+        policy.degenerate_length(len, mag)
+    };
     let at = |p: Point3| {
         [
             r0[0] * p[0] + r0[1] * p[1] + r0[2] * p[2] + r0[3],
@@ -692,9 +703,7 @@ fn place(entity: &RawEntity, g: &PlanMap) -> Result<(RawEntity, [f64; 6], bool),
     // A line is its two ends under any map, so even a 3D one is exact.
     if let RawGeometry::Line { start, end } = entity.geometry {
         let (p, q) = (at(start), at(end));
-        let long = (0..3).map(|k| (end[k] - start[k]).powi(2)).sum::<f64>();
-        let short = (q[0] - p[0]).powi(2) + (q[1] - p[1]).powi(2);
-        if short <= 1e-18 * long {
+        if point(p, q) {
             return Err(POINT);
         }
         return Ok((segment(p, q), IDENTITY, flat));
@@ -719,18 +728,18 @@ fn place(entity: &RawEntity, g: &PlanMap) -> Result<(RawEntity, [f64; 6], bool),
         return Err(POINT);
     }
     let (ux, uy) = (w[0] / len, w[1] / len);
-    let span = pvec_geometry::Transform2::new([ux, uy, -uy, ux, 0.0, 0.0])
+    let turned = pvec_geometry::Transform2::new([ux, uy, -uy, ux, 0.0, 0.0])
         .and_then(|turn| basic.curve.transform(&turn))
-        .and_then(|(turned, _)| Ok((turned.bounds()?, basic.curve.bounds()?)));
-    let Ok((turned, whole)) = span else {
+        .and_then(|(turned, _)| turned.bounds());
+    let Ok(turned) = turned else {
         return Err(NOT_A_CURVE);
     };
     let (lo, hi) = (turned.min().x * len, turned.max().x * len);
-    if hi - lo <= 1e-9 * len * whole.diagonal() {
-        return Err(POINT);
-    }
     let p = [shift[0] + dir[0] * lo, shift[1] + dir[1] * lo];
     let q = [shift[0] + dir[0] * hi, shift[1] + dir[1] * hi];
+    if point(p, q) {
+        return Err(POINT);
+    }
     Ok((segment(p, q), IDENTITY, true))
 }
 
