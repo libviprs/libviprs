@@ -115,7 +115,7 @@ pub(crate) fn map(
                     let b = &ring[(i + 1) % ring.len()];
                     points.push([a.x, a.y]);
                     let theta = 4.0 * a.bulge.atan();
-                    let chord = (b.x - a.x).hypot(b.y - a.y);
+                    let chord = ((b.x - a.x).powi(2) + (b.y - a.y).powi(2)).sqrt();
                     if a.bulge == 0.0 || !theta.is_finite() || chord == 0.0 {
                         continue;
                     }
