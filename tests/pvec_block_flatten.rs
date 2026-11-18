@@ -61,6 +61,8 @@ fn insert_with(
             transform: SourceTransform::new(m).unwrap(),
             normal,
             grid,
+            elevation: 0.0,
+            z_scale: 1.0,
         }),
         provenance: ProvenanceStub {
             handle: handle.map(h),

@@ -56,6 +56,12 @@ The conic exit was bracketed at a factor of four on each side of the NP-07 bound
 fixture was accepted (E108 to E116), outside it the circle, ellipse, both arcs and the bulge composite
 were refused with NP-07 and the other four kinds accepted (E117 to E125).
 
+Addendum (#1609): an INSERT whose normal is not the Z axis is not a singular map. Its 3D placement
+is invertible, and only its view from above may not be. A conversion places such a block in 3D and
+drops z: a curve in a vertical plane is written as the segment it covers, in plan coordinates under
+an identity map, and one in a tilted plane keeps an exact affine image. No singular map is written or
+approximated, so the rule above stands.
+
 ## Consequences
 
 - N3.4 pins every cell with a red test and checks the kind PVec returns. N2.6 and N4.4 treat the

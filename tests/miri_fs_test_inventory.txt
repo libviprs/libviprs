@@ -740,6 +740,14 @@ annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_text_mtext_a
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_the_report_counts_each_kind
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_without_the_line_style_stream_nothing_is_mapped
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_without_the_option_nothing_is_carried
+annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_a_block_in_a_tilted_plane_maps_exactly
+annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_a_block_in_a_vertical_plane_is_drawn_edge_on
+annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_a_block_turned_back_into_the_plan_by_a_nested_insert_maps_exactly
+annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_a_nested_insert_keeps_its_elevation_and_the_outer_z_scale
+annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_an_edge_on_curve_says_it_is_a_projection
+annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_each_minsert_cell_is_placed_along_the_insert_axes
+annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_the_arbitrary_axis_algorithm_places_other_azimuths
+annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_what_has_no_plan_image_is_refused_one_row_each
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_page_with_no_image_counts_as_baked
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_refused_image_means_the_page_is_not_baked
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::the_report_says_the_images_were_baked

@@ -38,6 +38,8 @@ fn insert(handle: u64, layer: &str, block: &str) -> RawEntity {
             transform: SourceTransform::IDENTITY,
             normal: [0.0, 0.0, 1.0],
             grid: ArrayGrid::SINGLE,
+            elevation: 0.0,
+            z_scale: 1.0,
         }),
         provenance: ProvenanceStub {
             handle: Some(ItemHandle::new(handle)),

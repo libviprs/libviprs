@@ -115,6 +115,8 @@ fn insert_without_handle() -> RawEntity {
                 row_spacing: 0.0,
                 column_spacing: 0.0,
             },
+            elevation: 0.0,
+            z_scale: 1.0,
         }),
         provenance: prov(None, "INSERT", "0"),
     }

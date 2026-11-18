@@ -1203,7 +1203,7 @@ struct AcadrustCursor<'a> {
     handles: std::slice::Iter<'a, acr::Handle>,
     path: InstancePath,
     /// Block base points looked up so far, by block name.
-    base_points: BTreeMap<String, [f64; 2]>,
+    base_points: BTreeMap<String, [f64; 3]>,
 }
 
 impl EntityCursor for AcadrustCursor<'_> {
@@ -1268,15 +1268,13 @@ fn p3(v: acr::Vector3) -> Point3 {
 }
 
 impl AcadrustCursor<'_> {
-    fn base_point(&mut self, block: &str) -> [f64; 2] {
+    fn base_point(&mut self, block: &str) -> [f64; 3] {
         if let Some(b) = self.base_points.get(block) {
             return *b;
         }
-        let b = self
-            .doc
-            .block_records
-            .get(block)
-            .map_or([0.0, 0.0], |r| [r.base_point.x, r.base_point.y]);
+        let b = self.doc.block_records.get(block).map_or([0.0; 3], |r| {
+            [r.base_point.x, r.base_point.y, r.base_point.z]
+        });
         self.base_points.insert(block.to_string(), b);
         b
     }
@@ -1445,6 +1443,8 @@ impl AcadrustCursor<'_> {
                             row_spacing: i.row_spacing,
                             column_spacing: i.column_spacing,
                         },
+                        elevation: i.insert_point.z - i.z_scale() * base[2],
+                        z_scale: i.z_scale(),
                     }),
                     Err(err) => unmapped(format!("an INSERT of {}: {err}", i.block_name)),
                 }

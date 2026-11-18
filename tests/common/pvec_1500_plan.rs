@@ -63,6 +63,8 @@ pub fn insert(handle: u64, at: [f64; 2]) -> RawEntity {
             transform: SourceTransform::new([1.0, 0.0, 0.0, 1.0, at[0], at[1]]).unwrap(),
             normal: [0.0, 0.0, 1.0],
             grid: ArrayGrid::SINGLE,
+            elevation: 0.0,
+            z_scale: 1.0,
         }),
         provenance: stub(handle, "INSERT", "A-DOOR"),
     }
