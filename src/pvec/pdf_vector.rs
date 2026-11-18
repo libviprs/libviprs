@@ -440,7 +440,7 @@ pub(crate) struct RawImage {
 
 impl RawImage {
     /// The bytes held: the stream, its soft mask and an `Indexed` lookup.
-    fn byte_len(&self) -> u64 {
+    pub(crate) fn byte_len(&self) -> u64 {
         fn walk(o: &Object) -> u64 {
             match o {
                 Object::String(s, _) => s.len() as u64,

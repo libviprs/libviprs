@@ -588,6 +588,8 @@ impl<'a> PdfConversion<'a> {
             page: self.page as u64,
             images: r.images,
             rasters,
+            images_baked: r.baked(),
+            images_not_baked_reason: r.not_baked.clone(),
             images_refused: r.refused.clone(),
             image_notes: counted(&[
                 (PdfImageNote::ColourSpaceApproximated, r.colour_approximated),

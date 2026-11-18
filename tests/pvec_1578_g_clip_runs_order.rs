@@ -7,8 +7,8 @@
 
 #![cfg(all(feature = "pvec-write", feature = "pvec-raster"))]
 
+use libviprs::pvec::pdf_page_to_pvec_with;
 use libviprs::pvec::pdf_vector::{PdfVectorLimits, extract_page_paths_from_bytes};
-use libviprs::pvec::{pdf_page_to_pvec, pdf_page_to_pvec_with};
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
 use pvec_facade::PvecReader;
 use pvec_facade::components::{
@@ -61,11 +61,7 @@ fn pdf(content: &str) -> Vec<u8> {
 fn streams(content: &str, bake: bool) -> Vec<PvecStream> {
     let page =
         extract_page_paths_from_bytes(&pdf(content), 1, &PdfVectorLimits::default()).unwrap();
-    let bytes = if bake {
-        pdf_page_to_pvec_with(&page, "test", "0", true).unwrap()
-    } else {
-        pdf_page_to_pvec(&page, "test", "0").unwrap()
-    };
+    let bytes = pdf_page_to_pvec_with(&page, "test", "0", bake).unwrap();
     PvecReader::open(bytes).unwrap().streams().unwrap().0
 }
 

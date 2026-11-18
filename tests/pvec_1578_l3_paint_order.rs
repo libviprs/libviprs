@@ -8,8 +8,8 @@
 mod fixture;
 
 use fixture::*;
-use libviprs::pvec::pdf_page_to_pvec;
 use libviprs::pvec::pdf_vector::{PdfVectorLimits, extract_page_paths};
+use libviprs::pvec::{pdf_page_to_pvec, pdf_page_to_pvec_with};
 use pvec_facade::PvecReader;
 use pvec_facade::components::{
     FillPaintStream, FillRule, HatchStream, ItemKind, LineStyleStream, PaintOrderStream,
@@ -178,7 +178,7 @@ fn blueprint_mix() -> Option<PathBuf> {
 fn blueprint_mix_paint_order_names_every_stroke_in_the_pdfs_order() {
     let Some(path) = blueprint_mix() else { return };
     let page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
-    let w = streams(pdf_page_to_pvec(&page, "test", "0").unwrap());
+    let w = streams(pdf_page_to_pvec_with(&page, "test", "0", false).unwrap());
     let order = w.order.expect("stream 23 is written");
     // The fixture's vector part is strokes only (the oracle counts no filled path in it), so the
     // order is strokes numbered the way the entities were written, ascending, with the text of

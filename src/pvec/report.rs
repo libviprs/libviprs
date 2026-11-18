@@ -206,6 +206,16 @@ pub struct PdfSummary {
     pub images: u64,
     /// Images written as raster blocks.
     pub rasters: u64,
+    /// Whether every image on the page was baked into the artifact as a raster (`images` equals
+    /// `rasters` and nothing was left out; true for a page with no image). This is the field a
+    /// viewer reads: true lets it skip the pyramid of the whole page for the pictures, false means
+    /// the pyramid still carries at least one image.
+    #[serde(default)]
+    pub images_baked: bool,
+    /// Why no image was baked when the bake was not run on the page: `max-images`,
+    /// `max-image-bytes`, `max-image-pixels` or `not-requested`. Absent otherwise. A refused image is in `images_refused` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images_not_baked_reason: Option<String>,
     /// Images refused, by reason key.
     pub images_refused: BTreeMap<String, u64>,
     /// Written images that carry a note, by note key.
