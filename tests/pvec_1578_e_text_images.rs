@@ -5,7 +5,7 @@
 
 #![cfg(all(feature = "pvec-write", feature = "pvec-raster"))]
 
-use libviprs::pvec::{PdfVectorLimits, extract_page_paths, pdf_page_to_pvec};
+use libviprs::pvec::{PdfVectorLimits, extract_page_paths, pdf_page_to_pvec_with};
 use pvec_facade::components::{ItemKind, PaintOrderStream, StrokePaintStream, TextStream};
 use pvec_facade::{EntityId, PvecReader};
 use std::path::PathBuf;
@@ -40,7 +40,7 @@ fn payload(reader: &PvecReader, capability: pvec_capabilities::CapabilityId) -> 
 fn written() -> Option<(libviprs::pvec::PdfVectorPage, Vec<u8>)> {
     let path = blueprint_mix()?;
     let page = extract_page_paths(&path, 1, &PdfVectorLimits::default()).unwrap();
-    let bytes = pdf_page_to_pvec(&page, "libviprs-1578-e", "1").unwrap();
+    let bytes = pdf_page_to_pvec_with(&page, "libviprs-1578-e", "1", false).unwrap();
     Some((page, bytes))
 }
 

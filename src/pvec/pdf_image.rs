@@ -76,6 +76,19 @@ pub struct PdfImageOptions {
     pub page_to_source: [f64; 6],
     /// The most pixels one baked image may have.
     pub max_pixels: u64,
+    /// The most images a page may have and still be baked. A page over it bakes none, so the
+    /// pyramid of the whole page keeps carrying them, and the report names the limit (PAINT.md
+    /// 6.8). Same default as [`PdfVectorLimits::max_images`](super::pdf_vector::PdfVectorLimits).
+    pub max_images: usize,
+    /// The most encoded image bytes a page may have and still be baked, with the same effect as
+    /// `max_images`. Same default as
+    /// [`PdfVectorLimits::max_image_bytes`](super::pdf_vector::PdfVectorLimits).
+    pub max_image_bytes: u64,
+    /// The most pixels all the images of a page may have together (width times height of each
+    /// placement) and still be baked, with the same effect as `max_images`. `max_pixels` caps one
+    /// image, this caps the page, so a page of many large strips cannot take the producer's
+    /// memory and time without a say from the caller.
+    pub max_image_pixels: u64,
 }
 
 impl Default for PdfImageOptions {
@@ -85,6 +98,9 @@ impl Default for PdfImageOptions {
             tile_edge: 256,
             page_to_source: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             max_pixels: 64 << 20,
+            max_images: 4_096,
+            max_image_bytes: 512 << 20,
+            max_image_pixels: 1 << 30,
         }
     }
 }
@@ -307,9 +323,24 @@ pub struct PdfImageReport {
     /// Written images by the filter that produced their samples: the last filter of the chain,
     /// or `none` for an unfiltered image (issue #1362).
     pub written_by_filter: BTreeMap<String, u64>,
+    /// Why no image was baked, when the bake was not run on this page: `max-images`,
+    /// `max-image-bytes`, `max-image-pixels` (the page is over a limit of [`PdfImageOptions`]) or `not-requested`
+    /// (the caller asked for no bake). Absent when the bake ran. A viewer reads
+    /// [`baked`](Self::baked), and this says why it is false when nothing was tried.
+    pub not_baked: Option<String>,
 }
 
 impl PdfImageReport {
+    /// Whether every image on the page that can be seen is in the artifact as a raster: none was
+    /// refused, none was left out (an image a clip leaves nothing of is not seen, so refusing it
+    /// does not count). True for a page with no image. When it is false the pyramid of the whole page
+    /// is the only place the pictures are, so a viewer keeps it.
+    #[must_use]
+    pub fn baked(&self) -> bool {
+        let invisible = self.refused.get("fully-clipped").copied().unwrap_or(0);
+        self.not_baked.is_none() && self.written + invisible == self.images
+    }
+
     /// Images refused, all reasons.
     #[must_use]
     pub fn refused_total(&self) -> u64 {
@@ -346,8 +377,65 @@ pub fn bake_page_images(page: &PdfVectorPage, options: &PdfImageOptions) -> PdfI
             ..PdfImageReport::default()
         },
     };
-    for (index, image) in page.images.iter().enumerate() {
-        match bake_one(page, image, &painted, options) {
+    let encoded: u64 = page
+        .images
+        .iter()
+        .filter_map(|image| image.raw.as_ref())
+        .map(super::pdf_vector::RawImage::byte_len)
+        .sum();
+    let over = if page.images.len() > options.max_images {
+        Some("max-images")
+    } else if encoded > options.max_image_bytes {
+        Some("max-image-bytes")
+    } else if page
+        .images
+        .iter()
+        .map(|i| u64::from(i.width.unwrap_or(0)) * u64::from(i.height.unwrap_or(0)))
+        .sum::<u64>()
+        > options.max_image_pixels
+    {
+        Some("max-image-pixels")
+    } else {
+        None
+    };
+    if let Some(reason) = over {
+        bake.report.not_baked = Some(reason.to_owned());
+        return bake;
+    }
+    // Each image is cut and encoded on its own, and a scanned sheet is dozens of strips, so they
+    // run on a few threads and are folded in content-stream order afterwards.
+    let workers = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZero::get)
+        .min(8)
+        .min(page.images.len().max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let slots: Vec<std::sync::Mutex<Option<BakeResult>>> = page
+        .images
+        .iter()
+        .map(|_| std::sync::Mutex::new(None))
+        .collect();
+    std::thread::scope(|scope| {
+        for _ in 0..workers {
+            scope.spawn(|| {
+                loop {
+                    let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(image) = page.images.get(i) else {
+                        break;
+                    };
+                    let result = bake_one(page, image, &painted, options);
+                    *crate::poison::recover(&slots[i]) = Some(result);
+                }
+            });
+        }
+    });
+    for (index, slot) in slots.into_iter().enumerate() {
+        let Some(result) = slot
+            .into_inner()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+        else {
+            continue;
+        };
+        match result {
             Ok((pyramid, notes, filter)) => {
                 let r = &mut bake.report;
                 r.written += 1;
@@ -379,12 +467,14 @@ pub fn bake_page_images(page: &PdfVectorPage, options: &PdfImageOptions) -> PdfI
     bake
 }
 
+type BakeResult = Result<(RasterPyramid, Vec<PdfImageNote>, String), PdfImageError>;
+
 fn bake_one(
     page: &PdfVectorPage,
     image: &PdfImagePlacement,
     painted: &[u64],
     options: &PdfImageOptions,
-) -> Result<(RasterPyramid, Vec<PdfImageNote>, String), PdfImageError> {
+) -> BakeResult {
     if image.soft_masked {
         return Err(PdfImageError::GraphicsStateSoftMask);
     }

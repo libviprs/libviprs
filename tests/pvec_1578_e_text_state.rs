@@ -1,6 +1,7 @@
 //! Issue #1578 (L6 and L7), on small in-memory pages: the text parameters come back on `Q`, the
-//! text anchors keep a line style of their own next to the clip rings, and a conversion bakes no
-//! images unless it is asked to. `pvec_1578_e_text_images.rs` has the `blueprint-mix.pdf` checks.
+//! text anchors keep a line style of their own next to the clip rings, and a conversion bakes the
+//! images unless it is asked not to (issue #1615). `pvec_1578_e_text_images.rs` has the
+//! `blueprint-mix.pdf` checks.
 //! Needs `--features pvec-write`.
 
 #![cfg(all(feature = "pvec-write", feature = "pvec-raster"))]
@@ -105,18 +106,20 @@ fn a_text_anchor_and_a_clip_ring_do_not_share_a_line_style() {
 }
 
 #[test]
-fn a_conversion_bakes_no_image_unless_it_is_asked_to() {
+fn a_conversion_bakes_the_image_unless_it_is_asked_not_to() {
     let page = page(&format!("{RULE}q 100 0 0 100 50 50 cm /Im1 Do Q"));
     assert_eq!(page.images.len(), 1);
-    let bytes = pdf_page_to_pvec(&page, "test", "0").unwrap();
-    let placements = PvecReader::open(bytes)
-        .unwrap()
-        .raster_placements()
-        .unwrap();
-    assert!(
-        placements.is_empty(),
-        "{} rasters were baked",
-        placements.len()
+    let placements = |bytes| {
+        PvecReader::open(bytes)
+            .unwrap()
+            .raster_placements()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(placements(pdf_page_to_pvec(&page, "test", "0").unwrap()), 1);
+    assert_eq!(
+        placements(pdf_page_to_pvec_with(&page, "test", "0", false).unwrap()),
+        0
     );
 }
 
