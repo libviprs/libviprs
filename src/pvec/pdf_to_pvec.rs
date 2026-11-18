@@ -125,13 +125,31 @@ pub fn pdf_page_to_pvec_with(
                     if t1 == 1.0 { b } else { at(t1) },
                 ))
             }
+            // The clip is a closed region: a stroke on its edge is inside it. The edge sits a hair
+            // off where the PDF's own numbers put it (161.88 is not exact in binary), so the cut
+            // runs against the rectangle grown by a tolerance in source units, and the ends are
+            // pulled back onto the real edge.
+            const EDGE_TOLERANCE: f64 = 1e-4;
+            let grown = ExactBounds {
+                min: [rect.min[0] - EDGE_TOLERANCE, rect.min[1] - EDGE_TOLERANCE],
+                max: [rect.max[0] + EDGE_TOLERANCE, rect.max[1] + EDGE_TOLERANCE],
+            };
+            let snap = |p: [f64; 2]| {
+                [
+                    p[0].clamp(rect.min[0], rect.max[0]),
+                    p[1].clamp(rect.min[1], rect.max[1]),
+                ]
+            };
             let mut pieces: Vec<Vec<[f64; 2]>> = Vec::new();
             for pair in points.windows(2) {
-                match clip_segment(pair[0], pair[1], rect) {
-                    Some((start, end)) => match pieces.last_mut() {
-                        Some(piece) if piece.last() == Some(&start) => piece.push(end),
-                        _ => pieces.push(vec![start, end]),
-                    },
+                match clip_segment(pair[0], pair[1], grown) {
+                    Some((start, end)) => {
+                        let (start, end) = (snap(start), snap(end));
+                        match pieces.last_mut() {
+                            Some(piece) if piece.last() == Some(&start) => piece.push(end),
+                            _ => pieces.push(vec![start, end]),
+                        }
+                    }
                     None => pieces.push(Vec::new()),
                 }
             }
