@@ -803,7 +803,7 @@ fn issue_1622_the_listing_applies_the_viewport_rule_of_the_set() {
 
 #[test]
 fn issue_1622_a_drawing_with_no_paper_layout_lists_nothing() {
-    assert_eq!(listed(b"MOCK-model"), []);
+    assert!(listed(b"MOCK-model").is_empty());
 }
 
 #[test]
