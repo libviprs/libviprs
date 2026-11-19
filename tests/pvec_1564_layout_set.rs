@@ -17,7 +17,8 @@ use libviprs::pvec::{
     InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, ProvenanceStub, ProviderCaps,
     ProviderError, RawEntity, RawGeometry, SourceUnit, ViewportClip, ViewportEntity,
 };
-use libviprs::pvec_convert::{LayoutSetError, PvecLayoutSet, SheetSkip};
+use libviprs::pvec::dwg_acadrust::AcadrustProvider;
+use libviprs::pvec_convert::{LayoutSetError, PaperSheet, PvecLayoutSet, SheetSkip, paper_sheets};
 
 // ---- a mock provider: the bytes it is opened with pick the drawing ----
 
@@ -748,4 +749,102 @@ fn issue_1564_a_rerun_leaves_no_stale_index_or_sheet() {
     assert_eq!(none.index, None);
     assert!(!dir.join("plan.sheets.json").exists());
     fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- listing the sheets without converting them (#1622) ----
+
+/// What [`paper_sheets`] says of each layout: its name, number and whether it is skipped, and why.
+fn listed(bytes: &[u8]) -> Vec<(String, u32, &'static str)> {
+    paper_sheets::<Mock>(CadSource::Bytes(bytes))
+        .unwrap()
+        .into_iter()
+        .map(|PaperSheet { layout, tab_order, skip }| {
+            let skip = match skip {
+                None => "sheet",
+                Some(SheetSkip::Empty) => "empty",
+                Some(SheetSkip::EmptyAfterView) => "empty-after-view",
+                Some(other) => panic!("{layout}: a listing only skips empty layouts, got {other:?}"),
+            };
+            (layout, tab_order, skip)
+        })
+        .collect()
+}
+
+#[test]
+fn issue_1622_the_listing_is_every_paper_layout_in_tab_order_and_skips_what_the_set_skips() {
+    // "Hidden" has content on a layer that is off: the set only finds it empty once it has
+    // converted it, so the listing (which converts nothing) calls it a sheet. "Broken" fails after
+    // its first entity, which is already enough to call it a sheet.
+    assert_eq!(
+        listed(b"MOCK-mixed"),
+        [
+            ("Cover".to_owned(), 1, "sheet"),
+            ("Empty".to_owned(), 2, "empty"),
+            ("Viewport only".to_owned(), 3, "empty"),
+            ("Hidden".to_owned(), 4, "sheet"),
+            ("Broken".to_owned(), 5, "sheet"),
+            ("Plan".to_owned(), 6, "sheet"),
+        ]
+    );
+}
+
+#[test]
+fn issue_1622_the_listing_applies_the_viewport_rule_of_the_set() {
+    let rows = listed(b"MOCK-viewports");
+    let skip = |name: &str| rows.iter().find(|r| r.0 == name).unwrap().2;
+    for name in ["VP off", "VP hide plot", "VP zero height"] {
+        assert_eq!(skip(name), "empty", "{name}");
+    }
+    for name in ["VP numbered 1", "VP model", "VP no-plot layer"] {
+        assert_eq!(skip(name), "sheet", "{name}");
+    }
+    assert_eq!(skip("VP paper view"), "empty-after-view");
+}
+
+#[test]
+fn issue_1622_a_drawing_with_no_paper_layout_lists_nothing() {
+    assert_eq!(listed(b"MOCK-model"), []);
+}
+
+#[test]
+fn issue_1622_the_listing_opens_the_drawing_once_and_refuses_one_that_does_not_open() {
+    OPENED.with(|n| n.set(0));
+    assert_eq!(listed(b"MOCK-many").len(), 100);
+    assert_eq!(OPENED.with(|n| n.get()), 1);
+    let err = paper_sheets::<Mock>(CadSource::Bytes(b"not a drawing")).unwrap_err();
+    assert!(matches!(err, LayoutSetError::Open(_)), "{err:?}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1622_rom_s_floor_plan_lists_its_66_sheets_in_tab_order() {
+    // The drawing is 24 MiB and not ours to publish, so it is not in the repository: point
+    // LIBVIPRS_DWG_LAYOUTS_FIXTURE at it to run this. It is Rom's
+    // MASTER_FLOOR_PLAN_Rev.6.0_NOV_08_2026.dwg (AC1032), 66 paper layouts over a 442k-entity model.
+    let Ok(path) = std::env::var("LIBVIPRS_DWG_LAYOUTS_FIXTURE") else {
+        eprintln!("skipped: LIBVIPRS_DWG_LAYOUTS_FIXTURE is not set (MASTER_FLOOR_PLAN_Rev.6.0_NOV_08_2026.dwg)");
+        return;
+    };
+    let bytes = std::fs::read(&path).unwrap();
+    let sheets = paper_sheets::<AcadrustProvider>(CadSource::Bytes(&bytes)).unwrap();
+    // Its paper layouts in tab order, as LibreDWG 0.14 reads its LAYOUT objects. All 66 have
+    // paper-space content: a title block and viewports onto model space.
+    let tabs = [
+        "SHEET_001", "SHEET_003", "SHEET_059", "SHEET_060", "SHEET_061", "SHEET_062", "SHEET_063",
+        "SHEET_064", "SHEET_065", "SHEET_066", "SHEET_002", "SHEET_013", "SHEET_014", "SHEET_015",
+        "SHEET_016", "SHEET_017", "SHEET_018", "SHEET_019", "SHEET_020", "SHEET_046", "SHEET_010",
+        "SHEET_021", "SHEET_022", "SHEET_023", "SHEET_024", "SHEET_025", "SHEET_026", "SHEET_027",
+        "SHEET_028", "SHEET_045", "SHEET_004", "SHEET_029", "SHEET_031", "SHEET_030", "SHEET_032",
+        "SHEET_033", "SHEET_034", "SHEET_035", "SHEET_036", "SHEET_047", "SHEET_005", "SHEET_037",
+        "SHEET_038", "SHEET_039", "SHEET_040", "SHEET_042", "SHEET_041", "SHEET_043", "SHEET_048",
+        "SHEET_044", "SHEET_006", "SHEET_049", "SHEET_050", "SHEET_051", "SHEET_052", "SHEET_053",
+        "SHEET_054", "SHEET_007", "SHEET_055", "SHEET_056", "SHEET_008", "SHEET_057", "SHEET_058",
+        "SHEET_009", "SHEET_011", "SHEET_012",
+    ];
+    let names: Vec<&str> = sheets.iter().map(|s| s.layout.as_str()).collect();
+    assert_eq!(names, tabs);
+    for (n, s) in sheets.iter().enumerate() {
+        assert_eq!(s.tab_order, n as u32 + 1, "{}", s.layout);
+        assert!(s.skip.is_none(), "{} is a sheet, got {:?}", s.layout, s.skip);
+    }
 }
