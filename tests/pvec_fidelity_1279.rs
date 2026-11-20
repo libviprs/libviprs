@@ -24,6 +24,7 @@ fn n3_5b_1279_default_profile_names_every_field_that_can_exclude() {
         fields,
         vec![
             "layers.frozen",
+            "layers.no_plot_text",
             "layers.off",
             "nested_inserts.max_depth",
             "xrefs"

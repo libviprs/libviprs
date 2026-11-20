@@ -15,6 +15,8 @@
 //! | `layers.off` | `layer-off` | exclude |
 //! | `layers.frozen` | `layer-frozen` | exclude |
 //! | `layers.no_plot` | `layer-no-plot` (print profile ADR) | ignore |
+//! | `layers.frozen_text` | `layer-frozen-text` (print profile ADR) | ignore |
+//! | `layers.no_plot_text` | `layer-no-plot-text` (print profile ADR) | exclude |
 //! | `layers.frozen_in_viewport` | `layer-frozen-in-viewport` | ignore and report |
 //! | `layers.insert_override` | `insert-layer-override` | layer "0" inherits the INSERT's layer |
 //! | `nested_inserts.max_depth` | `nested-insert` | 64, the decoder's own limit |
@@ -25,6 +27,13 @@
 //! V1-3 and have no knob. No-plot layers are visible under V1-3 too; `layers.no_plot` is the
 //! knob [`ViewProfile::print_profile`] sets to exclude them (P-3 of
 //! `docs/adr/pvec-print-profile.md`).
+//!
+//! Text has two knobs of its own (#1621, Rom's call of 2026-11-19, amending V1-3 and P-3): on a
+//! frozen layer a TEXT, MTEXT or attribute is drawn (`layers.frozen_text = ignore`) and on a
+//! no-plot layer it is left out (`layers.no_plot_text = exclude`), in both profiles. They replace
+//! `layers.frozen` and `layers.no_plot` for those classes only, an off layer still hides text, a
+//! viewport freeze still applies to it, and an INSERT on a frozen layer still takes its whole
+//! expansion (attributes included) with it.
 //!
 //! # Policy is applied here, not trusted
 //!
@@ -51,7 +60,7 @@ use std::fmt;
 use thiserror::Error;
 
 use super::limits::{Limit, LimitError, SourceGuard, SourceLimits, over};
-use super::view::{EntityState, PolicyReason, VisibilityFilter};
+use super::view::{EntityState, PolicyReason, VisibilityFilter, draws_text};
 
 use super::provider::{
     DwgProvider, EntityScope, InstancePath, LayerState, LayoutKind, ProviderError, RawEntity,
@@ -126,6 +135,10 @@ pub struct LayerVisibility {
     pub frozen: LayerStateRule,
     /// No-plot layers: drawn under V1-3, excluded under P-3.
     pub no_plot: LayerStateRule,
+    /// TEXT, MTEXT and attributes on a frozen layer, in place of `frozen` for them (#1621).
+    pub frozen_text: LayerStateRule,
+    /// TEXT, MTEXT and attributes on a no-plot layer, in place of `no_plot` for them (#1621).
+    pub no_plot_text: LayerStateRule,
     /// Viewport freezes.
     pub frozen_in_viewport: ViewportFreezeRule,
     /// Layer-0 inheritance.
@@ -179,6 +192,8 @@ pub enum Exclusion {
     LayerFrozen,
     /// No-plot layer, under `layers.no_plot = exclude` (P-3 of the print profile).
     LayerNoPlot,
+    /// Text on a no-plot layer, under `layers.no_plot_text = exclude` (#1621).
+    LayerNoPlotText,
     /// Too deep.
     DepthLimit,
     /// Unresolved block.
@@ -291,6 +306,8 @@ impl ViewProfile {
                 off: LayerStateRule::Exclude,
                 frozen: LayerStateRule::Exclude,
                 no_plot: LayerStateRule::Ignore,
+                frozen_text: LayerStateRule::Ignore,
+                no_plot_text: LayerStateRule::Exclude,
                 frozen_in_viewport: ViewportFreezeRule::IgnoreAndReport,
                 insert_override: InsertLayerRule::InheritOnLayerZero,
             },
@@ -316,6 +333,8 @@ impl ViewProfile {
                 off: LayerStateRule::Exclude,
                 frozen: LayerStateRule::Exclude,
                 no_plot: LayerStateRule::Exclude,
+                frozen_text: LayerStateRule::Ignore,
+                no_plot_text: LayerStateRule::Exclude,
                 frozen_in_viewport: ViewportFreezeRule::Apply,
                 insert_override: InsertLayerRule::InheritOnLayerZero,
             },
@@ -374,6 +393,16 @@ impl ViewProfile {
                 row: "layer-no-plot",
             },
             Knob {
+                field: "layers.frozen_text",
+                value: rule(self.layers.frozen_text).into(),
+                row: "layer-frozen-text",
+            },
+            Knob {
+                field: "layers.no_plot_text",
+                value: rule(self.layers.no_plot_text).into(),
+                row: "layer-no-plot-text",
+            },
+            Knob {
                 field: "layers.frozen_in_viewport",
                 value: match self.layers.frozen_in_viewport {
                     ViewportFreezeRule::IgnoreAndReport => "ignore-and-report",
@@ -421,6 +450,9 @@ impl ViewProfile {
         if self.layers.no_plot == LayerStateRule::Exclude {
             out.push(Exclusion::LayerNoPlot.field());
         }
+        if self.layers.no_plot_text == LayerStateRule::Exclude {
+            out.push(Exclusion::LayerNoPlotText.field());
+        }
         // The sheet clip drops what lies wholly outside the sheet (P-7, #1562).
         if self.viewport_clipping == ViewportClipping::Exact {
             out.push("viewport_clipping");
@@ -444,7 +476,8 @@ impl ViewProfile {
     /// The provider's entities for the selected space are walked in the provider's own order,
     /// INSERTs are descended depth first (a visible INSERT is not itself a leaf), and every leaf
     /// is checked against the layer rules (V1-2, V1-3, and P-3's no-plot rule when
-    /// `layers.no_plot = exclude`). An INSERT that is excluded takes its whole expansion with it
+    /// `layers.no_plot = exclude`), text against `layers.frozen_text` and `layers.no_plot_text`
+    /// on its effective layer (#1621). An INSERT that is excluded takes its whole expansion with it
     /// and counts once. A paper layout is walked through its own block record when the profile
     /// carries the print rules (`viewport_clipping = exact`, #1562).
     ///
@@ -521,7 +554,9 @@ impl ViewProfile {
 
         let needs_layers = self.layers.off == LayerStateRule::Exclude
             || self.layers.frozen == LayerStateRule::Exclude
-            || self.layers.no_plot == LayerStateRule::Exclude;
+            || self.layers.no_plot == LayerStateRule::Exclude
+            || self.layers.frozen_text == LayerStateRule::Exclude
+            || self.layers.no_plot_text == LayerStateRule::Exclude;
         let layer_table: Vec<LayerState> = if needs_layers {
             provider.layers()?
         } else {
@@ -606,8 +641,12 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
         match self.filter.decide(entity, &state).dropped {
             Some(PolicyReason::LayerOff) => Some(Exclusion::LayerOff),
             Some(PolicyReason::LayerFrozen) => Some(Exclusion::LayerFrozen),
+            Some(PolicyReason::LayerNoPlotText) => Some(Exclusion::LayerNoPlotText),
             // Off and frozen come first, so a layer that is both off and no-plot counts as off.
-            _ if self.no_plot.iter().any(|n| n.eq_ignore_ascii_case(layer)) => {
+            // Text on a no-plot layer was decided by the filter under `layers.no_plot_text`.
+            _ if !draws_text(&entity.provenance.class_name)
+                && self.no_plot.iter().any(|n| n.eq_ignore_ascii_case(layer)) =>
+            {
                 Some(Exclusion::LayerNoPlot)
             }
             _ => None,
@@ -708,10 +747,11 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
 
 impl Exclusion {
     /// Every way an entity can be excluded.
-    pub const ALL: [Exclusion; 5] = [
+    pub const ALL: [Exclusion; 6] = [
         Exclusion::LayerOff,
         Exclusion::LayerFrozen,
         Exclusion::LayerNoPlot,
+        Exclusion::LayerNoPlotText,
         Exclusion::DepthLimit,
         Exclusion::Unresolved,
     ];
@@ -739,6 +779,7 @@ impl Exclusion {
             Exclusion::LayerOff => "layers.off",
             Exclusion::LayerFrozen => "layers.frozen",
             Exclusion::LayerNoPlot => "layers.no_plot",
+            Exclusion::LayerNoPlotText => "layers.no_plot_text",
             Exclusion::DepthLimit => "nested_inserts.max_depth",
             Exclusion::Unresolved => "xrefs",
         }
@@ -749,7 +790,10 @@ impl Exclusion {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
-            Exclusion::LayerOff | Exclusion::LayerFrozen | Exclusion::LayerNoPlot => "LAYER_HIDDEN",
+            Exclusion::LayerOff
+            | Exclusion::LayerFrozen
+            | Exclusion::LayerNoPlot
+            | Exclusion::LayerNoPlotText => "LAYER_HIDDEN",
             Exclusion::DepthLimit => "BLOCK_DEPTH_EXCEEDED",
             Exclusion::Unresolved => "UNRESOLVED_BLOCK",
         }
@@ -766,6 +810,7 @@ impl Exclusion {
             Exclusion::LayerOff
             | Exclusion::LayerFrozen
             | Exclusion::LayerNoPlot
+            | Exclusion::LayerNoPlotText
             | Exclusion::DepthLimit => FidelityClass::IgnoredByPolicy,
             Exclusion::Unresolved => FidelityClass::Unsupported,
         }
