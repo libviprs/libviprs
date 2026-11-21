@@ -45,7 +45,7 @@
 //! is the proposed code of N1.4 and N4.6 allocates it; here it is a string, not a
 //! `DiagnosticCode`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use thiserror::Error;
@@ -547,7 +547,9 @@ impl ViewProfile {
             excluded: Vec::new(),
             guard: SourceGuard::new(self.limits),
             expanded: 0,
+            hidden: BTreeSet::new(),
         };
+        walk.load_hidden(&EntityScope::Layout(model.id))?;
         let mut cursor = provider.entities(&EntityScope::Layout(model.id))?;
         let mut top = Vec::new();
         while let Some(e) = cursor.next_entity()? {
@@ -593,9 +595,28 @@ struct Walk<'a, P: ?Sized> {
     guard: SourceGuard,
     /// Instances of blocks placed so far, the product of the grids down to each INSERT, summed.
     expanded: u64,
+    /// Handles of the entities whose own invisible flag is set (#1633). An entity hidden this way
+    /// is not drawn, and a hidden INSERT takes its whole block with it.
+    hidden: BTreeSet<crate::cad::ItemHandle>,
 }
 
 impl<P: DwgProvider + ?Sized> Walk<'_, P> {
+    /// Notes the entities of `scope` that carry the invisible flag. A provider that cannot report
+    /// the flag leaves every entity drawn, as it did before.
+    fn load_hidden(&mut self, scope: &EntityScope) -> Result<(), ViewProfileError> {
+        match self.provider.entity_facts(scope) {
+            Ok(facts) => self.hidden.extend(
+                facts
+                    .into_iter()
+                    .filter(|(_, f)| f.visible.present() == Some(&false))
+                    .map(|(h, _)| h),
+            ),
+            Err(ProviderError::CannotReport(_) | ProviderError::NoSuchScope(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+
     /// The reason a layer hides an entity under this profile, if it does. The layer is the
     /// effective one (V1-2 already applied), handed to the filter as an override.
     fn layer_exclusion(&self, entity: &RawEntity, layer: &str) -> Option<Exclusion> {
@@ -622,6 +643,13 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
         instances: u64,
     ) -> Result<(), ViewProfileError> {
         self.guard.check_entity(&entity)?;
+        if entity
+            .provenance
+            .handle
+            .is_some_and(|h| self.hidden.contains(&h))
+        {
+            return Ok(());
+        }
         // V1-2: a leaf (or INSERT) on layer "0" inside an INSERT takes that INSERT's layer.
         let effective = match container_layer {
             Some(c)
@@ -661,6 +689,7 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
             name: block.block_name.clone(),
             reached_via: via,
         };
+        self.load_hidden(&scope)?;
         let mut cursor = match self.provider.entities(&scope) {
             Ok(c) => c,
             Err(ProviderError::NoSuchScope(_)) => {
