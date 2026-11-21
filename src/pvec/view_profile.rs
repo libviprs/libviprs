@@ -128,6 +128,16 @@ pub enum XrefPolicy {
     ReportExternal,
 }
 
+/// What the user forces for one layer: wins over every flag, Defpoints included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LayerOverride {
+    /// Draw the layer, and thaw it in every viewport.
+    Visible,
+    /// Leave the layer out.
+    Hidden,
+}
+
 /// Layer visibility.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerVisibility {
@@ -145,6 +155,13 @@ pub struct LayerVisibility {
     pub frozen_in_viewport: ViewportFreezeRule,
     /// Layer-0 inheritance.
     pub insert_override: InsertLayerRule,
+    /// Per-layer overrides (ASCII case-insensitive names), checked before off, frozen and the
+    /// viewport freezes, on the effective layer (#1627).
+    pub overrides: Vec<(String, LayerOverride)>,
+    /// Per-viewport overrides as `(viewport key, layer, override)`, the key being the layout's name
+    /// and the viewport's handle in hex (`Sheet/2A3`); they edit that viewport's frozen list and
+    /// leave the layout's own entities alone (#1627).
+    pub viewport_overrides: Vec<(String, String, LayerOverride)>,
 }
 
 /// Nested inserts.
@@ -312,6 +329,8 @@ impl ViewProfile {
                 no_plot_text: LayerStateRule::Ignore,
                 frozen_in_viewport: ViewportFreezeRule::IgnoreAndReport,
                 insert_override: InsertLayerRule::InheritOnLayerZero,
+                overrides: Vec::new(),
+                viewport_overrides: Vec::new(),
             },
             nested_inserts: NestedInsertPolicy { max_depth: 64 },
             xrefs: XrefPolicy::ReportExternal,
@@ -339,6 +358,8 @@ impl ViewProfile {
                 no_plot_text: LayerStateRule::Exclude,
                 frozen_in_viewport: ViewportFreezeRule::Apply,
                 insert_override: InsertLayerRule::InheritOnLayerZero,
+                overrides: Vec::new(),
+                viewport_overrides: Vec::new(),
             },
             nested_inserts: NestedInsertPolicy { max_depth: 64 },
             xrefs: XrefPolicy::ReportExternal,

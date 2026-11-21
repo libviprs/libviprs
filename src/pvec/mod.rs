@@ -169,7 +169,7 @@ pub use view::{
     select_layout,
 };
 pub use view_profile::{
-    ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerStateRule, LayerVisibility,
-    NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile, ViewProfileError, ViewReport,
-    ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
+    ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerOverride, LayerStateRule,
+    LayerVisibility, NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile,
+    ViewProfileError, ViewReport, ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
 };

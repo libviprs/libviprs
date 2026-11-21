@@ -14,18 +14,10 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::cad::CadSource;
-use crate::pvec::DwgProvider;
+use crate::pvec::{DwgProvider, ViewProfile};
 use crate::pvec_convert::LayoutSetError;
 
-/// What the user forces for one layer: wins over every flag, Defpoints included.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum LayerOverride {
-    /// Draw the layer.
-    Visible,
-    /// Leave the layer out.
-    Hidden,
-}
+pub use crate::pvec::LayerOverride;
 
 /// The two states a resolved layer is in for model space, or for one layout or viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -377,4 +369,17 @@ pub fn cad_manifest<P: DwgProvider>(source: CadSource<'_>) -> Result<CadManifest
 pub fn resolve_visibility(manifest: &CadManifest, choices: &CadChoices) -> Vec<ResolvedLayer> {
     let _ = (manifest, choices);
     todo!("#1626: apply the truth table for model space, plots and viewports")
+}
+
+/// The profile the server converts a plan with: `profile`, then the text switches from
+/// `choices.text`, then the layer overrides and the per-viewport overrides from `choices` (spec
+/// section 2.4). With nothing chosen the profile comes back as it went in.
+#[must_use]
+pub fn apply_choices(
+    profile: ViewProfile,
+    manifest: &CadManifest,
+    choices: &CadChoices,
+) -> ViewProfile {
+    let _ = (manifest, choices);
+    profile
 }

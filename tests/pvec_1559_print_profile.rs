@@ -29,6 +29,8 @@ fn issue_1559_print_profile_is_pinned_field_by_field() {
             no_plot_text: LayerStateRule::Exclude,
             frozen_in_viewport: ViewportFreezeRule::Apply,
             insert_override: InsertLayerRule::InheritOnLayerZero,
+            overrides: Vec::new(),
+            viewport_overrides: Vec::new(),
         },
         nested_inserts: NestedInsertPolicy { max_depth: 64 },
         xrefs: XrefPolicy::ReportExternal,

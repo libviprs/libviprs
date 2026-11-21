@@ -84,7 +84,7 @@ pub use manifest::{
     CadChoices, CadManifest, CadMode, CadText, LayerCounts, LayerOverride, ManifestColour,
     ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace,
     ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility, ResolvedLayer, StateLayer,
-    TextSwitch, Visibility, VpRef, cad_manifest, resolve_visibility,
+    TextSwitch, Visibility, VpRef, apply_choices, cad_manifest, resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
