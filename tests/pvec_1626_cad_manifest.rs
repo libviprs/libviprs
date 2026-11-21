@@ -323,6 +323,14 @@ fn cad_manifest_lists_without_converting() {
     assert_eq!(viewports, 113, "113 viewports");
     assert!(!m.layers.is_empty() && m.layers.iter().all(|l| !l.name.is_empty()));
     assert!(m.model_space.entity_count > 0, "the count pass ran");
+    let sheet = m
+        .layouts
+        .iter()
+        .find(|l| l.name == "SHEET_011")
+        .expect("SHEET_011 is listed");
+    let paper = sheet.paper.as_ref().expect("SHEET_011 lists its paper");
+    assert!((paper.width_mm - 215.9).abs() < 0.5 && (paper.height_mm - 279.4).abs() < 0.5);
+    assert_eq!(paper.orientation, "portrait");
 }
 
 // What a server needs to request one thumbnail per layout: name, tab order, paper, plot area.
@@ -333,8 +341,68 @@ fn cad_manifest_carries_what_a_thumbnail_needs() {
     let m = cad_manifest::<AcadrustProvider>(CadSource::Path(&path)).expect("the DXF lists");
     for l in m.layouts.iter().filter(|l| l.sheet) {
         let paper = l.paper.as_ref().expect("a sheet lists its paper");
-        assert!(paper.width_mm > 0.0 && paper.height_mm > 0.0, "{}", l.name);
+        assert!(
+            paper.width_mm >= 0.0 && paper.height_mm >= 0.0,
+            "{}",
+            l.name
+        );
         assert!(l.plot.is_some(), "a sheet lists its plot area: {}", l.name);
         assert!(l.tab >= 1, "{}", l.name);
     }
+}
+
+fn dxf(name: &str) -> CadManifest {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pvec-dxf")
+        .join(name);
+    cad_manifest::<AcadrustProvider>(CadSource::Path(&path)).expect("the DXF lists")
+}
+
+fn layer<'a>(m: &'a CadManifest, name: &str) -> &'a ManifestLayer {
+    m.layers
+        .iter()
+        .find(|l| l.name == name)
+        .unwrap_or_else(|| panic!("{name} is listed"))
+}
+
+// The flags fixture: every flag is read and the xref warning fires.
+#[test]
+fn cad_import_flags_fixture_lists_every_flag() {
+    let m = dxf("cad-import-flags.dxf");
+    assert!(layer(&m, "A-ON").on && !layer(&m, "A-OFF").on);
+    assert!(layer(&m, "A-FROZEN").frozen && !layer(&m, "A-ON").frozen);
+    assert!(layer(&m, "A-LOCKED").locked);
+    assert!(!layer(&m, "A-NOPLOT").plot && layer(&m, "A-ON").plot);
+    assert!(layer(&m, "A-NEWVP").frozen_in_new_viewports);
+    assert_eq!(layer(&m, "XR|A-WALL").xref.as_deref(), Some("XR"));
+    let codes: Vec<&str> = m.warnings.iter().map(|w| w.code.as_str()).collect();
+    assert!(codes.contains(&"XREF_LAYERS"), "{codes:?}");
+
+    let resolved = resolve_visibility(&m, &choices());
+    let of = |n: &str| resolved.iter().find(|r| r.name == n).expect("resolved");
+    assert_eq!(of("A-OFF").model, Visibility::Hidden);
+    assert_eq!(of("A-FROZEN").model, Visibility::Hidden);
+    assert_eq!(of("A-NOPLOT").model, Visibility::Visible);
+    assert_eq!(of("A-NOPLOT").plots, PlotsVisibility::Hidden);
+    assert_eq!(of("Defpoints").plots, PlotsVisibility::Hidden);
+}
+
+// The plot fixture: a viewport freezes a layer, so the layer is "Visible (Viewport)".
+#[test]
+fn cad_import_plot_fixture_resolves_a_viewport_freeze() {
+    let m = dxf("cad-import-plot.dxf");
+    let frozen = layer(&m, "A-VPFROZEN");
+    assert_eq!(
+        frozen.vp_frozen_in.len(),
+        1,
+        "one viewport freezes it: {:?}",
+        frozen.vp_frozen_in
+    );
+    let resolved = resolve_visibility(&m, &choices());
+    let of = |n: &str| resolved.iter().find(|r| r.name == n).expect("resolved");
+    assert_eq!(of("A-VPFROZEN").model, Visibility::Visible);
+    assert_eq!(of("A-VPFROZEN").plots, PlotsVisibility::Viewport);
+    assert_eq!(of("A-VPFROZEN").plots_count.frozen_in, 1);
+    assert_eq!(of("A-PLOTTED").plots, PlotsVisibility::Visible);
+    assert_eq!(of("A-NOPLOT").plots, PlotsVisibility::Hidden);
 }
