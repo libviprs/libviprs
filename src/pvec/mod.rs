@@ -108,6 +108,10 @@ pub mod view_profile;
 pub mod writer;
 pub mod xref;
 
+#[cfg(feature = "pvec-raster-thumbnail")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster-thumbnail")))]
+pub mod thumbnail;
+
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
 pub mod dwg_acadrust;

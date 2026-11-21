@@ -215,6 +215,9 @@ pub struct PvecConversionOutput {
     /// The most outcomes that were waiting for the consumer at once. Never above the capacity set
     /// with [`PvecConversion::queue_capacity`].
     pub peak_queue_depth: u32,
+    /// The sheet as a PNG, when [`PvecConversion::thumbnail`] asked for one (#1629).
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    pub thumbnail: Option<Vec<u8>>,
 }
 
 /// One conversion, configured the way `EngineBuilder` configures a pyramid run.
@@ -235,6 +238,8 @@ pub struct PvecConversion<'a> {
     annotations: bool,
     element_rules: Option<ElementRules>,
     plot_settings: PlotSettings,
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    thumbnail_width: Option<u32>,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -292,6 +297,8 @@ impl<'a> PvecConversion<'a> {
             annotations: false,
             element_rules: None,
             plot_settings: PlotSettings::default(),
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            thumbnail_width: None,
         }
     }
 
@@ -347,6 +354,15 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn limits(mut self, limits: SourceLimits) -> Self {
         self.view_profile = self.view_profile.with_limits(limits);
+        self
+    }
+
+    /// Also draw the converted sheet as a PNG `width_px` wide, into
+    /// [`PvecConversionOutput::thumbnail`] (#1629). Strokes only, black on white.
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    #[must_use]
+    pub fn thumbnail(mut self, width_px: u32) -> Self {
+        self.thumbnail_width = Some(width_px);
         self
     }
 
@@ -2433,6 +2449,8 @@ impl<'a> PvecConversion<'a> {
             fidelity,
             written,
             peak_queue_depth,
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            thumbnail: None,
         })
     }
 }
