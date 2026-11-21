@@ -232,7 +232,8 @@ pub struct PvecConversion<'a> {
     queue_capacity: usize,
     components: StreamSelection,
     regions: Option<RegionConfig>,
-    annotations: bool,
+    texts: bool,
+    fills: bool,
     element_rules: Option<ElementRules>,
 }
 
@@ -254,20 +255,41 @@ impl<'a> PvecConversion<'a> {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             components: StreamSelection::NONE,
             regions: None,
-            annotations: false,
+            texts: false,
+            fills: false,
             element_rules: None,
         }
     }
 
-    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Off by
-    /// default, and it only takes effect with the line style stream selected
-    /// ([`components`](Self::components)): each text is anchored on a short polyline and each hatch
-    /// boundary is an entity of its own, and the line style stream is what marks those hidden, so
-    /// without it they would draw as stray lines. With it off, or without the line style stream,
-    /// these classes are counted as unmapped, as before.
+    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Shorthand
+    /// for [`texts`](Self::texts) and [`fills`](Self::fills) together, so a call to either after it
+    /// wins for its half. Off by default, and it only takes effect with the line style stream
+    /// selected ([`components`](Self::components)): each text is anchored on a short polyline and
+    /// each hatch boundary is an entity of its own, and the line style stream is what marks those
+    /// hidden, so without it they would draw as stray lines. With it off, or without the line style
+    /// stream, these classes are counted as unmapped, as before.
     #[must_use]
     pub fn annotations(mut self, on: bool) -> Self {
-        self.annotations = on;
+        self.texts = on;
+        self.fills = on;
+        self
+    }
+
+    /// Carry TEXT, MTEXT and ATTDEF in PVec's text stream (#1624), without HATCH and SOLID: those
+    /// stay unmapped, each with a warning saying fills are off, until [`fills`](Self::fills) is on.
+    /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    #[must_use]
+    pub fn texts(mut self, on: bool) -> Self {
+        self.texts = on;
+        self
+    }
+
+    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT and ATTDEF
+    /// stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
+    /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    #[must_use]
+    pub fn fills(mut self, on: bool) -> Self {
+        self.fills = on;
         self
     }
 
@@ -503,7 +525,8 @@ impl<'a> PvecConversion<'a> {
             queue_capacity,
             components,
             regions,
-            annotations,
+            texts: want_texts,
+            fills: want_fills,
             element_rules,
             calibration: caller_calibration,
             ..
@@ -1157,7 +1180,7 @@ impl<'a> PvecConversion<'a> {
         let mut labels: Vec<RoomLabel> = Vec::new();
         // The texts and hatches carried in streams (#1609): the entity a text hangs on, the entities
         // a hatch lists, and how many of each class were mapped or not.
-        let annotate = *annotations && components.line_style;
+        let annotate = (*want_texts || *want_fills) && components.line_style;
         let mut texts: Vec<(EntityId, TextBody)> = Vec::new();
         let mut fills: Vec<(Vec<EntityId>, FillBody)> = Vec::new();
         let mut annotation_counts: BTreeMap<String, u64> = BTreeMap::new();
@@ -1727,15 +1750,35 @@ impl<'a> PvecConversion<'a> {
                 // draws, and is counted as unmapped otherwise (#1609). Its carriers are written
                 // hidden, so only the model space of a drawing with no sheet clip is mapped.
                 let mut pending: Option<Body> = None;
+                // Texts and fills are two choices (#1624): a class whose choice is off stays
+                // unmapped and says so, so a caller that asked for one never gets the other.
+                let (text_class, fill_class) = (
+                    matches!(
+                        raw.provenance.class_name.as_str(),
+                        "TEXT" | "MTEXT" | "ATTDEF"
+                    ),
+                    matches!(raw.provenance.class_name.as_str(), "HATCH" | "SOLID"),
+                );
+                if annotate
+                    && window.is_none()
+                    && clip_box.is_none()
+                    && matches!(item, Item::Leaf(_))
+                    && matches!(raw.geometry, RawGeometry::Unmapped { .. })
+                    && ((text_class && !*want_texts) || (fill_class && !*want_fills))
+                {
+                    let (class, choice) = (
+                        raw.provenance.class_name.as_str(),
+                        if text_class { "texts" } else { "fills" },
+                    );
+                    done.warnings
+                        .push(format!("{class}: not carried, {choice} are off"));
+                }
                 if annotate
                     && window.is_none()
                     && clip_box.is_none()
                     && let Item::Leaf(f) = item
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && matches!(
-                        raw.provenance.class_name.as_str(),
-                        "TEXT" | "MTEXT" | "ATTDEF" | "HATCH" | "SOLID"
-                    )
+                    && ((text_class && *want_texts) || (fill_class && *want_fills))
                 {
                     let class = raw.provenance.class_name.as_str();
                     let made = raw
@@ -2029,6 +2072,7 @@ impl<'a> PvecConversion<'a> {
             annotation_counts,
             sheet,
         } = self.classify(provider, Some(unit))?;
+        let (ask_texts, ask_fills) = (self.texts, self.fills);
         let Self {
             dest,
             leaves,
@@ -2184,6 +2228,8 @@ impl<'a> PvecConversion<'a> {
                     dropped: BTreeMap::new(),
                     colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
                     annotations: annotation_counts.clone(),
+                    texts: ask_texts && select.line_style,
+                    fills: ask_fills && select.line_style,
                 };
                 let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
                 for d in &built.dropped {
