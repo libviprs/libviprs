@@ -1213,7 +1213,7 @@ impl Layout {
         lay.width_factor = width_factor;
         let second = alignment.unwrap_or(insertion);
         if matches!(h, 3 | 5) {
-            let span = (second.x - insertion.x).hypot(second.y - insertion.y);
+            let span = pvec_numeric::detmath::hypot(second.x - insertion.x, second.y - insertion.y);
             if span > 0.0 && span.is_finite() {
                 lay.fit = Some((span, h == 3));
             }
