@@ -37,6 +37,7 @@ fn only(layer: bool, line_style: bool, provenance: bool) -> StreamSelection {
         layer,
         line_style,
         provenance,
+        stroke_paint: false,
     }
 }
 
@@ -372,6 +373,7 @@ fn issue_1525_two_linetypes_with_the_same_dashes_keep_their_own_names_in_the_tab
             stub: &o.entity.provenance,
             style: Some(s),
             viewport: None,
+            paint: None,
         })
         .collect();
     let built = build_streams(only(false, true, false), &ids, &[], &rows).unwrap();

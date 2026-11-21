@@ -844,6 +844,7 @@ impl DwgProvider for AcadrustProvider {
                 frozen: l.is_frozen(),
                 locked: l.is_locked(),
                 plottable: l.is_plottable,
+                colour: fact_colour(l.color).present().copied(),
             })
             .collect())
     }

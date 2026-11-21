@@ -101,6 +101,7 @@ fn layer(name: &str, off: bool, frozen: bool) -> LayerState {
         frozen,
         locked: false,
         plottable: true,
+        colour: None,
     }
 }
 

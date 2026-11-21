@@ -2167,6 +2167,7 @@ impl<'a> PvecConversion<'a> {
                         stub: &s.stub,
                         style: s.style.as_ref(),
                         viewport: s.viewport,
+                        paint: None,
                     })
                     .collect();
                 let built = build_streams(select, &open.source_ids, &layers, &rows)

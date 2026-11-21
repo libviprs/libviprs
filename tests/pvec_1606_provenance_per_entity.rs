@@ -46,6 +46,7 @@ fn provenance(inserts: &[u64]) -> (Vec<libviprs::pvec::EntityId>, ProvenanceStre
             stub: &o.entity.provenance,
             style: None,
             viewport: None,
+            paint: None,
         })
         .collect();
     let built = build_streams(

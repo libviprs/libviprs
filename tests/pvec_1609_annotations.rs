@@ -219,6 +219,7 @@ impl DwgProvider for Notes {
             frozen: false,
             locked: false,
             plottable: true,
+            colour: None,
         }])
     }
 

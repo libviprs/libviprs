@@ -53,6 +53,7 @@ fn sources<'a>(
             stub,
             style: styles.get(i),
             viewport: None,
+            paint: None,
         })
         .collect()
 }
@@ -85,6 +86,7 @@ fn issue_1093_a_layer_name_past_the_bound_drops_its_row_and_not_the_streams() {
         frozen: false,
         locked: false,
         plottable: true,
+        colour: None,
     }];
     let out = build_streams(
         StreamSelection::ALL,

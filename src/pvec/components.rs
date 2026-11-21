@@ -48,6 +48,8 @@ pub struct StreamSelection {
     pub line_style: bool,
     /// The provenance stream.
     pub provenance: bool,
+    /// The stroke paint stream: one colour word per stroke whose colour the drawing settles (#1638).
+    pub stroke_paint: bool,
 }
 
 impl StreamSelection {
@@ -56,12 +58,14 @@ impl StreamSelection {
         layer: true,
         line_style: true,
         provenance: true,
+        stroke_paint: true,
     };
     /// No stream: a geometry-only artifact.
     pub const NONE: Self = Self {
         layer: false,
         line_style: false,
         provenance: false,
+        stroke_paint: false,
     };
 }
 
@@ -77,6 +81,8 @@ pub struct ComponentSource<'a> {
     /// The viewport a model-space entity was drawn through on a sheet (#1563): its provenance row
     /// is then kind 2, the source handle followed by this one.
     pub viewport: Option<ItemHandle>,
+    /// The stroke's colour word, `0xRRGGBBAA`, when the drawing settles it (#1638).
+    pub paint: Option<u32>,
 }
 
 /// A row or table entry left out of a stream because PVec cannot hold it.

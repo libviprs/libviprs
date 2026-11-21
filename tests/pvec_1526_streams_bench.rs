@@ -64,6 +64,7 @@ fn streams_cost() {
         layer: false,
         line_style: false,
         provenance: true,
+        stroke_paint: false,
     };
     let regions = RegionConfig {
         gap_tolerance: 0.5,
