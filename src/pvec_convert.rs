@@ -62,6 +62,8 @@ mod calibration;
 mod capability;
 mod georef;
 mod layouts;
+mod pdf_plot;
+pub use pdf_plot::{PdfPlot, PdfPlotOutput};
 #[cfg(feature = "pvec-raster")]
 mod pdf;
 pub use crate::pvec::writer::recalibrate;
