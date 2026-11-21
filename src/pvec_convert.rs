@@ -271,6 +271,20 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// Carry TEXT, MTEXT and ATTDEF in PVec's text stream (#1624).
+    #[must_use]
+    pub fn texts(mut self, on: bool) -> Self {
+        self.annotations = on;
+        self
+    }
+
+    /// Carry HATCH and SOLID in PVec's hatch stream (#1624).
+    #[must_use]
+    pub fn fills(mut self, on: bool) -> Self {
+        self.annotations = on;
+        self
+    }
+
     /// The layer, block, colour and lineweight rules that say which lines are walls for the
     /// regions step, in place of [`ElementRules::default_profile`] (#1610).
     #[must_use]
@@ -2184,6 +2198,8 @@ impl<'a> PvecConversion<'a> {
                     dropped: BTreeMap::new(),
                     colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
                     annotations: annotation_counts.clone(),
+                    texts: false,
+                    fills: false,
                 };
                 let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
                 for d in &built.dropped {

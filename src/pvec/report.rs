@@ -267,6 +267,12 @@ pub struct ComponentsSummary {
     /// hatch of three boundary loops is one `HATCH.mapped`. Empty when they were not asked for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, u64>,
+    /// Whether texts were asked for (#1624).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub texts: bool,
+    /// Whether fills (HATCH and SOLID) were asked for (#1624).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fills: bool,
 }
 
 /// What the room and corridor step of a conversion found (#1526). Optional and ignorable, like
