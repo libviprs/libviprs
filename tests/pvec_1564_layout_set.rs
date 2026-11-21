@@ -11,13 +11,13 @@ use std::path::{Path, PathBuf};
 
 use libviprs::CancelToken;
 use libviprs::cad::{CadSource, ItemHandle};
+use libviprs::pvec::dwg_acadrust::AcadrustProvider;
 use libviprs::pvec::publish::{open_published, report_path};
 use libviprs::pvec::{
     Availability, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet, FacetSource,
     InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, ProvenanceStub, ProviderCaps,
     ProviderError, RawEntity, RawGeometry, SourceUnit, ViewportClip, ViewportEntity,
 };
-use libviprs::pvec::dwg_acadrust::AcadrustProvider;
 use libviprs::pvec_convert::{LayoutSetError, PaperSheet, PvecLayoutSet, SheetSkip, paper_sheets};
 
 // ---- a mock provider: the bytes it is opened with pick the drawing ----
@@ -758,15 +758,23 @@ fn listed(bytes: &[u8]) -> Vec<(String, u32, &'static str)> {
     paper_sheets::<Mock>(CadSource::Bytes(bytes))
         .unwrap()
         .into_iter()
-        .map(|PaperSheet { layout, tab_order, skip }| {
-            let skip = match skip {
-                None => "sheet",
-                Some(SheetSkip::Empty) => "empty",
-                Some(SheetSkip::EmptyAfterView) => "empty-after-view",
-                Some(other) => panic!("{layout}: a listing only skips empty layouts, got {other:?}"),
-            };
-            (layout, tab_order, skip)
-        })
+        .map(
+            |PaperSheet {
+                 layout,
+                 tab_order,
+                 skip,
+             }| {
+                let skip = match skip {
+                    None => "sheet",
+                    Some(SheetSkip::Empty) => "empty",
+                    Some(SheetSkip::EmptyAfterView) => "empty-after-view",
+                    Some(other) => {
+                        panic!("{layout}: a listing only skips empty layouts, got {other:?}")
+                    }
+                };
+                (layout, tab_order, skip)
+            },
+        )
         .collect()
 }
 
@@ -822,7 +830,9 @@ fn issue_1622_rom_s_floor_plan_lists_its_66_sheets_in_tab_order() {
     // LIBVIPRS_DWG_LAYOUTS_FIXTURE at it to run this. It is Rom's
     // MASTER_FLOOR_PLAN_Rev.6.0_NOV_08_2026.dwg (AC1032), 66 paper layouts over a 442k-entity model.
     let Ok(path) = std::env::var("LIBVIPRS_DWG_LAYOUTS_FIXTURE") else {
-        eprintln!("skipped: LIBVIPRS_DWG_LAYOUTS_FIXTURE is not set (MASTER_FLOOR_PLAN_Rev.6.0_NOV_08_2026.dwg)");
+        eprintln!(
+            "skipped: LIBVIPRS_DWG_LAYOUTS_FIXTURE is not set (MASTER_FLOOR_PLAN_Rev.6.0_NOV_08_2026.dwg)"
+        );
         return;
     };
     let bytes = std::fs::read(&path).unwrap();
@@ -830,21 +840,82 @@ fn issue_1622_rom_s_floor_plan_lists_its_66_sheets_in_tab_order() {
     // Its paper layouts in tab order, as LibreDWG 0.14 reads its LAYOUT objects. All 66 have
     // paper-space content: a title block and viewports onto model space.
     let tabs = [
-        "SHEET_001", "SHEET_003", "SHEET_059", "SHEET_060", "SHEET_061", "SHEET_062", "SHEET_063",
-        "SHEET_064", "SHEET_065", "SHEET_066", "SHEET_002", "SHEET_013", "SHEET_014", "SHEET_015",
-        "SHEET_016", "SHEET_017", "SHEET_018", "SHEET_019", "SHEET_020", "SHEET_046", "SHEET_010",
-        "SHEET_021", "SHEET_022", "SHEET_023", "SHEET_024", "SHEET_025", "SHEET_026", "SHEET_027",
-        "SHEET_028", "SHEET_045", "SHEET_004", "SHEET_029", "SHEET_031", "SHEET_030", "SHEET_032",
-        "SHEET_033", "SHEET_034", "SHEET_035", "SHEET_036", "SHEET_047", "SHEET_005", "SHEET_037",
-        "SHEET_038", "SHEET_039", "SHEET_040", "SHEET_042", "SHEET_041", "SHEET_043", "SHEET_048",
-        "SHEET_044", "SHEET_006", "SHEET_049", "SHEET_050", "SHEET_051", "SHEET_052", "SHEET_053",
-        "SHEET_054", "SHEET_007", "SHEET_055", "SHEET_056", "SHEET_008", "SHEET_057", "SHEET_058",
-        "SHEET_009", "SHEET_011", "SHEET_012",
+        "SHEET_001",
+        "SHEET_003",
+        "SHEET_059",
+        "SHEET_060",
+        "SHEET_061",
+        "SHEET_062",
+        "SHEET_063",
+        "SHEET_064",
+        "SHEET_065",
+        "SHEET_066",
+        "SHEET_002",
+        "SHEET_013",
+        "SHEET_014",
+        "SHEET_015",
+        "SHEET_016",
+        "SHEET_017",
+        "SHEET_018",
+        "SHEET_019",
+        "SHEET_020",
+        "SHEET_046",
+        "SHEET_010",
+        "SHEET_021",
+        "SHEET_022",
+        "SHEET_023",
+        "SHEET_024",
+        "SHEET_025",
+        "SHEET_026",
+        "SHEET_027",
+        "SHEET_028",
+        "SHEET_045",
+        "SHEET_004",
+        "SHEET_029",
+        "SHEET_031",
+        "SHEET_030",
+        "SHEET_032",
+        "SHEET_033",
+        "SHEET_034",
+        "SHEET_035",
+        "SHEET_036",
+        "SHEET_047",
+        "SHEET_005",
+        "SHEET_037",
+        "SHEET_038",
+        "SHEET_039",
+        "SHEET_040",
+        "SHEET_042",
+        "SHEET_041",
+        "SHEET_043",
+        "SHEET_048",
+        "SHEET_044",
+        "SHEET_006",
+        "SHEET_049",
+        "SHEET_050",
+        "SHEET_051",
+        "SHEET_052",
+        "SHEET_053",
+        "SHEET_054",
+        "SHEET_007",
+        "SHEET_055",
+        "SHEET_056",
+        "SHEET_008",
+        "SHEET_057",
+        "SHEET_058",
+        "SHEET_009",
+        "SHEET_011",
+        "SHEET_012",
     ];
     let names: Vec<&str> = sheets.iter().map(|s| s.layout.as_str()).collect();
     assert_eq!(names, tabs);
     for (n, s) in sheets.iter().enumerate() {
         assert_eq!(s.tab_order, n as u32 + 1, "{}", s.layout);
-        assert!(s.skip.is_none(), "{} is a sheet, got {:?}", s.layout, s.skip);
+        assert!(
+            s.skip.is_none(),
+            "{} is a sheet, got {:?}",
+            s.layout,
+            s.skip
+        );
     }
 }
