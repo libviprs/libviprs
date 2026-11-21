@@ -89,3 +89,14 @@ exist, the index cannot be written, or the run is cancelled. Each sheet publishe
 (`schema_version` 1: per layout its name, `tab_order`, `nn`, file, status `written`, `empty`, `empty-after-view` or `failed`, the reason,
 the entities written and the report's `sheet` section) is written last, so its presence says the run finished. A drawing with no paper
 layout writes nothing, not even the index, and never falls back to model space; one whose layouts are all empty writes the index.
+
+`paper_sheets::<P>(source)` (#1622) lists the same paper layouts in the same tab order, each with `skip` set by the same rule (`None`, `Empty`
+or `EmptyAfterView`), and converts and writes nothing. It is for a caller that makes one page per sheet and has to know how many there are
+before converting the first (iasbuilt/server makes one plan per print layout at upload and converts each when it is opened). A layout listed
+as a sheet can still come out `EmptyAfterView` when converted, since only the conversion knows that none of its content survives the profile.
+
+```rust
+for s in paper_sheets::<AcadrustProvider>(CadSource::Path(&dwg))? {
+    if s.skip.is_none() { println!("{} {}", s.tab_order, s.layout); }
+}
+```
