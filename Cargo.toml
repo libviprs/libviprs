@@ -921,3 +921,11 @@ required-features = ["pvec-write"]
 [[example]]
 name = "pvec_components_cost"
 required-features = ["pvec-write"]
+
+[[test]]
+name = "pvec_1633_effective_layer"
+required-features = ["pvec-convert"]
+
+[[test]]
+name = "pvec_1633_invisible_flag"
+required-features = ["pvec-convert"]
