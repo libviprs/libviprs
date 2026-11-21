@@ -1646,24 +1646,6 @@ impl Run<'_> {
         stream_error(self.page, detail)
     }
 
-    /// Whether a `BDC` opens an `/OC` span the default configuration hides.
-    fn hides(&self, op: &Operation, resources: Option<&Dictionary>) -> bool {
-        let ([Object::Name(tag), Object::Name(prop)], Some(oc)) =
-            (op.operands.as_slice(), &self.oc)
-        else {
-            return false;
-        };
-        if tag != b"OC" {
-            return false;
-        }
-        let doc = self.doc;
-        resources
-            .and_then(|r| r.get(b"Properties").ok())
-            .and_then(|p| as_dict(doc, p))
-            .and_then(|p| p.get(prop).ok())
-            .is_some_and(|target| !oc.shows(doc, target, PdfLayerMode::View))
-    }
-
     fn operands(&self, op: &Operation, n: usize) -> Result<Vec<f64>, PdfVectorError> {
         if op.operands.len() != n {
             return Err(self.err(format!(
@@ -1721,7 +1703,18 @@ impl Run<'_> {
             match op.operator.as_str() {
                 "BMC" => marks.push(false),
                 "BDC" => {
-                    let hide = self.hides(op, resources);
+                    // Whether this `BDC` opens an `/OC` span the default configuration hides.
+                    let hide = match (op.operands.as_slice(), &self.oc) {
+                        ([Object::Name(tag), Object::Name(prop)], Some(oc)) if tag == b"OC" => {
+                            let doc = self.doc;
+                            resources
+                                .and_then(|r| r.get(b"Properties").ok())
+                                .and_then(|p| as_dict(doc, p))
+                                .and_then(|p| p.get(prop).ok())
+                                .is_some_and(|target| !oc.shows(doc, target, PdfLayerMode::View))
+                        }
+                        _ => false,
+                    };
                     self.hidden += u32::from(hide);
                     marks.push(hide);
                 }

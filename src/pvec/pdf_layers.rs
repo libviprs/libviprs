@@ -15,6 +15,11 @@ use crate::pdf::{page_rotation_of, page_visible_box};
 
 /// One page of the document.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct PdfPageInfo {
     /// The 1-based page number.
     pub page: usize,
@@ -28,6 +33,11 @@ pub struct PdfPageInfo {
 
 /// What a group resolves to in each mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct PdfResolved {
     /// Shown when viewing.
     pub view: bool,
@@ -37,6 +47,11 @@ pub struct PdfResolved {
 
 /// One optional content group.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct PdfLayer {
     /// The object number of the group.
     pub id: u32,
@@ -63,6 +78,11 @@ pub struct PdfLayer {
 
 /// One optional content membership dictionary that some content refers to.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct PdfOcmd {
     /// The object number.
     pub id: u32,
@@ -78,6 +98,11 @@ pub struct PdfOcmd {
 
 /// What a PDF says about its optional content.
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub struct PdfManifest {
     /// The pages.
     pub pages: Vec<PdfPageInfo>,
@@ -93,6 +118,11 @@ pub struct PdfManifest {
 
 /// View or print.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub enum PdfLayerMode {
     /// What a viewer shows (`on && !viewHidden`).
     #[default]
@@ -103,6 +133,11 @@ pub enum PdfLayerMode {
 
 /// A user's word for one group.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase")
+)]
 pub enum PdfLayerOverride {
     /// Show it.
     Visible,
@@ -112,6 +147,11 @@ pub enum PdfLayerOverride {
 
 /// The mode and the differences from the file.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "camelCase", default)
+)]
 pub struct PdfLayerChoices {
     /// Which usage decides the groups that are not overridden.
     pub mode: PdfLayerMode,
@@ -300,14 +340,10 @@ impl OcModel {
         }
     }
 
-    /// Whether the group's state decides anything: viewers leave a group whose intent is not
-    /// View always on.
-    fn intent_applies(g: &Group) -> bool {
-        g.intent.iter().any(|i| i == "View" || i == "All")
-    }
-
     fn group_visible(&self, g: &Group, mode: PdfLayerMode) -> bool {
-        !Self::intent_applies(g) || (self.config_on(g.id) && !self.usage_hidden(g, mode))
+        // Viewers leave a group whose intent is not View always on.
+        !g.intent.iter().any(|i| i == "View" || i == "All")
+            || (self.config_on(g.id) && !self.usage_hidden(g, mode))
     }
 
     fn state(&self, id: ObjectId, mode: PdfLayerMode) -> bool {
@@ -315,13 +351,6 @@ impl OcModel {
             Some(g) => self.group_visible(g, mode),
             None => self.config_on(id),
         }
-    }
-
-    fn name_of(&self, id: ObjectId) -> String {
-        self.groups
-            .iter()
-            .find(|g| g.id == id)
-            .map_or_else(|| format!("{} {} R", id.0, id.1), |g| g.name.clone())
     }
 
     /// Whether content marked with `target` (an OCG or an OCMD, by reference) shows.
@@ -384,37 +413,6 @@ impl OcModel {
             b"Or" => rest.any(|s| s),
             _ => rest.all(|s| s),
         }
-    }
-
-    /// The groups an OCMD lists or its expression mentions.
-    fn members(&self, doc: &Document, dict: &Dictionary) -> Vec<ObjectId> {
-        fn mentioned(doc: &Document, o: &Object, out: &mut Vec<ObjectId>, depth: usize) {
-            if depth > MAX_DEPTH {
-                return;
-            }
-            match o {
-                Object::Reference(id) => match deref(doc, o) {
-                    Some(Object::Array(a)) => {
-                        a.iter().for_each(|x| mentioned(doc, x, out, depth + 1));
-                    }
-                    _ => out.push(*id),
-                },
-                Object::Array(a) => a.iter().for_each(|x| mentioned(doc, x, out, depth + 1)),
-                _ => {}
-            }
-        }
-        let mut out = Vec::new();
-        if let Some(Object::Array(ve)) = dict.get(b"VE").ok().and_then(|v| deref(doc, v)) {
-            ve.iter()
-                .skip(1)
-                .for_each(|x| mentioned(doc, x, &mut out, 0));
-        } else {
-            match dict.get(b"OCGs").ok() {
-                Some(Object::Reference(r)) if doc.get_dictionary(*r).is_ok() => out.push(*r),
-                other => out = refs(doc, other),
-            }
-        }
-        out
     }
 }
 
@@ -552,7 +550,41 @@ fn count_spans(doc: &Document) -> BTreeMap<ObjectId, u32> {
     c.counts
 }
 
-fn manifest_of(doc: &Document) -> PdfManifest {
+fn load(bytes: &[u8]) -> Result<Document, PdfLayersError> {
+    let doc = Document::load_mem(bytes).map_err(|e| PdfLayersError::Read(e.to_string()))?;
+    if doc.is_encrypted() {
+        return Err(PdfLayersError::Encrypted);
+    }
+    Ok(doc)
+}
+
+/// List the pages and optional content groups of a PDF.
+///
+/// `layers` is empty for a PDF with no `/OCProperties`. Each group's `resolved` answer follows
+/// the PDF truth table: on in `/D` (`/BaseState`, then `/ON` and `/OFF`), and not hidden by a
+/// usage (`ViewState` or `PrintState` OFF) that `/D /AS` applies for the mode. A membership
+/// dictionary is evaluated over the resolved groups.
+///
+/// # Errors
+///
+/// See [`PdfLayersError`].
+pub fn pdf_manifest(bytes: &[u8]) -> Result<PdfManifest, PdfLayersError> {
+    fn mentioned(doc: &Document, o: &Object, out: &mut Vec<ObjectId>, depth: usize) {
+        if depth > MAX_DEPTH {
+            return;
+        }
+        match o {
+            Object::Reference(id) => match deref(doc, o) {
+                Some(Object::Array(a)) => {
+                    a.iter().for_each(|x| mentioned(doc, x, out, depth + 1));
+                }
+                _ => out.push(*id),
+            },
+            Object::Array(a) => a.iter().for_each(|x| mentioned(doc, x, out, depth + 1)),
+            _ => {}
+        }
+    }
+    let doc = &load(bytes)?;
     let pages = doc
         .get_pages()
         .into_iter()
@@ -570,13 +602,13 @@ fn manifest_of(doc: &Document) -> PdfManifest {
         })
         .collect();
     let Some(model) = OcModel::load(doc) else {
-        return PdfManifest {
+        return Ok(PdfManifest {
             pages,
             layers: Vec::new(),
             ocmds: Vec::new(),
             rb_groups: Vec::new(),
             configs: Vec::new(),
-        };
+        });
     };
     let spans = count_spans(doc);
     let resolved = |show: &dyn Fn(PdfLayerMode) -> bool| PdfResolved {
@@ -611,6 +643,20 @@ fn manifest_of(doc: &Document) -> PdfManifest {
             let d = doc.get_dictionary(*id).ok()?;
             (d.get(b"Type").ok()?.as_name().ok()? == b"OCMD").then(|| {
                 let target = Object::Reference(*id);
+                // The groups the OCMD lists, or its expression mentions.
+                let mut members = Vec::new();
+                if let Some(Object::Array(ve)) = d.get(b"VE").ok().and_then(|v| deref(doc, v)) {
+                    ve.iter()
+                        .skip(1)
+                        .for_each(|x| mentioned(doc, x, &mut members, 0));
+                } else {
+                    match d.get(b"OCGs").ok() {
+                        Some(Object::Reference(r)) if doc.get_dictionary(*r).is_ok() => {
+                            members.push(*r);
+                        }
+                        other => members = refs(doc, other),
+                    }
+                }
                 PdfOcmd {
                     id: id.0,
                     policy: if d.has(b"VE") {
@@ -621,10 +667,15 @@ fn manifest_of(doc: &Document) -> PdfManifest {
                             |p| String::from_utf8_lossy(p).into_owned(),
                         )
                     },
-                    groups: model
-                        .members(doc, d)
+                    groups: members
                         .into_iter()
-                        .map(|g| model.name_of(g))
+                        .map(|g| {
+                            model
+                                .groups
+                                .iter()
+                                .find(|x| x.id == g)
+                                .map_or_else(|| format!("{} {} R", g.0, g.1), |x| x.name.clone())
+                        })
                         .collect(),
                     spans: *n,
                     resolved: resolved(&|m| model.shows(doc, &target, m)),
@@ -632,7 +683,7 @@ fn manifest_of(doc: &Document) -> PdfManifest {
             })
         })
         .collect();
-    PdfManifest {
+    Ok(PdfManifest {
         pages,
         layers,
         ocmds,
@@ -642,29 +693,7 @@ fn manifest_of(doc: &Document) -> PdfManifest {
             .map(|g| g.iter().map(|id| id.0).collect())
             .collect(),
         configs: model.configs,
-    }
-}
-
-fn load(bytes: &[u8]) -> Result<Document, PdfLayersError> {
-    let doc = Document::load_mem(bytes).map_err(|e| PdfLayersError::Read(e.to_string()))?;
-    if doc.is_encrypted() {
-        return Err(PdfLayersError::Encrypted);
-    }
-    Ok(doc)
-}
-
-/// List the pages and optional content groups of a PDF.
-///
-/// `layers` is empty for a PDF with no `/OCProperties`. Each group's `resolved` answer follows
-/// the PDF truth table: on in `/D` (`/BaseState`, then `/ON` and `/OFF`), and not hidden by a
-/// usage (`ViewState` or `PrintState` OFF) that `/D /AS` applies for the mode. A membership
-/// dictionary is evaluated over the resolved groups.
-///
-/// # Errors
-///
-/// See [`PdfLayersError`].
-pub fn pdf_manifest(bytes: &[u8]) -> Result<PdfManifest, PdfLayersError> {
-    Ok(manifest_of(&load(bytes)?))
+    })
 }
 
 /// Rewrite the default configuration of a PDF from `choices`.
@@ -757,21 +786,42 @@ pub fn apply_pdf_layers(
     d.set("OFF", list(false));
     d.remove(b"AS");
 
-    let strip: Vec<(ObjectId, Dictionary)> = model
-        .groups
-        .iter()
-        .filter(|g| g.view_off || g.print_off)
-        .filter_map(|g| {
-            let mut group = doc.get_dictionary(g.id).ok()?.clone();
-            let usage = group.get_mut(b"Usage").ok()?.as_dict_mut().ok()?;
-            for (event, key) in [(&b"View"[..], &b"ViewState"[..]), (b"Print", b"PrintState")] {
-                if let Ok(Object::Dictionary(u)) = usage.get_mut(event) {
+    // `Usage` and its `View` and `Print` entries may each be direct or indirect, and the state
+    // key is dropped wherever it lives.
+    let mut strip: Vec<(ObjectId, Dictionary)> = Vec::new();
+    for g in model.groups.iter().filter(|g| g.view_off || g.print_off) {
+        let Ok(mut group) = doc.get_dictionary(g.id).cloned() else {
+            continue;
+        };
+        let (usage_id, mut usage) = match group.get(b"Usage") {
+            Ok(Object::Reference(u)) => match doc.get_dictionary(*u) {
+                Ok(d) => (Some(*u), d.clone()),
+                Err(_) => continue,
+            },
+            Ok(Object::Dictionary(d)) => (None, d.clone()),
+            _ => continue,
+        };
+        for (event, key) in [(&b"View"[..], &b"ViewState"[..]), (b"Print", b"PrintState")] {
+            match usage.get_mut(event) {
+                Ok(Object::Dictionary(u)) => {
                     u.remove(key);
                 }
+                Ok(Object::Reference(r)) => {
+                    if let Ok(mut u) = doc.get_dictionary(*r).cloned() {
+                        u.remove(key);
+                        strip.push((*r, u));
+                    }
+                }
+                _ => {}
             }
-            Some((g.id, group))
-        })
-        .collect();
+        }
+        if let Some(u) = usage_id {
+            strip.push((u, usage));
+        } else {
+            group.set("Usage", usage);
+            strip.push((g.id, group));
+        }
+    }
 
     match (props_id, d_ref) {
         (_, Some(d_id)) => inc.new_document.set_object(d_id, d),

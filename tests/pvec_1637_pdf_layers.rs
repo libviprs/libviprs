@@ -477,3 +477,61 @@ fn pdf_apply_layers_rewrites_indirect_d_and_clears_usage_state() {
     );
     assert!(re.get_dictionary(d).unwrap().get(b"AS").is_err());
 }
+
+#[test]
+fn pdf_apply_layers_clears_state_when_usage_and_view_are_indirect() {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let view = doc.add_object(dictionary! { "ViewState" => "OFF" });
+    let usage = doc.add_object(dictionary! { "View" => view });
+    let g = doc.add_object(dictionary! {
+        "Type" => "OCG", "Name" => Object::string_literal("G"), "Usage" => usage,
+    });
+    let d = doc.add_object(dictionary! {
+        "BaseState" => "ON",
+        "AS" => vec![Object::from(dictionary! {
+            "Event" => "View", "Category" => vec![Object::Name(b"View".to_vec())],
+            "OCGs" => vec![Object::from(g)],
+        })],
+    });
+    let props = doc.add_object(dictionary! { "OCGs" => vec![Object::from(g)], "D" => d });
+    let content = doc.add_object(Stream::new(Dictionary::new(), b"1 1 5 5 re f".to_vec()));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+        "Contents" => content,
+    });
+    doc.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => vec![Object::from(page)], "Count" => 1 }.into(),
+    );
+    let catalog = doc.add_object(
+        dictionary! { "Type" => "Catalog", "Pages" => pages_id, "OCProperties" => props },
+    );
+    doc.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    assert!(!manifest(&bytes).layers[0].resolved.view);
+
+    let out = apply_pdf_layers(
+        &bytes,
+        &choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Visible)]),
+    )
+    .unwrap();
+    let re = Document::load_mem(&out).unwrap();
+    assert!(!re.get_dictionary(view).unwrap().has(b"ViewState"));
+}
+
+#[cfg(feature = "serde")]
+#[test]
+fn manifest_and_choices_serialise_as_camel_case_json() {
+    let m = manifest(FIXTURE);
+    let v = serde_json::to_value(&m).unwrap();
+    assert!(v["layers"][0].get("viewHidden").is_some());
+    assert!(v["layers"][0]["resolved"].get("print").is_some());
+    assert!(v.get("rbGroups").is_some());
+    let c: PdfLayerChoices =
+        serde_json::from_str(r#"{"mode":"print","layers":{"A":"hidden"}}"#).unwrap();
+    assert_eq!(c.mode, PdfLayerMode::Print);
+    assert_eq!(c.layers["A"], PdfLayerOverride::Hidden);
+}
