@@ -339,6 +339,45 @@ pub fn build_streams(
             );
         }
     }
+    if select.stroke_paint {
+        // One table entry per distinct word, in the order the strokes were first seen (#1638).
+        let mut colours: Vec<u32> = Vec::new();
+        let mut seen_colours: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut assignments = Vec::new();
+        for (id, r) in &written {
+            let Some(word) = r.paint else { continue };
+            if assignments.len() >= MAX_RECORDS {
+                skip(r, "stroke-paint", "stream-full");
+                continue;
+            }
+            let n = match seen_colours.get(&word) {
+                Some(n) => *n,
+                None => {
+                    if colours.len() >= MAX_TABLE {
+                        skip(r, "stroke-paint", "table-full");
+                        continue;
+                    }
+                    let n = u32::try_from(colours.len()).unwrap_or(u32::MAX);
+                    colours.push(word);
+                    seen_colours.insert(word, n);
+                    n
+                }
+            };
+            assignments.push((*id, n));
+        }
+        if !assignments.is_empty() {
+            let stream = StrokePaintStream {
+                colours,
+                assignments,
+            };
+            stream_names.push("stroke-paint");
+            out.push(
+                stream
+                    .into_stream(&registry)
+                    .map_err(|e| ComponentsError::Refused(e.to_string()))?,
+            );
+        }
+    }
     Ok(BuiltStreams {
         streams: out,
         names: stream_names,

@@ -121,10 +121,11 @@ use crate::pvec::writer::{
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
     LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
-    SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError,
-    ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
+    SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile,
+    ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule,
+    select_layout,
 };
-use crate::pvec::{Normalized2DGeometry, ViewedEntity};
+use crate::pvec::{LeafPaint, Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
 use pvec_geometry::{Curve, Curve2d, CurveKind, Line, Point2, Polyline, Trimmed};
 
@@ -897,6 +898,13 @@ impl<'a> PvecConversion<'a> {
         // the composed maps, so a flattened leaf is drawn when the view pass kept the same one.
         let kept: BTreeSet<(Option<u64>, String, String)> =
             view.included.iter().map(leaf_key).collect();
+        // The colour each kept leaf is drawn in, found by the view pass (#1638); what a viewport
+        // shows is read from the model's own pass below.
+        let mut paints: BTreeMap<(Option<u64>, String, String), LeafPaint> = view
+            .included
+            .iter()
+            .map(|v| (leaf_key(v), v.paint))
+            .collect();
         drop(view.included);
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
@@ -1030,6 +1038,9 @@ impl<'a> PvecConversion<'a> {
             }
         }
         // The effective layer of each kept model leaf, which a viewport freeze is matched against.
+        if let Some(v) = &model_view {
+            paints.extend(v.included.iter().map(|e| (leaf_key(e), e.paint)));
+        }
         let model_layers: BTreeMap<(Option<u64>, String, String), String> = model_view
             .as_ref()
             .map(|v| {
@@ -1848,11 +1859,11 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
-                        let (style, colour, bad_style) = if pending.is_some() {
+                        let (style, bad_style) = if pending.is_some() {
                             // A carrier is never drawn: the stream record is what shows.
                             let c = LineStyleComponent::new(id, None, None, false).ok();
                             let bad = c.is_none();
-                            (c, false, bad)
+                            (c, bad)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
                             // P-8: a layout that does not print lineweights has none on its sheet.
@@ -1861,9 +1872,19 @@ impl<'a> PvecConversion<'a> {
                             }
                             let c = dwg_line_style(id, &input).ok();
                             let bad = c.is_none();
-                            (c, input.colour_index.is_some(), bad)
+                            (c, bad)
                         } else {
-                            (None, false, false)
+                            (None, false)
+                        };
+                        // A carrier is never drawn, so it has no colour either.
+                        let leaf_paint = if components.stroke_paint && pending.is_none() {
+                            paints.get(&leaf_key_of(&raw.provenance)).copied()
+                        } else {
+                            None
+                        };
+                        let paint = match leaf_paint {
+                            Some(LeafPaint::Colour(c)) => paint_word(c),
+                            _ => None,
                         };
                         Side {
                             // Only the handle, the layer and the outermost INSERT are read; the class name and
@@ -1881,7 +1902,14 @@ impl<'a> PvecConversion<'a> {
                                 layer: raw.provenance.layer.clone(),
                             },
                             style,
-                            colour,
+                            paint,
+                            // A colour the drawing names and the walk cannot reach, or one with no
+                            // RGB behind it, is counted and not painted.
+                            colour_ignored: match leaf_paint {
+                                Some(LeafPaint::Unresolved) => true,
+                                Some(LeafPaint::Colour(_)) => paint.is_none(),
+                                _ => false,
+                            },
                             bad_style,
                             viewport: window.map(|k| windows[k].0.handle),
                         }
@@ -2167,7 +2195,7 @@ impl<'a> PvecConversion<'a> {
                         stub: &s.stub,
                         style: s.style.as_ref(),
                         viewport: s.viewport,
-                        paint: None,
+                        paint: s.paint,
                     })
                     .collect();
                 let built = build_streams(select, &open.source_ids, &layers, &rows)
@@ -2183,7 +2211,7 @@ impl<'a> PvecConversion<'a> {
                 let mut made = ComponentsSummary {
                     streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
                     dropped: BTreeMap::new(),
-                    colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
+                    colours_ignored: kept_sides().filter(|s| s.colour_ignored).count() as u64,
                     annotations: annotation_counts.clone(),
                 };
                 let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
@@ -2376,8 +2404,10 @@ struct Sheet {
 struct Side {
     stub: ProvenanceStub,
     style: Option<LineStyleComponent>,
-    /// The entity carries a DWG colour index (read only when the line style stream is on).
-    colour: bool,
+    /// The colour word, `0xRRGGBBAA`, when the drawing settles it (#1638).
+    paint: Option<u32>,
+    /// The paint stream is on and the colour could not be resolved (#1638).
+    colour_ignored: bool,
     /// The line style stream is on and the DWG facts could not make a component of this entity.
     bad_style: bool,
     /// The viewport a model entity was drawn through on a sheet (#1563).
@@ -2543,7 +2573,14 @@ struct Done {
 
 /// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
 fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
-    let p = &f.entity.provenance;
+    leaf_key_of(&f.entity.provenance)
+}
+
+fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
+    leaf_key_of(&v.entity.provenance)
+}
+
+fn leaf_key_of(p: &ProvenanceStub) -> (Option<u64>, String, String) {
     (
         p.handle.map(|h| h.get()),
         p.block_path.to_string(),
@@ -2551,13 +2588,17 @@ fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
     )
 }
 
-fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
-    let p = &v.entity.provenance;
-    (
-        p.handle.map(|h| h.get()),
-        p.block_path.to_string(),
-        p.class_name.clone(),
-    )
+/// The colour word of a resolved colour: its RGB with an opaque alpha. ACI 7 is white on a dark
+/// screen and black on paper, and a plot prints it black, so that is how it is written. An index
+/// with no RGB behind it has no word.
+fn paint_word(c: SourceColour) -> Option<u32> {
+    let (r, g, b) = match c {
+        SourceColour::Aci(7) => (0, 0, 0),
+        SourceColour::Aci(i) => acadrust::Color::Index(i).rgb()?,
+        SourceColour::True { r, g, b } => (r, g, b),
+        _ => return None,
+    };
+    Some(u32::from_be_bytes([r, g, b, 255]))
 }
 
 /// A stand-in `RawEntity` for something that has no geometry of its own, so it can be ordered and

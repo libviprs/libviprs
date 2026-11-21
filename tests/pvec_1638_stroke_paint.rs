@@ -19,9 +19,9 @@ use acadrust::tables::{BlockRecord, Layer};
 use acadrust::types::{Color, Handle, Vector3};
 use acadrust::{CadDocument, DwgWriter, EntityType};
 use libviprs::cad::CadSource;
-use libviprs::pvec::ViewProfile;
 use libviprs::pvec::components::StreamSelection;
 use libviprs::pvec::publish::open_published;
+use libviprs::pvec::{SourceUnit, ViewProfile};
 use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput};
 use plan::scratch;
 use pvec_facade::components::{Stream, StrokePaintStream};
@@ -100,6 +100,7 @@ fn convert(tag: &str, bytes: &[u8], select: StreamSelection) -> Run {
     let dir = scratch(tag);
     let dest = dir.join("o.pvec");
     let out = PvecConversion::new(CadSource::Bytes(bytes), &dest)
+        .unit(SourceUnit::Meters)
         .components(select)
         .convert()
         .unwrap();
@@ -301,6 +302,7 @@ fn issue_1638_a_provider_with_no_colours_writes_no_stream() {
     let dir = scratch("mock");
     let dest = dir.join("o.pvec");
     let out = PvecConversion::new(CadSource::Bytes(b"plan"), &dest)
+        .unit(SourceUnit::Meters)
         .components(StreamSelection::ALL)
         .convert_with::<plan::Mock>()
         .unwrap();
@@ -314,12 +316,12 @@ fn issue_1638_a_provider_with_no_colours_writes_no_stream() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1638_colours_ignored_counts_only_the_strokes_that_could_not_be_resolved() {
-    // BYLAYER on layer 0 inside a block placed on a layer the drawing has no table entry for:
-    // the effective layer has no colour to name, so that stroke is unresolved. The others are not.
-    let mut d = Drawing::new(&[("WALLS", Color::Index(3))]);
+    // BYLAYER on layer 0 inside a block placed on a layer whose own colour is BYLAYER: the effective
+    // layer names no colour to take, so that stroke is unresolved. The others are not.
+    let mut d = Drawing::new(&[("WALLS", Color::Index(3)), ("NO-COLOUR", Color::ByLayer)]);
     d.block("B1");
     let lost = d.line(Some("B1"), 1.0, "0", Color::ByLayer);
-    d.insert(None, "B1", "NO-SUCH-LAYER", Color::ByLayer);
+    d.insert(None, "B1", "NO-COLOUR", Color::ByLayer);
     let fine = d.line(None, 2.0, "WALLS", Color::ByLayer);
     let run = convert("ignored", &d.bytes(), StreamSelection::ALL);
     let w = words(&run);

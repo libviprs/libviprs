@@ -29,7 +29,7 @@ use libviprs::pvec::{
 use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput};
 use plan::{GEOMETRY, Mock, SOURCE_ENTITIES, scratch};
 use pvec_facade::components::{
-    LAYER_LOCKED, LayerStream, LineStyleStream, ProvenanceStream, Stream,
+    LAYER_LOCKED, LayerStream, LineStyleStream, ProvenanceStream, Stream, StrokePaintStream,
 };
 
 fn only(layer: bool, line_style: bool, provenance: bool) -> StreamSelection {
@@ -86,10 +86,11 @@ fn issue_1525_a_conversion_with_no_option_writes_geometry_only() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1525_the_three_streams_are_written_and_read_back_through_pvecs_reader() {
+    // The fourth is the stroke paint stream of #1638, written for the one line that has a colour.
     let (out, dest, dir) = convert("all", b"plan", StreamSelection::ALL);
     assert_eq!(out.written, GEOMETRY);
     let streams = streams_of(&dest);
-    assert_eq!(streams.len(), 3);
+    assert_eq!(streams.len(), 4);
 
     let layer =
         LayerStream::decode(&of(&streams, LayerStream::CAPABILITY).unwrap().payload).unwrap();
@@ -212,7 +213,7 @@ fn issue_1525_a_row_pvec_cannot_hold_is_counted_in_the_report_and_costs_only_its
         "{:?}",
         c.dropped
     );
-    assert_eq!(streams_of(&dest).len(), 3);
+    assert_eq!(streams_of(&dest).len(), 4);
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -334,8 +335,13 @@ fn issue_1525_the_linetype_name_and_the_colour_count_come_from_a_dwg_conversion(
             .unwrap();
     assert_eq!(style.styles.len(), 1, "{style:?}");
     assert_eq!(style.styles[0].name, "DASHED");
-    // Two lines, each with an explicit colour index the monochrome profile drops.
-    assert_eq!(out.report.components.unwrap().colours_ignored, 2);
+    // Two lines, each with an explicit colour index: both are written to the paint stream (#1638),
+    // so nothing is left unresolved.
+    assert_eq!(out.report.components.unwrap().colours_ignored, 0);
+    let paint = of(&streams, StrokePaintStream::CAPABILITY).unwrap();
+    let paint = StrokePaintStream::decode(&paint.payload).unwrap();
+    assert_eq!(paint.assignments.len(), 2);
+    assert_eq!(paint.colours.len(), 1);
     let _ = fs::remove_dir_all(dir);
 }
 
