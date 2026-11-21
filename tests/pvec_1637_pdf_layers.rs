@@ -385,7 +385,7 @@ fn pdf_apply_layers_hides_spans_in_vector_output() {
     )
     .unwrap();
     // Walls goes, with the form that carries it; Hidden and View off come back; the expression
-    // And(Walls, Not(Hidden)) is now false and so is AnyOn over {off, on}... which is true.
+    // And(Walls, Not(Hidden)) is now false, and AnyOn over {off, on} still shows.
     assert_eq!(xs(&out), [10, 70, 100, 130, 160, 220]);
 
     // Print mode hides Print off and shows View off.
@@ -421,4 +421,59 @@ fn pdf_without_ocproperties_has_no_layers() {
     let out = apply_pdf_layers(&bytes, &choices(PdfLayerMode::Print, &[])).unwrap();
     assert_eq!(out, bytes);
     assert_eq!(xs(&out), [10]);
+}
+
+/// `/OCProperties` and `/D` are objects of their own in many exporters' files, and the group
+/// carries a `ViewState` pdfium reads without asking `/AS`.
+#[test]
+fn pdf_apply_layers_rewrites_indirect_d_and_clears_usage_state() {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let g = doc.add_object(dictionary! {
+        "Type" => "OCG", "Name" => Object::string_literal("G"),
+        "Usage" => dictionary! { "View" => dictionary! { "ViewState" => "OFF" } },
+    });
+    let d = doc.add_object(dictionary! {
+        "BaseState" => "ON",
+        "AS" => vec![Object::from(dictionary! {
+            "Event" => "View", "Category" => vec![Object::Name(b"View".to_vec())],
+            "OCGs" => vec![Object::from(g)],
+        })],
+    });
+    let props = doc.add_object(dictionary! { "OCGs" => vec![Object::from(g)], "D" => d });
+    let content = doc.add_object(Stream::new(Dictionary::new(), b"1 1 5 5 re f".to_vec()));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+        "Contents" => content,
+    });
+    doc.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => vec![Object::from(page)], "Count" => 1 }.into(),
+    );
+    let catalog = doc.add_object(
+        dictionary! { "Type" => "Catalog", "Pages" => pages_id, "OCProperties" => props },
+    );
+    doc.trailer.set("Root", catalog);
+    let mut bytes = Vec::new();
+    doc.save_to(&mut bytes).unwrap();
+    assert!(!manifest(&bytes).layers[0].resolved.view);
+
+    let out = apply_pdf_layers(
+        &bytes,
+        &choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Visible)]),
+    )
+    .unwrap();
+    assert!(out.starts_with(&bytes));
+    assert!(manifest(&out).layers[0].resolved.view);
+
+    let re = Document::load_mem(&out).unwrap();
+    let group = re.get_dictionary(g).unwrap();
+    let usage = group.get(b"Usage").and_then(Object::as_dict).unwrap();
+    let view = usage.get(b"View").and_then(Object::as_dict).unwrap();
+    assert!(
+        view.get(b"ViewState").is_err(),
+        "pdfium would read it past /AS"
+    );
+    assert!(re.get_dictionary(d).unwrap().get(b"AS").is_err());
 }
