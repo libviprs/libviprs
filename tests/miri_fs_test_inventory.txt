@@ -770,6 +770,15 @@ annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_page_with_no_image_c
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_refused_image_means_the_page_is_not_baked
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::the_report_says_the_images_were_baked
 annotated   fs-detected  tests/pvec_1615_baked_report.rs::over_the_image_limit_the_report_names_the_limit
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_a_fan_out_is_refused_by_the_shared_entity_guard
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_a_supplied_xref_the_host_does_not_have_is_reported
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_the_block_name_matches_ignoring_ascii_case
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_the_host_insert_transform_composes_with_the_xref_unit_mismatch
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_the_stored_path_is_never_opened
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_content_draws_when_supplied
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_layer_override_applies
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_missing_stays_skipped
+annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_nested_depth_capped
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage

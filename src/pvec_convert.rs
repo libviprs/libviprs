@@ -237,6 +237,7 @@ pub struct PvecConversion<'a> {
     regions: Option<RegionConfig>,
     annotations: bool,
     element_rules: Option<ElementRules>,
+    xrefs: Vec<(String, CadSource<'a>)>,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -259,6 +260,7 @@ impl<'a> PvecConversion<'a> {
             regions: None,
             annotations: false,
             element_rules: None,
+            xrefs: Vec::new(),
         }
     }
 
@@ -300,6 +302,14 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn regions(mut self, config: Option<RegionConfig>) -> Self {
         self.regions = config;
+        self
+    }
+
+    /// The drawing an xref block stands for, matched to the host's xref block records by block name
+    /// (ASCII case ignored). The path stored in the host is never opened (#1631).
+    #[must_use]
+    pub fn xref(mut self, block_name: impl Into<String>, source: CadSource<'a>) -> Self {
+        self.xrefs.push((block_name.into(), source));
         self
     }
 
