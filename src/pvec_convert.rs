@@ -234,6 +234,41 @@ pub struct PvecConversion<'a> {
     regions: Option<RegionConfig>,
     annotations: bool,
     element_rules: Option<ElementRules>,
+    plot_settings: PlotSettings,
+}
+
+/// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
+/// makes over the layout's own plot settings. [`Default`] is the layout as it stands, which is
+/// what a conversion does without this.
+///
+/// It only reaches a paper layout whose plot settings the drawing reports. Without them the frame
+/// is the extents whatever is asked, and the report notes `plot-settings-not-applied`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlotSettings {
+    /// What to plot.
+    pub area: PlotArea,
+    /// Paper size in millimetres, width then height, before the layout's rotation. `None` is the
+    /// layout's own paper. An override clears the layout's margins, which belong to its paper.
+    pub paper_mm: Option<[f64; 2]>,
+    /// Scale the plot so its extents fit the printable area of the paper. The scale becomes the
+    /// calibration record, and the frame is the part of the drawing the paper then shows.
+    pub fit_to_paper: bool,
+    /// The plot offset in millimetres, added to the layout's own plot origin.
+    pub offset_mm: [f64; 2],
+    /// Centre the extents on the printable area. The offset is then ignored.
+    pub center: bool,
+}
+
+/// The part of a layout a plot covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PlotArea {
+    /// The layout's own frame, the paper placed from its margins and origin.
+    #[default]
+    Layout,
+    /// The extents of what the sheet draws: its own kept geometry and the rectangles of its drawn
+    /// viewports. The paper is placed from the extents' lower left corner.
+    Extents,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -256,6 +291,7 @@ impl<'a> PvecConversion<'a> {
             regions: None,
             annotations: false,
             element_rules: None,
+            plot_settings: PlotSettings::default(),
         }
     }
 
@@ -311,6 +347,13 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn limits(mut self, limits: SourceLimits) -> Self {
         self.view_profile = self.view_profile.with_limits(limits);
+        self
+    }
+
+    /// What a paper sheet plots: area, paper size, offset and centre, fit to paper (#1628).
+    #[must_use]
+    pub fn plot_settings(mut self, settings: PlotSettings) -> Self {
+        self.plot_settings = settings;
         self
     }
 
