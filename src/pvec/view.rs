@@ -30,8 +30,8 @@
 //! # Text on frozen and no-plot layers
 //!
 //! A TEXT, MTEXT or attribute ([`draws_text`]) answers to `layers.frozen_text` instead of
-//! `layers.frozen`, and to `layers.no_plot_text` (#1621, Rom's call of 2026-11-19): both profiles
-//! draw text on a frozen layer and leave out text on a no-plot one. Off is checked first and wins,
+//! `layers.frozen`, and to `layers.no_plot_text` (#1621 and #1639, Rom's calls of 2026-11-19 and 2026-11-20): both
+//! profiles draw text on a frozen layer, and only the print profile leaves out text on a no-plot one. Off is checked first and wins,
 //! and a viewport freeze is not touched: it is not the layer table's frozen flag.
 //!
 //! # Viewports are collected, not applied

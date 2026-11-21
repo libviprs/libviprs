@@ -1,6 +1,7 @@
-//! Issue #1621, layer rules for DWG text (panel decision D4, Rom's call of 2026-11-19): a TEXT,
-//! MTEXT or visible attribute on a frozen layer is drawn and one on a no-plot layer is not, in
-//! model mode (`default_profile`) and on a sheet (`print_profile`) alike. Everything else stays as
+//! Issues #1621 and #1639, layer rules for DWG text (Rom's calls of 2026-11-19 and 2026-11-20): a
+//! TEXT, MTEXT or visible attribute on a frozen layer is drawn in model mode (`default_profile`)
+//! and on a sheet (`print_profile`) alike, and one on a no-plot layer is drawn in model mode and
+//! left out of a sheet, as no-plot geometry is. Everything else stays as
 //! V1-3 and P-3 say: an off layer hides text, a viewport freeze drops it inside that viewport only,
 //! an INSERT on a frozen layer takes its whole expansion (attributes included) with it, DIMENSION
 //! and MULTILEADER follow their layer whole, and a viewport on a no-plot layer still shows what it
@@ -593,14 +594,17 @@ const DRAWN_VIEWPORTS: [u64; 3] = [VP_A, VP_B, VP_NO_PLOT];
 // Read through the knob table and the printed profile rather than the fields, so this file
 // compiles before the knobs exist and is red, not broken.
 #[test]
-fn issue_1621_both_profiles_draw_frozen_text_and_drop_no_plot_text() {
-    for p in [
-        ViewProfile::default_profile(),
-        ViewProfile::print_profile("Sheet"),
+fn issue_1639_the_text_knobs_differ_per_profile_only_for_no_plot() {
+    for (p, no_plot_text) in [
+        (ViewProfile::default_profile(), "ignore"),
+        (ViewProfile::print_profile("Sheet"), "exclude"),
     ] {
         let text = p.to_string();
         assert!(text.contains("layers.frozen_text = ignore"), "{text}");
-        assert!(text.contains("layers.no_plot_text = exclude"), "{text}");
+        assert!(
+            text.contains(&format!("layers.no_plot_text = {no_plot_text}")),
+            "{text}"
+        );
         // Geometry keeps its rule: frozen is excluded in both profiles.
         assert!(text.contains("layers.frozen = exclude"), "{text}");
         let knobs = p.knobs();
@@ -608,7 +612,11 @@ fn issue_1621_both_profiles_draw_frozen_text_and_drop_no_plot_text() {
         assert_eq!(row("layers.frozen_text"), Some("layer-frozen-text"));
         assert_eq!(row("layers.no_plot_text"), Some("layer-no-plot-text"));
         let fields = p.exclusion_fields();
-        assert!(fields.contains(&"layers.no_plot_text"), "{fields:?}");
+        assert_eq!(
+            fields.contains(&"layers.no_plot_text"),
+            no_plot_text == "exclude",
+            "{fields:?}"
+        );
         assert!(!fields.contains(&"layers.frozen_text"), "{fields:?}");
     }
     let no_plot_text = Exclusion::ALL
@@ -616,6 +624,20 @@ fn issue_1621_both_profiles_draw_frozen_text_and_drop_no_plot_text() {
         .find(|e| e.field() == "layers.no_plot_text")
         .expect("an exclusion for text on a no-plot layer");
     assert_eq!(no_plot_text.code(), "LAYER_HIDDEN");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1639_no_plot_text_shows_in_model_space_and_hides_on_the_sheet() {
+    let model = model_run("1639-model");
+    assert!(has(&model.texts, "NO PLOT NOTE"), "{:?}", model.texts);
+    assert_drawn(&model.report, NO_PLOT_TEXT, None);
+    let sheet = sheet_run("1639-sheet");
+    for s in ["NO PLOT NOTE", "SHEET NO PLOT NOTE"] {
+        assert!(!has(&sheet.texts, s), "{s:?} in {:?}", sheet.texts);
+    }
+    assert_dropped(&sheet.report, NO_PLOT_TEXT, "layers.no_plot_text");
+    assert_dropped(&sheet.report, SHEET_NO_PLOT_TEXT, "layers.no_plot_text");
 }
 
 #[test]
@@ -631,7 +653,11 @@ fn issue_1621_the_adrs_record_the_text_exception_as_roms_call() {
             "the {name} amendment names Rom's call and #1621"
         );
     }
-    assert!(view.contains("except their\n  text, which is excluded in every profile"));
+    assert!(
+        view.contains("2026-11-20") && view.contains("#1639"),
+        "the V1-3 amendment records the narrowing of 2026-11-20 (#1639)"
+    );
+    assert!(view.contains("no-plot layers stay visible, text included"));
     assert!(view.contains("frozen-layer text is drawn"));
     for row in ["| `layer-frozen-text` |", "| `layer-no-plot-text` |"] {
         assert!(print.contains(row), "the print ADR's table has {row}");
@@ -659,11 +685,11 @@ fn issue_1621_model_mode_draws_text_on_a_frozen_layer_but_not_its_line() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1621_model_mode_drops_text_on_a_no_plot_layer_and_keeps_its_line() {
+fn issue_1639_model_mode_draws_text_on_a_no_plot_layer_and_keeps_its_line() {
     let run = model_run("model-no-plot");
-    assert!(!has(&run.texts, "NO PLOT NOTE"), "{:?}", run.texts);
-    assert_dropped(&run.report, NO_PLOT_TEXT, "layers.no_plot_text");
-    // V1-3 still draws the no-plot layer's geometry on screen.
+    assert!(has(&run.texts, "NO PLOT NOTE"), "{:?}", run.texts);
+    assert_drawn(&run.report, NO_PLOT_TEXT, None);
+    // V1-3 draws the no-plot layer's geometry on screen, and now its text too.
     assert_drawn(&run.report, NO_PLOT_LINE, None);
 }
 
@@ -772,15 +798,20 @@ fn issue_1621_the_annotation_mapper_only_sees_what_the_layer_filter_kept() {
         stray.is_empty(),
         "the mapper asked for {stray:X?}, which the filter did not keep"
     );
-    for h in [OFF_TEXT, NO_PLOT_TEXT] {
-        assert!(dropped.contains(&h), "the filter drops {h:#X}");
-        assert!(!run.asked.contains(&h), "the mapper never sees {h:#X}");
-    }
+    assert!(
+        dropped.contains(&OFF_TEXT),
+        "the filter drops {OFF_TEXT:#X}"
+    );
+    assert!(
+        !run.asked.contains(&OFF_TEXT),
+        "the mapper never sees {OFF_TEXT:#X}"
+    );
     let want_kept: BTreeSet<u64> = [
         NOTE,
         FROZEN_TEXT,
         FROZEN_MTEXT,
         FROZEN_ATTDEF,
+        NO_PLOT_TEXT,
         VP_COLD_TEXT,
         BLOCK_ATTDEF,
         BLOCK_FROZEN_TEXT,
@@ -1038,7 +1069,12 @@ fn issue_1621_written_drawing_text_follows_the_layer_rules_in_model_mode() {
         1,
         "the block's own-frozen TEXT, from the visible INSERT only: {texts:?}"
     );
-    for gone in ["CONSTRUCTION LABEL", "OFF NOTE", "HIDDEN", "COLDVAL"] {
+    assert_eq!(
+        count("CONSTRUCTION LABEL"),
+        1,
+        "text on a no-plot layer is drawn in model mode: {texts:?}"
+    );
+    for gone in ["OFF NOTE", "HIDDEN", "COLDVAL"] {
         assert_eq!(count(gone), 0, "{gone:?} is not drawn: {texts:?}");
     }
     let frozen_line_drawn = out.report.entities.iter().any(|r| {

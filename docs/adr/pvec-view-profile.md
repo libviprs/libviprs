@@ -27,8 +27,8 @@ examples, is "The v1 visible flattened drawing" in the spike):
 - **V1-3 Visibility.** An entity is visible only if its effective layer is on and thawed. An
   INSERT that is not visible takes its whole expansion with it. Locked, no-plot and
   viewport-frozen layers stay visible (the last is reported as `IgnoredByPolicy`).
-  Amended by #1621 (Rom's call, 2026-11-19): no-plot layers are visible, except their
-  text, which is excluded in every profile; frozen-layer text is drawn. See the amendment below.
+  Amended by #1621 (Rom's call, 2026-11-19) and narrowed by #1639 (Rom's answer, 2026-11-20):
+  no-plot layers stay visible, text included; frozen-layer text is drawn. See the amendment below.
 - **V1-4 Instances.** Each visible INSERT contributes its block's visible leaves once per
   instance, a MINSERT being rows times columns instances, under the composed transform.
 - **V1-5 External and missing.** An xref, or an INSERT of no block, contributes nothing and is
@@ -38,9 +38,11 @@ examples, is "The v1 visible flattened drawing" in the spike):
 Every entity excluded by V1-3 is counted per layer in the report, so "nothing was on that layer"
 and "the filter lost it" stay distinguishable. Colour, lineweight and linetype play no part.
 
-Amendment to V1-3 (#1621, Rom's call, 2026-11-19). Text on a frozen layer is drawn and
-text on a no-plot layer is not, in `default_profile()` and in the print profile alike. Two knobs
-carry it, `layers.frozen_text = ignore` and `layers.no_plot_text = exclude` (rows
+Amendment to V1-3 (#1621, Rom's call, 2026-11-19, narrowed by #1639, 2026-11-20). Text on a
+frozen layer is drawn in `default_profile()` and in the print profile alike. Text on a no-plot
+layer is drawn in `default_profile()`, as V1-3 already says of a no-plot layer, and left out of a
+sheet by the print profile. Two knobs carry it, `layers.frozen_text = ignore` (both profiles) and
+`layers.no_plot_text` (`ignore` here, `exclude` in the print profile) (rows
 `layer-frozen-text` and `layer-no-plot-text` of the print profile ADR's table), and the one layer
 filter applies them on the effective layer after V1-2, so a TEXT on its own frozen layer inside a
 visible INSERT is drawn. The rest of V1-3 stands:
@@ -51,12 +53,15 @@ visible INSERT is drawn. The rest of V1-3 stands:
   rules, so their figures never float without their lines.
 - An off layer hides text like anything else, and an INSERT on a frozen layer still takes its whole
   expansion, attributes included, with it.
-- Geometry on a frozen layer stays excluded, and geometry on a no-plot layer stays visible here.
+- Geometry on a frozen layer stays excluded, and geometry on a no-plot layer stays visible here,
+  as does its text.
 
 Why: on Rom's drawings notes often sit on frozen layers and should show, while Defpoints and other
-no-plot layers carry construction labels that should not. This splits a no-plot layer's text from
-its own geometry in model space; Rom can narrow the no-plot half to the print profile with one line,
-and then V1-3 goes back to "no-plot layers stay visible" unchanged.
+no-plot layers carry construction labels that a plot leaves out. The first version of this
+amendment excluded no-plot text in every profile, which split a no-plot layer's text from its own
+geometry in model space. Rom's answer of 2026-11-20 narrowed that half to the print profile, so
+V1-3 stands as written for no-plot layers on screen and the sheet leaves their text out like their
+geometry.
 
 ## Numbers
 

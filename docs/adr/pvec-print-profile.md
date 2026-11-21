@@ -34,7 +34,8 @@ a red test and a new ADR.
   contributes nothing. A viewport on a no-plot layer still draws what it shows; only its border
   is not printed, as AutoCAD prints it (amended by #1577, see below). Text is the exception to
   the frozen rule: text on a frozen layer is drawn (`layers.frozen_text = ignore`), and text on a
-  no-plot layer stays excluded (`layers.no_plot_text = exclude`) (amended by #1621, see below).
+  no-plot layer stays excluded (`layers.no_plot_text = exclude`, like its geometry) (amended by
+  #1621 and #1639, see below).
 - **P-4 Instances.** V1-4, once per viewport that shows them. A model entity seen through two
   viewports is two pvec entities with distinct provenance (`source_kind` 2, the source handle
   followed by the viewport handle).
@@ -69,7 +70,8 @@ a red test and a new ADR.
 
 The profile as data, beside the N1.4 rows of the view-profile ADR. `layer-no-plot` is the row
 this ADR adds; the default profile carries it as `ignore`, which is what V1-3 already says. The
-two text rows were added by the #1621 amendment below and carry the same value in both profiles.
+two text rows were added by the #1621 amendment below. `layer-frozen-text` carries the same value
+in both profiles, and `layer-no-plot-text` is `ignore` on screen and `exclude` on a sheet (#1639).
 
 | field | default (V1) | print (P) | row |
 |---|---|---|---|
@@ -79,7 +81,7 @@ two text rows were added by the #1621 amendment below and carry the same value i
 | `layers.frozen` | exclude | exclude | `layer-frozen` |
 | `layers.no_plot` | ignore | exclude | `layer-no-plot` |
 | `layers.frozen_text` | ignore | ignore | `layer-frozen-text` |
-| `layers.no_plot_text` | exclude | exclude | `layer-no-plot-text` |
+| `layers.no_plot_text` | ignore | exclude | `layer-no-plot-text` |
 | `layers.frozen_in_viewport` | ignore-and-report | apply | `layer-frozen-in-viewport` |
 | `layers.insert_override` | inherit-on-layer-zero | inherit-on-layer-zero | `insert-layer-override` |
 | `nested_inserts.max_depth` | 64 | 64 | `nested-insert` |
@@ -116,7 +118,8 @@ difference shows.
 
 Amendment to P-3 (#1621, Rom's call, 2026-11-19). Text on a frozen layer is drawn on
 the sheet, both in the layout's own paper space and in model space seen through a viewport, and
-text on a no-plot layer is left out. A sheet therefore shows notes its plot lacks (superseded
+text on a no-plot layer is left out, as no-plot geometry is (the default profile draws both,
+#1639). A sheet therefore shows notes its plot lacks (superseded
 schemes, demolition notes) when they sit on frozen layers; the upload dialog says so. The scope is
 the same as the V1-3 amendment: the layer table's frozen flag only, so a viewport freeze still drops
 text inside the viewport that froze its layer (without that, every sheet's notes would show in every
@@ -175,7 +178,8 @@ that PDF as a differential oracle. Twisted viewports stay refused until it exist
 - `ViewportClipping` gains `Exact` and `ViewportFreezeRule` gains `Apply`. Both enums were
   `#[non_exhaustive]` already. `LayerVisibility` gains `no_plot`, which the integration contract
   pins as `ignore` for the default profile, and since #1621 `frozen_text` and `no_plot_text`,
-  pinned as `ignore` and `exclude`.
+  pinned as `ignore` and, since #1639, `ignore` (the print profile sets `no_plot_text` to
+  `exclude`).
 - No pvec format change: the file name and the report carry the sheet name, the manifest box and
   unit carry the paper size.
 

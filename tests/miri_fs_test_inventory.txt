@@ -769,12 +769,13 @@ annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_dimension_an
 annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_frozen_model_text_shows_through_every_viewport
 annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_model_mode_an_off_layer_still_hides_its_text
 annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_model_mode_draws_text_on_a_frozen_layer_but_not_its_line
-annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_model_mode_drops_text_on_a_no_plot_layer_and_keeps_its_line
 annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_on_a_sheet_text_in_a_visible_insert_follows_its_own_layer
 annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_text_on_its_own_frozen_layer_inside_a_visible_insert_is_drawn
 annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_the_adrs_record_the_text_exception_as_roms_call
 annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_the_annotation_mapper_only_sees_what_the_layer_filter_kept
 annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1621_written_drawing_text_follows_the_layer_rules_in_model_mode
+annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1639_model_mode_draws_text_on_a_no_plot_layer_and_keeps_its_line
+annotated   fs-detected  tests/pvec_1621_text_layers.rs::issue_1639_no_plot_text_shows_in_model_space_and_hides_on_the_sheet
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_page_with_no_image_counts_as_baked
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_refused_image_means_the_page_is_not_baked
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::the_report_says_the_images_were_baked

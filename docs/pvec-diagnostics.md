@@ -41,7 +41,7 @@ it cannot draw yet, `VIEW_NOT_ENABLED` (508) in the row's warning: a VIEWPORT wh
 bulge or a curve, or one the provider reports nothing about, #1563 and #1565), and a curve that
 crosses the sheet or a viewport edge and cannot be cut exactly yet (a rational spline, #1565). An entity wholly outside the sheet or its viewport is
 `ENTITY_IGNORED_BY_POLICY` with the message id `viewport_clipping` and an `OUTSIDE_VIEWPORT` warning,
-one on a no-plot layer has `layers.no_plot` (`layers.no_plot_text` for a TEXT, MTEXT or attribute, in either profile, #1621), one on a layer frozen in the viewport it is seen through
+one on a no-plot layer has `layers.no_plot` (`layers.no_plot_text` for a TEXT, MTEXT or attribute, print profile only, #1621 and #1639), one on a layer frozen in the viewport it is seen through
 has `layers.frozen_in_viewport`, and a VIEWPORT that is drawn, off or hidden when plotting has `space`;
 the sheet's own paper view has `space` too, with a `PAPER_VIEW` warning (`PolicyReason::PaperView`, #1582), so it is never dropped
 silently.

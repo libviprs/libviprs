@@ -207,7 +207,7 @@ fn n3_3_1097_default_profile_is_pinned_field_by_field() {
             frozen: LayerStateRule::Exclude,
             no_plot: LayerStateRule::Ignore,
             frozen_text: LayerStateRule::Ignore,
-            no_plot_text: LayerStateRule::Exclude,
+            no_plot_text: LayerStateRule::Ignore,
             frozen_in_viewport: ViewportFreezeRule::IgnoreAndReport,
             insert_override: InsertLayerRule::InheritOnLayerZero,
         },
@@ -227,7 +227,7 @@ fn n3_3_1097_default_profile_prints_every_knob_with_its_n1_4_row() {
         "layers.frozen = exclude",
         "layers.no_plot = ignore",
         "layers.frozen_text = ignore",
-        "layers.no_plot_text = exclude",
+        "layers.no_plot_text = ignore",
         "layers.frozen_in_viewport = ignore-and-report",
         "layers.insert_override = inherit-on-layer-zero",
         "nested_inserts.max_depth = 64",
@@ -448,8 +448,6 @@ fn n3_3_1097_missing_layer_state_is_an_error_when_the_profile_needs_it() {
     let mut p = ViewProfile::default_profile();
     p.layers.off = LayerStateRule::Ignore;
     p.layers.frozen = LayerStateRule::Ignore;
-    // Text on a no-plot layer is a layer flag too (#1621).
-    p.layers.no_plot_text = LayerStateRule::Ignore;
     assert_eq!(p.apply(&m).unwrap().report.included, 13);
 }
 

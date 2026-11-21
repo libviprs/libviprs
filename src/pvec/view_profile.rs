@@ -16,7 +16,7 @@
 //! | `layers.frozen` | `layer-frozen` | exclude |
 //! | `layers.no_plot` | `layer-no-plot` (print profile ADR) | ignore |
 //! | `layers.frozen_text` | `layer-frozen-text` (print profile ADR) | ignore |
-//! | `layers.no_plot_text` | `layer-no-plot-text` (print profile ADR) | exclude |
+//! | `layers.no_plot_text` | `layer-no-plot-text` (print profile ADR) | ignore |
 //! | `layers.frozen_in_viewport` | `layer-frozen-in-viewport` | ignore and report |
 //! | `layers.insert_override` | `insert-layer-override` | layer "0" inherits the INSERT's layer |
 //! | `nested_inserts.max_depth` | `nested-insert` | 64, the decoder's own limit |
@@ -28,9 +28,11 @@
 //! knob [`ViewProfile::print_profile`] sets to exclude them (P-3 of
 //! `docs/adr/pvec-print-profile.md`).
 //!
-//! Text has two knobs of its own (#1621, Rom's call of 2026-11-19, amending V1-3 and P-3): on a
-//! frozen layer a TEXT, MTEXT or attribute is drawn (`layers.frozen_text = ignore`) and on a
-//! no-plot layer it is left out (`layers.no_plot_text = exclude`), in both profiles. They replace
+//! Text has two knobs of its own (#1621 and #1639, Rom's calls of 2026-11-19 and 2026-11-20,
+//! amending V1-3 and P-3): on a frozen layer a TEXT, MTEXT or attribute is drawn
+//! (`layers.frozen_text = ignore`) in both profiles, and on a no-plot layer it is drawn in model
+//! mode (`layers.no_plot_text = ignore`) and left out of a sheet (`exclude` in the print
+//! profile), as no-plot geometry is. They replace
 //! `layers.frozen` and `layers.no_plot` for those classes only, an off layer still hides text, a
 //! viewport freeze still applies to it, and an INSERT on a frozen layer still takes its whole
 //! expansion (attributes included) with it.
@@ -192,7 +194,7 @@ pub enum Exclusion {
     LayerFrozen,
     /// No-plot layer, under `layers.no_plot = exclude` (P-3 of the print profile).
     LayerNoPlot,
-    /// Text on a no-plot layer, under `layers.no_plot_text = exclude` (#1621).
+    /// Text on a no-plot layer, under `layers.no_plot_text = exclude` (#1621, the print profile's rule since #1639).
     LayerNoPlotText,
     /// Too deep.
     DepthLimit,
@@ -307,7 +309,7 @@ impl ViewProfile {
                 frozen: LayerStateRule::Exclude,
                 no_plot: LayerStateRule::Ignore,
                 frozen_text: LayerStateRule::Ignore,
-                no_plot_text: LayerStateRule::Exclude,
+                no_plot_text: LayerStateRule::Ignore,
                 frozen_in_viewport: ViewportFreezeRule::IgnoreAndReport,
                 insert_override: InsertLayerRule::InheritOnLayerZero,
             },
