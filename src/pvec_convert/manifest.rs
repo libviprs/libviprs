@@ -235,6 +235,17 @@ pub struct ManifestViewport {
     pub reason: Option<String>,
 }
 
+/// What the drawing itself names: the plot configuration (the PC3) and the plot style table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ManifestPlot {
+    /// The plot style table the layout names (`Langara_2024-LW0.ctb`), empty when it names none.
+    pub style_sheet: String,
+    /// The plot configuration the layout names (the PC3, `Langara_2026_Master_Plan.pc3`), `None`
+    /// when it names none.
+    pub config_name: Option<String>,
+}
+
 /// One layout, skipped ones included.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -249,6 +260,8 @@ pub struct ManifestLayout {
     pub sheet: bool,
     /// `empty` or `emptyAfterView` when it is not a sheet.
     pub skip: Option<String>,
+    /// What the layout's page setup names, `None` for a layout that is not a sheet.
+    pub plot: Option<ManifestPlot>,
     /// The viewports.
     pub viewports: Vec<ManifestViewport>,
     /// Entities in the layout's paper space.
@@ -339,6 +352,17 @@ pub struct ManifestModelSpace {
     pub text_count: u64,
 }
 
+/// What the drawing file says about itself, as the header stores it (`$FINGERPRINTGUID` is set
+/// once and kept across saves, `$VERSIONGUID` changes on every save).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ManifestFile {
+    /// The drawing's fingerprint GUID, `None` when the header has none.
+    pub fingerprint_guid: Option<String>,
+    /// The drawing's version GUID, `None` when the header has none.
+    pub version_guid: Option<String>,
+}
+
 /// A drawing, listed without converting it (spec section 2.2, minus what a server adds: upload id,
 /// expiry and file facts).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -346,6 +370,8 @@ pub struct ManifestModelSpace {
 pub struct CadManifest {
     /// Schema version, 1.
     pub schema: u32,
+    /// The drawing's own identity.
+    pub file: ManifestFile,
     /// Model space.
     pub model_space: ManifestModelSpace,
     /// Every layer.

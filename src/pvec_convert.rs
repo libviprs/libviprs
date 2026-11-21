@@ -82,9 +82,10 @@ pub use layouts::{
 };
 pub use manifest::{
     CadChoices, CadManifest, CadMode, CadText, LayerCounts, LayerOverride, ManifestColour,
-    ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace,
-    ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility, ResolvedLayer, StateLayer,
-    TextSwitch, Visibility, VpRef, cad_manifest, resolve_visibility,
+    ManifestFile, ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask,
+    ManifestModelSpace, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount,
+    PlotsVisibility, ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, cad_manifest,
+    resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
