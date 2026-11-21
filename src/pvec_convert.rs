@@ -852,7 +852,9 @@ impl<'a> PvecConversion<'a> {
                             summary.notes.push("rotation-not-applied".into());
                         }
                         let n_d = (p.scale_numerator, p.scale_denominator);
-                        if !fit {
+                        // Fit writes the scale it works out once the extents are known, which only
+                        // happens for a sheet that has a placement.
+                        if !(fit && place.is_some()) {
                             written = plot_scale_record(
                                 n_d.0,
                                 n_d.1,

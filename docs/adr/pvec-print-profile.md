@@ -109,6 +109,8 @@ those sheets into a bare title block. The viewport now goes through the same che
 `border: no-plot-layer`. pvec draws no viewport border on any layer, so the row is the only place the
 difference shows.
 
+Amendment to P-6 and P-9 (#1628). The frame and the calibration can now follow the caller's plot settings (`PvecConversion::plot_settings`), and nothing changes without them. P-6: the paper is placed from the extents of what the sheet draws when the plot area is Extents (the origin is that corner instead of the paper-space origin), the offset adds to the plot origin, centre puts the extents in the middle of the printable area (the paper less its margins) and ignores the offset, and a paper size override replaces the layout's paper and margins and still follows `plot_rotation`. Fit to paper makes the frame the window of the drawing that the paper shows, so it is no longer the paper's own size in drawing units. P-9: under fit the calibration record is the fit ratio (printable paper over extents, tighter side) in place of the layout's plot scale, and it is still never applied to coordinates. Plot area Window and rotation 180 stay reported, not applied. Position is still `unmeasured`, and offset and centre compound on that unmeasured placement until the plot-settings fixture exists.
+
 Rejected: amending V1-1 and V1-3 in place (every caller of the default profile would change
 behaviour); one profile with a `space` switch that flips the rules (the rules are the profile); a
 pvec clip-region capability (pvec is curve-only, and a reader without the capability would draw
