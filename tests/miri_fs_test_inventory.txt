@@ -752,6 +752,16 @@ annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_page_with_no_image_c
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::a_refused_image_means_the_page_is_not_baked
 annotated   fs-detected  tests/pvec_1615_bake_default.rs::the_report_says_the_images_were_baked
 annotated   fs-detected  tests/pvec_1615_baked_report.rs::over_the_image_limit_the_report_names_the_limit
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::a_ctb_colour_replaces_the_object_colour
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::a_solid_entry_removes_an_object_linetype_and_a_dashed_entry_adds_one
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::an_object_colour_entry_and_a_true_colour_keep_the_entitys_own_colour
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::apply_factor_scales_a_table_lineweight_and_not_the_object_one
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::print_profile_applies_ctb_colour_screening_lineweight_linetype
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::screening_lightens_the_stroke
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::the_grayscale_policy_bit_plots_the_object_colour_in_gray
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::the_lineweight_list_sets_the_width
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::the_recorded_properties_do_not_change_what_is_drawn
+annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::without_a_table_the_conversion_is_what_it_was
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage

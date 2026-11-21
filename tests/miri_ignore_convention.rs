@@ -895,7 +895,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1609 (the rest of it) adds 1: `tests/pvec_1609_annotations.rs::issue_1609_a_disc_and_a_sliver_are_stored_and_a_line_is_said_to_have_no_area`. #1615 adds 4: the three `tests/pvec_1615_bake_default.rs` cells and the `tests/pvec_1615_baked_report.rs` cell that convert a PDF into a temp dir. It said 1153 before this line moved.
 /// #1638 adds 8: the `tests/pvec_1638_stroke_paint.rs` cells that convert a drawing into a temp dir and read the paint stream back. It said 1166 before this line moved.
 /// #1633 adds 4 (merged in here): the `tests/pvec_1633_effective_layer.rs` and `tests/pvec_1633_invisible_flag.rs` cells that convert a hand-built drawing into a temp dir. It said 1174 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1178;
+/// #1630 adds 10: the `tests/pvec_1630_plot_style_tables.rs` cells that write a drawing and convert it into a temp dir. It said 1178 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1188;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

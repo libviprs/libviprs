@@ -235,6 +235,8 @@ pub struct PvecConversion<'a> {
     regions: Option<RegionConfig>,
     annotations: bool,
     element_rules: Option<ElementRules>,
+    #[allow(dead_code)]
+    plot_style: Option<acadrust::plot_style::PlotStyleTable>,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -257,6 +259,7 @@ impl<'a> PvecConversion<'a> {
             regions: None,
             annotations: false,
             element_rules: None,
+            plot_style: None,
         }
     }
 
@@ -305,6 +308,15 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn view_profile(mut self, profile: ViewProfile) -> Self {
         self.view_profile = profile;
+        self
+    }
+
+    /// The plot style table a print conversion applies to each stroke: colour (with the grayscale
+    /// policy), screening, lineweight and linetype, per ACI for a CTB and per named style for an
+    /// STB (#1630).
+    #[must_use]
+    pub fn plot_style_table(mut self, table: acadrust::plot_style::PlotStyleTable) -> Self {
+        self.plot_style = Some(table);
         self
     }
 
