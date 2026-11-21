@@ -38,7 +38,7 @@ use crate::pvec::report::SheetSummary;
 use crate::pvec::writer::WriteError;
 use crate::pvec::{
     DwgProvider, EntityScope, LayoutKind, LayoutState, ProviderError, SourceUnit, SpaceSelection,
-    ViewProfile,
+    ViewProfile, ViewportEntity,
 };
 
 /// Why a whole set failed. One sheet failing is not this: it is a [`SheetSkip::Failed`] row.
@@ -266,45 +266,7 @@ impl<'a> PvecLayoutSet<'a> {
         }
         let width = paper.len().to_string().len().max(2);
 
-        // A layout is a sheet (#1557, item 6) when it has an entity of its own other than a
-        // viewport, or a viewport onto the model that is on, not hidden when plotting and has a
-        // view height. One on a no-plot layer counts: it prints what it shows and only its border
-        // is hidden (P-3, #1577). One whose only such viewport is its paper view (the
-        // conversion's own rule, #1583) is a blank sheet, `EmptyAfterView` without being
-        // converted; one with neither is `Empty`. A provider that cannot list viewports has none
-        // to show.
-        let viewports = provider.viewports().or_else(|e| match e {
-            ProviderError::CannotReport(_) => Ok(Vec::new()),
-            e => Err(e),
-        });
-        // `None` for a sheet to convert, else why it is skipped.
-        let skip = |layout: &LayoutState| -> Result<Option<SheetSkip>, ProviderError> {
-            let mut cursor = provider.entities(&EntityScope::Layout(layout.id))?;
-            while let Some(e) = cursor.next_entity()? {
-                if e.provenance.class_name != "VIEWPORT" {
-                    return Ok(None);
-                }
-            }
-            let mut blank = false;
-            for v in viewports
-                .as_ref()
-                .map_err(Clone::clone)?
-                .iter()
-                .filter(|v| {
-                    v.layout == layout.id && v.visible && !v.hide_plot && v.view_height > 0.0
-                })
-            {
-                if !super::paper_view(v) {
-                    return Ok(None);
-                }
-                blank = true;
-            }
-            Ok(Some(if blank {
-                SheetSkip::EmptyAfterView
-            } else {
-                SheetSkip::Empty
-            }))
-        };
+        let viewports = listed_viewports(provider);
         // The layout name as a file name part: every byte outside `[A-Za-z0-9._-]` becomes `-`, runs
         // of `-` collapse, `-` and `.` are trimmed from both ends, at most 64 bytes, `layout` when
         // nothing is left.
@@ -342,7 +304,7 @@ impl<'a> PvecLayoutSet<'a> {
                 return Err(LayoutSetError::Cancelled);
             }
             let observer = c.observer.clone();
-            let result = match skip(layout) {
+            let result = match sheet_skip(provider, layout, &viewports) {
                 Ok(Some(skipped)) => Ok(Err(skipped)),
                 Err(e) => Err(PvecConvertError::View(e.into())),
                 Ok(None) => match c.unit.or(header_unit) {
@@ -419,6 +381,101 @@ impl<'a> PvecLayoutSet<'a> {
             index: Some(index),
         })
     }
+}
+
+/// One paper layout of a drawing, as [`paper_sheets`] lists it.
+#[derive(Debug)]
+pub struct PaperSheet {
+    /// The layout's own name.
+    pub layout: String,
+    /// Its 1-based position among the drawing's paper layouts, in tab order: the number
+    /// [`PvecLayoutSet`] gives its file.
+    pub tab_order: u32,
+    /// `None` for a sheet, else [`SheetSkip::Empty`] or [`SheetSkip::EmptyAfterView`] by the rule
+    /// the set skips layouts by.
+    pub skip: Option<SheetSkip>,
+}
+
+/// Every paper layout of `source` in tab order, and whether it is a sheet, without converting any
+/// of them or writing anything (#1622). A caller that turns each sheet into a page of its own (one
+/// plan per print layout) learns how many pages there are before it converts the first.
+///
+/// A layout listed as a sheet can still come out [`SheetSkip::EmptyAfterView`] when it is
+/// converted, when none of its content survives the print profile (a layer that is off, say):
+/// only the conversion knows that. A drawing with no paper layout lists nothing.
+///
+/// # Errors
+///
+/// [`LayoutSetError::Open`] when the drawing does not open, [`LayoutSetError::Layouts`] when its
+/// layouts, their entities or its viewports cannot be read.
+pub fn paper_sheets<P: DwgProvider>(
+    source: CadSource<'_>,
+) -> Result<Vec<PaperSheet>, LayoutSetError> {
+    let provider = P::open(source).map_err(LayoutSetError::Open)?;
+    let viewports = listed_viewports(&provider);
+    provider
+        .layouts()
+        .map_err(LayoutSetError::Layouts)?
+        .into_iter()
+        .filter(|l| l.kind == LayoutKind::Paper)
+        .enumerate()
+        .map(|(n, layout)| {
+            let skip =
+                sheet_skip(&provider, &layout, &viewports).map_err(LayoutSetError::Layouts)?;
+            Ok(PaperSheet {
+                layout: layout.name,
+                tab_order: n as u32 + 1,
+                skip,
+            })
+        })
+        .collect()
+}
+
+/// The drawing's viewports, read once for all its layouts. A provider that cannot list viewports
+/// has none to show.
+fn listed_viewports<P: DwgProvider>(provider: &P) -> Result<Vec<ViewportEntity>, ProviderError> {
+    provider.viewports().or_else(|e| match e {
+        ProviderError::CannotReport(_) => Ok(Vec::new()),
+        e => Err(e),
+    })
+}
+
+/// `None` when `layout` is a sheet, else why it is skipped.
+///
+/// A layout is a sheet (#1557, item 6) when it has an entity of its own other than a viewport, or
+/// a viewport onto the model that is on, not hidden when plotting and has a view height. One on a
+/// no-plot layer counts: it prints what it shows and only its border is hidden (P-3, #1577). One
+/// whose only such viewport is its paper view (the conversion's own rule, #1583) is a blank sheet,
+/// `EmptyAfterView` without being converted; one with neither is `Empty`. [`PvecLayoutSet`] and
+/// [`paper_sheets`] both ask this, so a listing and a set never disagree.
+fn sheet_skip<P: DwgProvider>(
+    provider: &P,
+    layout: &LayoutState,
+    viewports: &Result<Vec<ViewportEntity>, ProviderError>,
+) -> Result<Option<SheetSkip>, ProviderError> {
+    let mut cursor = provider.entities(&EntityScope::Layout(layout.id))?;
+    while let Some(e) = cursor.next_entity()? {
+        if e.provenance.class_name != "VIEWPORT" {
+            return Ok(None);
+        }
+    }
+    let mut blank = false;
+    for v in viewports
+        .as_ref()
+        .map_err(Clone::clone)?
+        .iter()
+        .filter(|v| v.layout == layout.id && v.visible && !v.hide_plot && v.view_height > 0.0)
+    {
+        if !super::paper_view(v) {
+            return Ok(None);
+        }
+        blank = true;
+    }
+    Ok(Some(if blank {
+        SheetSkip::EmptyAfterView
+    } else {
+        SheetSkip::Empty
+    }))
 }
 
 /// `<stem>.sheets.json`.
