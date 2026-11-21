@@ -153,7 +153,8 @@ pub use provider::{
     EntityScope, EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState,
     LayoutId, LayoutKind, LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps,
     ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype,
-    SourceLineweight, SourceTransform, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef, ViewportClip, ViewportEntity,
+    XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,

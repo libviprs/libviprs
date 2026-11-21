@@ -62,7 +62,7 @@ use crate::pvec::provider::{
     EntityScope, EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind,
     LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
     RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
-    SourceTransform, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    SourceTransform, TextAnchorV, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -972,45 +972,72 @@ impl DwgProvider for AcadrustProvider {
                 .value
                 .clone()
         };
+        let (at, lay) = Layout::of_attdef(a);
         text(
-            a.insertion_point,
+            at,
             a.height,
             a.rotation,
             a.normal,
             decode_escapes(&content),
+            lay,
         )
     }
 
     fn annotation(&self, handle: ItemHandle) -> Option<Annotation> {
         let entity = self.doc.get_entity(acr::Handle::new(handle.get()))?;
         match entity {
-            EntityType::Text(t) => text(
-                t.insertion_point,
-                t.height,
-                t.rotation,
-                t.normal,
-                decode_escapes(&t.value),
-            ),
+            EntityType::Text(t) => {
+                use acr::entities::{TextHorizontalAlignment as H, TextVerticalAlignment as V};
+                let h = match t.horizontal_alignment {
+                    H::Left => 0,
+                    H::Center => 1,
+                    H::Right => 2,
+                    H::Aligned => 3,
+                    H::Middle => 4,
+                    H::Fit => 5,
+                };
+                let v = match t.vertical_alignment {
+                    V::Baseline => 0,
+                    V::Bottom => 1,
+                    V::Middle => 2,
+                    V::Top => 3,
+                };
+                let (at, lay) =
+                    Layout::justified(t.insertion_point, t.alignment_point, h, v, t.width_factor);
+                text(
+                    at,
+                    t.height,
+                    t.rotation,
+                    t.normal,
+                    decode_escapes(&t.value),
+                    lay,
+                )
+            }
             EntityType::MText(m) => text(
                 m.insertion_point,
                 m.height,
                 m.rotation,
                 m.normal,
                 decode_escapes(&display_text(&m.value).text),
+                Layout::of_mtext(m),
             ),
             // A definition outside any INSERT shows its tag, and an invisible one never. Inside an
             // INSERT it goes through `inserted_attribute`.
-            EntityType::AttributeDefinition(a) if !a.flags.invisible => text(
-                a.insertion_point,
-                a.height,
-                a.rotation,
-                a.normal,
-                decode_escapes(if a.tag.is_empty() {
-                    &a.default_value
-                } else {
-                    &a.tag
-                }),
-            ),
+            EntityType::AttributeDefinition(a) if !a.flags.invisible => {
+                let (at, lay) = Layout::of_attdef(a);
+                text(
+                    at,
+                    a.height,
+                    a.rotation,
+                    a.normal,
+                    decode_escapes(if a.tag.is_empty() {
+                        &a.default_value
+                    } else {
+                        &a.tag
+                    }),
+                    lay,
+                )
+            }
             EntityType::Hatch(h) => {
                 let mut drawn = DrawnFact::default();
                 hatch_rings(h, &mut drawn);
@@ -1114,12 +1141,15 @@ impl DwgProvider for AcadrustProvider {
 
 /// A run of text as an [`Annotation`], or `None` for one that draws nothing: with no height or no
 /// characters, which the stream refuses.
+/// A TEXT, MTEXT or attribute definition as an [`Annotation::Text`]. `lay` is what the entity says
+/// about where its position sits and how it spreads; [`Layout::plain`] is a left-justified run.
 fn text(
     position: acr::Vector3,
     height: f64,
     rotation: f64,
     normal: acr::Vector3,
     content: String,
+    lay: Layout,
 ) -> Option<Annotation> {
     (height > 0.0 && height.is_finite() && !content.trim().is_empty()).then(|| Annotation::Text {
         position: p3(position),
@@ -1127,7 +1157,120 @@ fn text(
         rotation,
         content,
         normal: p3(normal),
+        width_factor: if lay.width_factor > 0.0 && lay.width_factor.is_finite() {
+            lay.width_factor
+        } else {
+            1.0
+        },
+        anchor: lay.anchor,
+        fit: lay.fit,
+        block_width: if lay.block_width > 0.0 && lay.block_width.is_finite() {
+            lay.block_width
+        } else {
+            0.0
+        },
+        line_spacing: if lay.line_spacing > 0.0 && lay.line_spacing.is_finite() {
+            lay.line_spacing
+        } else {
+            1.0
+        },
     })
+}
+
+/// The part of a text's stored fields that places and spreads it.
+struct Layout {
+    width_factor: f64,
+    anchor: (f64, TextAnchorV),
+    fit: Option<(f64, bool)>,
+    block_width: f64,
+    line_spacing: f64,
+}
+
+impl Layout {
+    /// Left justified on the baseline, factor 1.
+    const fn plain() -> Self {
+        Self {
+            width_factor: 1.0,
+            anchor: (0.0, TextAnchorV::Baseline),
+            fit: None,
+            block_width: 0.0,
+            line_spacing: 1.0,
+        }
+    }
+
+    /// What a TEXT or an attribute definition says from its DXF justification codes (72 and 73),
+    /// and the point its run is placed from. The insertion point is the start of a left-justified
+    /// baseline run and of an aligned or fitted one; any other justification is placed by the
+    /// alignment point (11).
+    fn justified(
+        insertion: acr::Vector3,
+        alignment: Option<acr::Vector3>,
+        h: i16,
+        v: i16,
+        width_factor: f64,
+    ) -> (acr::Vector3, Self) {
+        let mut lay = Self::plain();
+        lay.width_factor = width_factor;
+        let second = alignment.unwrap_or(insertion);
+        if matches!(h, 3 | 5) {
+            let span = (second.x - insertion.x).hypot(second.y - insertion.y);
+            if span > 0.0 && span.is_finite() {
+                lay.fit = Some((span, h == 3));
+            }
+            return (insertion, lay);
+        }
+        let across = match h {
+            1 | 4 => 0.5,
+            2 => 1.0,
+            _ => 0.0,
+        };
+        let down = match (h, v) {
+            (4, _) | (_, 2) => TextAnchorV::Middle,
+            (_, 3) => TextAnchorV::Top,
+            (_, 1) => TextAnchorV::Bottom,
+            _ => TextAnchorV::Baseline,
+        };
+        lay.anchor = (across, down);
+        let placed = if lay.anchor == (0.0, TextAnchorV::Baseline) {
+            insertion
+        } else {
+            second
+        };
+        (placed, lay)
+    }
+
+    /// What an attribute definition says, as [`Layout::justified`] reads a TEXT.
+    fn of_attdef(a: &acr::entities::AttributeDefinition) -> (acr::Vector3, Self) {
+        Self::justified(
+            a.insertion_point,
+            Some(a.alignment_point),
+            a.horizontal_alignment.to_value(),
+            a.vertical_alignment.to_value(),
+            a.width_factor,
+        )
+    }
+
+    /// What an MTEXT says: its attachment point (71), reference width and line spacing.
+    fn of_mtext(m: &acr::entities::MText) -> Self {
+        use acr::entities::AttachmentPoint as A;
+        let across = match m.attachment_point {
+            A::TopCenter | A::MiddleCenter | A::BottomCenter => 0.5,
+            A::TopRight | A::MiddleRight | A::BottomRight => 1.0,
+            _ => 0.0,
+        };
+        let down = match m.attachment_point {
+            A::TopLeft | A::TopCenter | A::TopRight => TextAnchorV::Top,
+            A::MiddleLeft | A::MiddleCenter | A::MiddleRight => TextAnchorV::Middle,
+            _ => TextAnchorV::Bottom,
+        };
+        Self {
+            width_factor: 1.0,
+            anchor: (across, down),
+            fit: None,
+            block_width: m.rectangle_width,
+            line_spacing: m.line_spacing_factor,
+        }
+    }
 }
 
 impl AcadrustProvider {

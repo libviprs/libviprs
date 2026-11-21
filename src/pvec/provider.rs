@@ -694,6 +694,21 @@ pub enum Annotation {
         content: String,
         /// The extrusion normal.
         normal: Point3,
+        /// The width factor, 1.0 when the style leaves it alone.
+        width_factor: f64,
+        /// Where `position` sits on the printed block of text: the fraction of the block's width
+        /// from its left edge (0, a half or 1) and the vertical reference. A TEXT is a block of
+        /// one line, and an MTEXT's block is its rectangle, as wide as its reference width or its
+        /// widest line, whichever is more.
+        anchor: (f64, TextAnchorV),
+        /// For a TEXT that is aligned or fitted between two points, the distance between them and
+        /// whether the height scales with it (aligned) or stays (fit); `position` is then the start
+        /// of the run.
+        fit: Option<(f64, bool)>,
+        /// The MTEXT reference rectangle's width, 0.0 when the drawing leaves it open and for TEXT.
+        block_width: f64,
+        /// The MTEXT line spacing factor, 1.0 for TEXT.
+        line_spacing: f64,
     },
     /// A filled region: `HATCH` or `SOLID`.
     Fill {
@@ -711,6 +726,20 @@ pub enum Annotation {
         /// do not join). A fill with any is not a region the stream can describe whole.
         unread_loops: u32,
     },
+}
+
+/// Which edge of a block of text [`Annotation::Text::position`] sits on, vertically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextAnchorV {
+    /// The top of the first line's capitals.
+    Top,
+    /// Halfway between the top of the first line's capitals and the last line's descenders.
+    Middle,
+    /// The bottom of the last line's descenders.
+    Bottom,
+    /// The first line's baseline.
+    Baseline,
 }
 
 /// A colour as the drawing states it, after the BYLAYER rule has been applied.

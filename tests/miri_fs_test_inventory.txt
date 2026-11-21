@@ -748,9 +748,11 @@ annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_an_edge_on_curve
 annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_each_minsert_cell_is_placed_along_the_insert_axes
 annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_the_arbitrary_axis_algorithm_places_other_azimuths
 annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_what_has_no_plan_image_is_refused_one_row_each
+annotated   fs-detected  tests/pvec_1621_dwg_text.rs::issue_1621_a_fitted_text_spans_its_two_points_and_an_aligned_one_scales_with_them
 annotated   fs-detected  tests/pvec_1621_dwg_text.rs::issue_1621_a_text_anchor_is_as_long_as_the_printed_run
 annotated   fs-detected  tests/pvec_1621_dwg_text.rs::issue_1621_an_mtext_is_one_record_per_printed_line
 annotated   fs-detected  tests/pvec_1621_dwg_text.rs::issue_1621_centred_text_is_drawn_from_its_printed_start
+annotated   fs-detected  tests/pvec_1621_dwg_text.rs::issue_1621_model_text_seen_through_a_viewport_is_kept_inside_it_and_counted_outside
 annotated   fs-detected  tests/pvec_1621_dwg_text.rs::issue_1621_roms_drawing_each_layouts_own_text_is_on_its_sheet
 annotated   fs-detected  tests/pvec_1621_dwg_text.rs::issue_1621_roms_drawing_each_sheet_shows_the_text_its_pdf_prints
 annotated   fs-detected  tests/pvec_1621_dwg_text.rs::issue_1621_roms_drawing_model_space_text_is_all_in_the_stream

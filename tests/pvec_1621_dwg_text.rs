@@ -360,6 +360,100 @@ fn issue_1621_text_on_a_print_layout_is_in_that_sheets_text_stream() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1621_a_fitted_text_spans_its_two_points_and_an_aligned_one_scales_with_them() {
+    let mut doc = CadDocument::new();
+    frame(&mut doc);
+    for (value, y, how) in [
+        ("FITTED", 0.0, TextHorizontalAlignment::Fit),
+        ("ALIGNED", 30.0, TextHorizontalAlignment::Aligned),
+    ] {
+        let mut t = text(value, [10.0, y], 2.0);
+        t.horizontal_alignment = how;
+        t.alignment_point = Some(Vector3::new(70.0, y, 0.0));
+        doc.add_entity(EntityType::Text(t)).unwrap();
+    }
+    let all = model("fit", &doc);
+    let fit = one(&all, "FITTED");
+    assert!(
+        (fit.record.x - 10.0).abs() < 1e-6 && (fit.advance - 60.0).abs() < 1e-6,
+        "starts at {}, {} long",
+        fit.record.x,
+        fit.advance
+    );
+    assert!(
+        (fit.record.height - 2.0).abs() < 1e-9,
+        "fit keeps the height"
+    );
+    let aligned = one(&all, "ALIGNED");
+    assert!((aligned.advance - 60.0).abs() < 1e-6, "{}", aligned.advance);
+    assert!(aligned.record.height > 2.0, "{}", aligned.record.height);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1621_model_text_seen_through_a_viewport_is_kept_inside_it_and_counted_outside() {
+    use acadrust::entities::Viewport;
+    let mut doc = CadDocument::new();
+    frame(&mut doc);
+    doc.add_entity(EntityType::Text(text("INSIDE", [10.0, 10.0], 5.0)))
+        .unwrap();
+    doc.add_entity(EntityType::Text(text("OUTSIDE", [200.0, 0.0], 5.0)))
+        .unwrap();
+    let layout = doc.add_layout("Sheet A").unwrap();
+    let Some(ObjectType::Layout(l)) = doc.objects.get_mut(&layout) else {
+        panic!("the layout object");
+    };
+    l.paper_size = "ISO_A3_(420.00_x_297.00_MM)".into();
+    l.paper_width = 420.0;
+    l.paper_height = 297.0;
+    l.plot_paper_units = 1;
+    l.plot_type = 5;
+    l.plot_scale_numerator = 1.0;
+    l.plot_scale_denominator = 1.0;
+    l.plot_rotation = 0;
+    l.plot_margin_left = 0.0;
+    l.plot_margin_bottom = 0.0;
+    l.plot_origin_x = 0.0;
+    l.plot_origin_y = 0.0;
+    let mut vp = Viewport::with_size(Vector3::new(200.0, 150.0, 0.0), 100.0, 80.0);
+    vp.id = 2;
+    vp.view_center = Vector3::new(0.0, 0.0, 0.0);
+    vp.view_target = Vector3::new(0.0, 0.0, 0.0);
+    vp.view_height = 80.0;
+    doc.add_entity_to_layout(EntityType::Viewport(Box::new(vp)), "Sheet A")
+        .unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dir = scratch("viewport");
+    let dest = dir.join("sheet.pvec");
+    let out = PvecConversion::new(CadSource::Bytes(&bytes), &dest)
+        .view_profile(ViewProfile::print_profile("Sheet A"))
+        .components(STREAMS)
+        .annotations(true)
+        .convert()
+        .expect("the sheet converts");
+    let all = carried(&dest);
+    let counts = out.report.components.map(|c| c.annotations);
+    let inside = all
+        .iter()
+        .find(|c| c.record.text == "INSIDE")
+        .unwrap_or_else(|| panic!("INSIDE through the viewport; counts {counts:?}"));
+    assert!(
+        (inside.record.x - 210.0).abs() < 1e-6 && (inside.record.y - 160.0).abs() < 1e-6,
+        "({}, {})",
+        inside.record.x,
+        inside.record.y
+    );
+    assert!(all.iter().all(|c| c.record.text != "OUTSIDE"), "{counts:?}");
+    assert_eq!(
+        counts.as_ref().and_then(|m| m.get("TEXT.clipped")),
+        Some(&1),
+        "{counts:?}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
 // ---- Rom's drawing ---------------------------------------------------------------------------
 
 /// The drawing at `LIBVIPRS_DWG_TEXT_FIXTURE`, or `None` (with the reason on stderr) when the

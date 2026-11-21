@@ -894,7 +894,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1609 and #1610 land together: 7 from `tests/pvec_1609_annotations.rs` and the `pvec_dwg_basic`/`pvec_block_flatten` cells, 5 from #1610's region and sheet cells. It said 1146 and 1148 on the two branches before this line moved.
 /// #1609 (the rest of it) adds 1: `tests/pvec_1609_annotations.rs::issue_1609_a_disc_and_a_sliver_are_stored_and_a_line_is_said_to_have_no_area`. #1615 adds 4: the three `tests/pvec_1615_bake_default.rs` cells and the `tests/pvec_1615_baked_report.rs` cell that convert a PDF into a temp dir. It said 1153 before this line moved.
 /// #1621 adds 25: the nine `tests/pvec_1621_dwg_text.rs` cells and the sixteen `tests/pvec_1621_text_layers.rs` cells that convert a drawing into a temp dir (or read the ADRs) and read the artifact back. It said 1166 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1191;
+/// #1621 (the text layout) adds 2: the fitted-text and viewport cells in `tests/pvec_1621_dwg_text.rs`. It said 1191 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1193;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

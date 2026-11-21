@@ -2,9 +2,12 @@
 //!
 //! Neither is a curve, so neither goes into the geometry. Each rides on entities that are:
 //!
-//! * a text is anchored on a short polyline, from its insertion point one text height along its
-//!   baseline, which gives the text a position in the drawing's box and something for the stream
-//!   record to refer to;
+//! * a text is anchored on a polyline along its baseline, from where the run starts to where it
+//!   ends. Its length is the run's printed width (planviewer scales the glyphs to it, as it does
+//!   with a PDF's `/Widths`), worked out from Helvetica's widths and the style's width factor
+//!   because the drawing's own face is not read. An MTEXT is one text and anchor per printed
+//!   line, and the start is the printed baseline's, after the TEXT's justification or the
+//!   MTEXT's attachment point (#1621);
 //! * a hatch, or a SOLID (a filled quadrilateral), is its boundary: one closed polyline per loop,
 //!   and the hatch record lists them.
 //!
@@ -12,8 +15,8 @@
 //! the anchor and the outline. That is why the whole thing needs that stream (see
 //! [`PvecConversion::annotations`](crate::pvec_convert::PvecConversion::annotations)).
 //!
-//! What it does not carry: a text's font, width factor, oblique angle and justification (the record
-//! has one anchor, the insertion point), an MTEXT's formatting beyond the characters it shows, and
+//! What it does not carry: a text's font and oblique angle, an MTEXT's formatting beyond the
+//! characters it shows (and the word wrap its reference width would cause), and
 //! the exact curve of a boundary: the container stores straight polylines, so an arc, an elliptic
 //! arc or a spline in a boundary is carried as short chords. A hatch with a loop the provider could
 //! not read at all (an edge that is not a curve, or edges that do not join) is not carried, since a
@@ -22,21 +25,61 @@
 
 use super::components::{FillBody, TextBody};
 use super::flatten::FlatEntity;
-use super::provider::{Annotation, Point3, RawEntity, RawGeometry, RawVertex, z_axis_flip};
+use super::provider::{
+    Annotation, Point3, RawEntity, RawGeometry, RawVertex, TextAnchorV, z_axis_flip,
+};
 
 /// What a mapped annotation puts in its stream once the ids of its carriers are known.
 pub(crate) enum Body {
-    /// A text record on the first carrier.
-    Text(TextBody),
+    /// One text record per printed line, each on the carrier at its index.
+    Text(Vec<TextBody>),
     /// A hatch record over every carrier.
     Fill(FillBody),
 }
 
+/// Why [`map`] returns nothing for a text with no line inside the clip it was asked to keep to.
+pub(crate) const CLIPPED: &str = "it is outside the sheet or viewport it is drawn through";
+
+/// How far below its baseline a line's descenders reach, in text heights. Capitals stand one text
+/// height above the baseline.
+const DESCENT: f64 = 0.25;
+
+/// The advance of `line` in text heights, from Helvetica's widths (the face the PDF export's
+/// standard fonts fill `/Widths` from), scaled so a capital stands one text height. The drawing's
+/// own face is not read, so this is an estimate: close for TrueType Arial, a little wide for the
+/// SHX stroke fonts.
+fn run_advance(line: &str) -> f64 {
+    // Helvetica's widths for U+0020 to U+007E, in 1/1000 em, and its capital height.
+    const WIDTHS: [u16; 95] = [
+        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
+        556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722,
+        722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722,
+        667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556,
+        556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
+        500, 334, 260, 334, 584,
+    ];
+    const CAPITAL: f64 = 0.716;
+    line.chars()
+        .map(|c| match c as u32 {
+            0x20..=0x7e => f64::from(WIDTHS[c as usize - 0x20]),
+            // East Asian full width characters are one em wide.
+            0x2e80..=0x9fff | 0xac00..=0xd7a3 | 0xff00..=0xff60 => 1000.0,
+            _ => 556.0,
+        })
+        .sum::<f64>()
+        / 1000.0
+        / CAPITAL
+}
+
 /// The hidden entities to write for `annotation`, in block space like every other leaf, and the
-/// stream record that goes with them, or why it cannot be mapped.
+/// stream record that goes with them, or why it cannot be mapped. A text is laid out in its own
+/// plane, one anchor and record per printed line, and `keep` says whether a line starting at a
+/// point of the drawing (after the leaf's map) is wanted, so a text seen through a viewport or on
+/// a sheet is cut to it line by line.
 pub(crate) fn map(
     leaf: &FlatEntity,
     annotation: Annotation,
+    keep: &dyn Fn([f64; 2]) -> bool,
 ) -> Result<(Vec<RawEntity>, Body), &'static str> {
     let carrier = |geometry: RawGeometry| RawEntity {
         geometry,
@@ -50,6 +93,11 @@ pub(crate) fn map(
             rotation,
             content,
             normal,
+            width_factor,
+            anchor,
+            fit,
+            block_width,
+            line_spacing,
         } => {
             let flip = z_axis_flip(normal).ok_or("its normal is not the Z axis")?;
             // The entity's own plane to the block's: a -Z normal mirrors x.
@@ -60,36 +108,96 @@ pub(crate) fn map(
             // The baseline direction and the text's own up, as the drawing sees them.
             let (dx, dy) = linear(to_block(cos, sin));
             let (ux, uy) = linear(to_block(-sin, cos));
-            let scaled = height * (ux * ux + uy * uy).sqrt();
-            if !(scaled.is_finite() && scaled > 0.0 && (dx != 0.0 || dy != 0.0)) {
+            let scaled = |h: f64| h * (ux * ux + uy * uy).sqrt();
+            if !(scaled(height).is_finite() && scaled(height) > 0.0 && (dx != 0.0 || dy != 0.0)) {
                 return Err("its placement collapses it");
             }
-            let [x, y] = leaf.map_point(to_block(position[0], position[1]));
-            let anchor = carrier(RawGeometry::Polyline {
-                vertices: vec![
-                    RawVertex {
-                        x: position[0],
-                        y: position[1],
-                        bulge: 0.0,
-                    },
-                    RawVertex {
-                        x: position[0] + cos * height,
-                        y: position[1] + sin * height,
-                        bulge: 0.0,
-                    },
-                ],
-                closed: false,
-                elevation: 0.0,
-                normal,
-            });
-            let body = TextBody {
-                x,
-                y,
-                height: scaled,
-                rotation: dy.atan2(dx),
-                text: content,
+            let lines: Vec<&str> = content.split('\n').map(str::trim).collect();
+            let factor = if width_factor > 0.0 {
+                width_factor
+            } else {
+                1.0
             };
-            Ok((vec![anchor], Body::Text(body)))
+            let natural: Vec<f64> = lines
+                .iter()
+                .map(|l| run_advance(l) * height * factor)
+                .collect();
+            // An aligned or fitted TEXT is one line stretched between its two points; aligned
+            // scales the height with the width.
+            let (height, widths) = match fit {
+                Some((span, scales)) if natural[0] > 0.0 => {
+                    let k = span / natural[0];
+                    (if scales { height * k } else { height }, vec![span])
+                }
+                _ => (height, natural),
+            };
+            let spacing = if line_spacing > 0.0 {
+                line_spacing
+            } else {
+                1.0
+            };
+            // AutoCAD's single spacing puts one baseline 5/3 of a text height under the last.
+            let pitch = height * spacing * 5.0 / 3.0;
+            let count = lines.len() as f64;
+            let block = block_width.max(widths.iter().copied().fold(0.0, f64::max));
+            let left = -anchor.0 * block;
+            let span_down = height * (1.0 + DESCENT) + (count - 1.0) * pitch;
+            // The first baseline relative to the position, up positive.
+            let first = match anchor.1 {
+                TextAnchorV::Baseline => 0.0,
+                TextAnchorV::Top => -height,
+                TextAnchorV::Middle => span_down / 2.0 - height,
+                TextAnchorV::Bottom => span_down - height,
+            };
+            let mut carriers = Vec::new();
+            let mut records = Vec::new();
+            for (i, line) in lines.iter().enumerate() {
+                let width = widths[i.min(widths.len() - 1)];
+                if line.is_empty() || !(width.is_finite() && width > 0.0) {
+                    continue;
+                }
+                let up = first - i as f64 * pitch;
+                let start = [
+                    position[0] + cos * left - sin * up,
+                    position[1] + sin * left + cos * up,
+                ];
+                let [x, y] = leaf.map_point(to_block(start[0], start[1]));
+                if !keep([x, y]) {
+                    continue;
+                }
+                carriers.push(carrier(RawGeometry::Polyline {
+                    vertices: vec![
+                        RawVertex {
+                            x: start[0],
+                            y: start[1],
+                            bulge: 0.0,
+                        },
+                        RawVertex {
+                            x: start[0] + cos * width,
+                            y: start[1] + sin * width,
+                            bulge: 0.0,
+                        },
+                    ],
+                    closed: false,
+                    elevation: 0.0,
+                    normal,
+                }));
+                records.push(TextBody {
+                    x,
+                    y,
+                    height: scaled(height),
+                    rotation: dy.atan2(dx),
+                    text: (*line).to_owned(),
+                });
+            }
+            if records.is_empty() {
+                return Err(if lines.iter().any(|l| !l.is_empty()) {
+                    CLIPPED
+                } else {
+                    "it prints nothing"
+                });
+            }
+            Ok((carriers, Body::Text(records)))
         }
         Annotation::Fill {
             rings,
