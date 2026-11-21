@@ -324,3 +324,17 @@ fn cad_manifest_lists_without_converting() {
     assert!(!m.layers.is_empty() && m.layers.iter().all(|l| !l.name.is_empty()));
     assert!(m.model_space.entity_count > 0, "the count pass ran");
 }
+
+// What a server needs to request one thumbnail per layout: name, tab order, paper, plot area.
+#[test]
+fn cad_manifest_carries_what_a_thumbnail_needs() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pvec-dxf/paper-space-multi-viewport-001.dxf");
+    let m = cad_manifest::<AcadrustProvider>(CadSource::Path(&path)).expect("the DXF lists");
+    for l in m.layouts.iter().filter(|l| l.sheet) {
+        let paper = l.paper.as_ref().expect("a sheet lists its paper");
+        assert!(paper.width_mm > 0.0 && paper.height_mm > 0.0, "{}", l.name);
+        assert!(l.plot.is_some(), "a sheet lists its plot area: {}", l.name);
+        assert!(l.tab >= 1, "{}", l.name);
+    }
+}

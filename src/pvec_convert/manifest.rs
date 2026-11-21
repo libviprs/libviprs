@@ -235,6 +235,34 @@ pub struct ManifestViewport {
     pub reason: Option<String>,
 }
 
+/// A layout's paper, in millimetres whatever unit the drawing plots in.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestPaper {
+    /// The size's name (`Tabloid`), when the drawing names one.
+    pub size_name: Option<String>,
+    /// Width in millimetres.
+    pub width_mm: f64,
+    /// Height in millimetres.
+    pub height_mm: f64,
+    /// `landscape` or `portrait`.
+    pub orientation: String,
+    /// The unit the drawing used (`mm` or `inches`), so a UI can show it back.
+    pub unit: String,
+    /// The plot rotation in degrees.
+    pub rotation: u16,
+}
+
+/// What a layout plots: enough to ask for a thumbnail of the right area.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ManifestPlot {
+    /// The area: `layout`, `extents`, `display` or `window`.
+    pub plot_area: String,
+    /// The window `[x0, y0, x1, y1]` when the area is `window`.
+    pub window: Option<[f64; 4]>,
+}
+
 /// One layout, skipped ones included.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -249,6 +277,11 @@ pub struct ManifestLayout {
     pub sheet: bool,
     /// `empty` or `emptyAfterView` when it is not a sheet.
     pub skip: Option<String>,
+    /// The paper, `None` for a layout that is not a sheet. With `name`, `tab`, `plot` and
+    /// `viewports` this is what a server needs to render one layout's thumbnail later.
+    pub paper: Option<ManifestPaper>,
+    /// The plot area, `None` for a layout that is not a sheet.
+    pub plot: Option<ManifestPlot>,
     /// The viewports.
     pub viewports: Vec<ManifestViewport>,
     /// Entities in the layout's paper space.
