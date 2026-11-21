@@ -353,7 +353,7 @@ fn cad_manifest_carries_what_a_thumbnail_needs() {
 
 fn dxf(name: &str) -> CadManifest {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/pvec-dxf")
+        .join("tests/fixtures/pvec-cad-import")
         .join(name);
     cad_manifest::<AcadrustProvider>(CadSource::Path(&path)).expect("the DXF lists")
 }
