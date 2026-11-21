@@ -21,10 +21,18 @@
 //! An entity is checked in a fixed order and the first match is its only reason:
 //! [`PolicyReason::NotInSelectedLayout`], then layer state on the effective layer (the layer
 //! override when there is one): [`PolicyReason::LayerOff`], [`PolicyReason::LayerFrozen`],
-//! [`PolicyReason::ViewportFrozen`], then [`PolicyReason::EntityInvisible`], then
+//! [`PolicyReason::LayerNoPlotText`], [`PolicyReason::ViewportFrozen`], then
+//! [`PolicyReason::EntityInvisible`], then
 //! [`PolicyReason::OutsideViewport`]. Off and frozen stay separate reasons, they are never
 //! folded into one "invisible". Each dropped entity is one [`IgnoredByPolicy`] row, so the
 //! per-reason counts always sum to the dropped count.
+//!
+//! # Text on frozen and no-plot layers
+//!
+//! A TEXT, MTEXT or attribute ([`draws_text`]) answers to `layers.frozen_text` instead of
+//! `layers.frozen`, and to `layers.no_plot_text` (#1621 and #1639, Rom's calls of 2026-11-19 and 2026-11-20): both
+//! profiles draw text on a frozen layer, and only the print profile leaves out text on a no-plot one. Off is checked first and wins,
+//! and a viewport freeze is not touched: it is not the layer table's frozen flag.
 //!
 //! # Viewports are collected, not applied
 //!
@@ -57,6 +65,8 @@ pub enum PolicyReason {
     LayerOff,
     /// Its effective layer is frozen.
     LayerFrozen,
+    /// It is text and its effective layer does not plot, under `layers.no_plot_text = exclude`.
+    LayerNoPlotText,
     /// Its effective layer is frozen in the viewport it is seen through (opt-in).
     ViewportFrozen,
     /// The entity's own visibility flag is off.
@@ -71,10 +81,11 @@ pub enum PolicyReason {
 
 impl PolicyReason {
     /// Every reason, in evaluation order.
-    pub const ALL: [PolicyReason; 7] = [
+    pub const ALL: [PolicyReason; 8] = [
         PolicyReason::NotInSelectedLayout,
         PolicyReason::LayerOff,
         PolicyReason::LayerFrozen,
+        PolicyReason::LayerNoPlotText,
         PolicyReason::ViewportFrozen,
         PolicyReason::EntityInvisible,
         PolicyReason::OutsideViewport,
@@ -87,6 +98,7 @@ impl PolicyReason {
         match self {
             PolicyReason::LayerOff => "layers.off",
             PolicyReason::LayerFrozen => "layers.frozen",
+            PolicyReason::LayerNoPlotText => "layers.no_plot_text",
             PolicyReason::ViewportFrozen => "layers.frozen_in_viewport",
             PolicyReason::EntityInvisible => "entity.visible",
             PolicyReason::NotInSelectedLayout
@@ -101,7 +113,9 @@ impl PolicyReason {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
-            PolicyReason::LayerOff | PolicyReason::LayerFrozen => "LAYER_HIDDEN",
+            PolicyReason::LayerOff | PolicyReason::LayerFrozen | PolicyReason::LayerNoPlotText => {
+                "LAYER_HIDDEN"
+            }
             PolicyReason::ViewportFrozen => "VIEWPORT_STATE_IGNORED",
             PolicyReason::EntityInvisible => "ENTITY_INVISIBLE",
             PolicyReason::NotInSelectedLayout => "NOT_IN_SELECTED_LAYOUT",
@@ -349,8 +363,18 @@ pub struct VisibilityFilter {
     layout: LayoutState,
     off: LayerStateRule,
     frozen: LayerStateRule,
+    frozen_text: LayerStateRule,
+    no_plot_text: LayerStateRule,
     freeze_mode: ViewportFreezeMode,
     viewports: Vec<ViewportInput>,
+}
+
+/// Whether an entity of this class is text under `layers.frozen_text` and `layers.no_plot_text`
+/// (#1621): TEXT, MTEXT, and an attribute, which reaches the conversion as the block's ATTDEF and
+/// draws the INSERT's ATTRIB value (an invisible one never draws, whatever its layer). DIMENSION
+/// and MULTILEADER are not: their text and their lines stay one entity under the layer rules.
+pub(crate) fn draws_text(class_name: &str) -> bool {
+    matches!(class_name, "TEXT" | "MTEXT" | "ATTDEF" | "ATTRIB")
 }
 
 /// Resolves the profile's space against the drawing's layouts.
@@ -407,6 +431,8 @@ impl VisibilityFilter {
             layout,
             off: profile.layers.off,
             frozen: profile.layers.frozen,
+            frozen_text: profile.layers.frozen_text,
+            no_plot_text: profile.layers.no_plot_text,
             freeze_mode: ViewportFreezeMode::default(),
             viewports: Vec::new(),
         }
@@ -442,11 +468,11 @@ impl VisibilityFilter {
             .layer_override
             .clone()
             .unwrap_or_else(|| entity.provenance.layer.clone());
-        let dropped = self.reason(&layer, state);
+        let dropped = self.reason(&layer, draws_text(&entity.provenance.class_name), state);
         Decision { layer, dropped }
     }
 
-    fn reason(&self, layer: &str, state: &EntityState) -> Option<PolicyReason> {
+    fn reason(&self, layer: &str, text: bool, state: &EntityState) -> Option<PolicyReason> {
         if state.layout.is_some_and(|l| l != self.layout.id) {
             return Some(PolicyReason::NotInSelectedLayout);
         }
@@ -454,8 +480,12 @@ impl VisibilityFilter {
             if ls.off && self.off == LayerStateRule::Exclude {
                 return Some(PolicyReason::LayerOff);
             }
-            if ls.frozen && self.frozen == LayerStateRule::Exclude {
+            let frozen = if text { self.frozen_text } else { self.frozen };
+            if ls.frozen && frozen == LayerStateRule::Exclude {
                 return Some(PolicyReason::LayerFrozen);
+            }
+            if text && !ls.plottable && self.no_plot_text == LayerStateRule::Exclude {
+                return Some(PolicyReason::LayerNoPlotText);
             }
         }
         if self.freeze_mode == ViewportFreezeMode::Apply && self.viewport_freezes(layer, state) {
