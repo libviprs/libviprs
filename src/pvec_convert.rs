@@ -260,7 +260,7 @@ pub struct PlotSettings {
 }
 
 /// The part of a layout a plot covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub enum PlotArea {
     /// The layout's own frame, the paper placed from its margins and origin.
@@ -269,6 +269,9 @@ pub enum PlotArea {
     /// The extents of what the sheet draws: its own kept geometry and the rectangles of its drawn
     /// viewports. The paper is placed from the extents' lower left corner.
     Extents,
+    /// The box `[x0, y0, x1, y1]` in paper-space units (the layout's paper units). A stub: the
+    /// frame is not placed from it yet (#1632).
+    Window([f64; 4]),
 }
 
 impl<'a> PvecConversion<'a> {

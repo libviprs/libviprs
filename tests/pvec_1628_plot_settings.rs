@@ -576,3 +576,288 @@ fn issue_1628_a_paper_that_is_not_a_size_is_refused_not_framed() {
         let _ = fs::remove_dir_all(dir);
     }
 }
+
+// ---- #1632: plot area Window, rotation 180 --------------------------------------------------
+//
+// The sheet is 100 by 50 mm again, in millimetres, so a window's numbers are the frame's numbers.
+// Rotation 1 and 3 are honoured by swapping the paper's sides (spec section 6, "Drawing
+// orientation"); rotation 2 is "plot upside-down", which is what these ask to see applied.
+
+fn window(w: [f64; 4]) -> PlotSettings {
+    PlotSettings {
+        area: PlotArea::Window(w),
+        ..PlotSettings::default()
+    }
+}
+
+fn rotated(rotation: i16) -> LayoutPlot {
+    LayoutPlot {
+        rotation,
+        ..plot(1, 100.0, 50.0)
+    }
+}
+
+/// The one written line as (start, end), whichever way the trimmed basis points.
+fn ends(report: &ConversionReport, dir: &std::path::Path) -> ([f64; 2], [f64; 2]) {
+    let (_, curve) = written(report, dir).remove(0);
+    let (o, d, len) = segment(&curve);
+    ([o[0], o[1]], [o[0] + d[0] * len, o[1] + d[1] * len])
+}
+
+fn near(a: [f64; 2], b: [f64; 2]) -> bool {
+    (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_plot_area_window_frames_the_box() {
+    let (b, s, dir) = framed(
+        "window-box",
+        one_line([30.0, 15.0], [60.0, 35.0]),
+        window([20.0, 10.0, 70.0, 40.0]),
+    );
+    assert_eq!(b, [20.0, 10.0, 70.0, 40.0], "the frame is the window");
+    assert_eq!(s.frame, "paper");
+    assert!(
+        s.notes.contains(&"plot-area-window".to_string()),
+        "{:?}",
+        s.notes
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_a_window_cuts_what_it_does_not_hold() {
+    // One line inside the window, one across its edge, one wholly outside it (but on the paper).
+    let mock = sheet(
+        plot(1, 100.0, 50.0),
+        vec![
+            line(1, [30.0, 15.0], [40.0, 15.0]),
+            line(2, [60.0, 20.0], [90.0, 20.0]),
+            line(3, [5.0, 45.0], [15.0, 45.0]),
+        ],
+    );
+    let (out, dir) = convert("window-cut", mock, |c| {
+        c.unit(SourceUnit::Millimeters)
+            .plot_settings(window([20.0, 10.0, 70.0, 40.0]))
+    });
+    let report = out.unwrap().report;
+    let s = report.sheet.clone().unwrap();
+    assert_eq!(s.clip["cut"], 1, "{:?}", s.clip);
+    assert_eq!(s.clip["outside"], 1, "{:?}", s.clip);
+    let (_, curve) = written(&report, &dir)
+        .into_iter()
+        .find(|(h, _)| *h == 2)
+        .expect("the cut line is kept");
+    let (origin, _, length) = segment(&curve);
+    assert_eq!((origin, length), ([60.0, 20.0], 10.0), "cut at the window");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_a_window_is_in_the_layouts_paper_units_and_ignores_its_margins_and_origin() {
+    // Inches of paper: the window's numbers are inches, and the sheet unit is inches.
+    let mut p = plot(0, 4.0, 2.0);
+    p.margins = [0.25, 0.25, 0.25, 0.25];
+    p.origin = [0.5, 0.5];
+    let (out, dir) = convert(
+        "window-inches",
+        sheet(p, vec![line(1, [1.5, 0.75], [2.5, 0.75])]),
+        |c| c.plot_settings(window([1.0, 0.5, 3.0, 1.5])),
+    );
+    let s = out.unwrap().report.sheet.unwrap();
+    let b = s
+        .sheet_box
+        .clone()
+        .expect("a frame")
+        .map(|v| v.parse::<f64>().unwrap());
+    assert_eq!(b, [1.0, 0.5, 3.0, 1.5], "{s:#?}");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_the_layouts_own_window_is_used_when_its_plot_type_says_window() {
+    let mut p = plot(1, 100.0, 50.0);
+    p.plot_type = 4;
+    p.window = [20.0, 10.0, 70.0, 40.0];
+    let (b, s, dir) = framed(
+        "window-own",
+        sheet(p, vec![line(1, [30.0, 15.0], [60.0, 35.0])]),
+        PlotSettings::default(),
+    );
+    assert_eq!(b, [20.0, 10.0, 70.0, 40.0]);
+    assert!(
+        !s.notes.contains(&"plot-type-not-applied".to_string()),
+        "{:?}",
+        s.notes
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_a_window_the_caller_gives_wins_over_the_layouts_plot_type() {
+    let mut p = plot(1, 100.0, 50.0);
+    p.plot_type = 5;
+    p.window = [0.0, 0.0, 10.0, 10.0];
+    let (b, _, dir) = framed(
+        "window-caller",
+        sheet(p, vec![line(1, [30.0, 15.0], [60.0, 35.0])]),
+        window([20.0, 10.0, 70.0, 40.0]),
+    );
+    assert_eq!(b, [20.0, 10.0, 70.0, 40.0]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_a_window_that_is_not_a_box_is_refused_not_framed() {
+    for bad in [
+        [50.0, 10.0, 20.0, 40.0],
+        [20.0, 10.0, 20.0, 40.0],
+        [20.0, 40.0, 70.0, 10.0],
+        [f64::NAN, 10.0, 70.0, 40.0],
+    ] {
+        let (out, dir) = convert("window-bad", one_line([0.0; 2], [10.0; 2]), |c| {
+            c.unit(SourceUnit::Millimeters).plot_settings(window(bad))
+        });
+        let s = out.unwrap().report.sheet.unwrap();
+        assert_eq!(s.frame, "extents", "{bad:?}");
+        assert_eq!(
+            s.frame_reason.as_deref(),
+            Some("plot-window-empty"),
+            "{bad:?}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_rotation_180_flips_about_the_paper_centre() {
+    // Paper 100 by 50, centre (50, 25): (10,10)-(40,20) lands at (90,40)-(60,30).
+    let (out, dir) = convert(
+        "rot180",
+        sheet(rotated(2), vec![line(1, [10.0, 10.0], [40.0, 20.0])]),
+        |c| c.unit(SourceUnit::Millimeters),
+    );
+    let report = out.unwrap().report;
+    let s = report.sheet.clone().unwrap();
+    assert_eq!(
+        s.sheet_box
+            .clone()
+            .unwrap()
+            .map(|v| v.parse::<f64>().unwrap()),
+        [0.0, 0.0, 100.0, 50.0],
+        "the frame itself stays"
+    );
+    let (a, b) = ends(&report, &dir);
+    assert!(
+        (near(a, [90.0, 40.0]) && near(b, [60.0, 30.0]))
+            || (near(b, [90.0, 40.0]) && near(a, [60.0, 30.0])),
+        "{a:?} {b:?}"
+    );
+    assert!(
+        !s.notes.contains(&"rotation-not-applied".to_string()),
+        "{:?}",
+        s.notes
+    );
+    assert_eq!(
+        s.plot.unwrap().rotation,
+        2,
+        "still reported as the layout's"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_rotation_180_flips_about_the_frame_centre_not_the_origin() {
+    // A plot origin of 20 puts the paper at x -20..80, centre (30, 25): (0,0)-(10,0) lands at
+    // (60,50)-(50,50).
+    let mut p = rotated(2);
+    p.origin = [20.0, 0.0];
+    let (out, dir) = convert(
+        "rot180-origin",
+        sheet(p, vec![line(1, [0.0, 0.0], [10.0, 0.0])]),
+        |c| c.unit(SourceUnit::Millimeters),
+    );
+    let report = out.unwrap().report;
+    let (a, b) = ends(&report, &dir);
+    assert!(
+        (near(a, [60.0, 50.0]) && near(b, [50.0, 50.0]))
+            || (near(b, [60.0, 50.0]) && near(a, [50.0, 50.0])),
+        "{a:?} {b:?}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_rotation_180_turns_a_window_about_the_windows_centre() {
+    // Window (20,10)-(70,40), centre (45, 25): (30,15)-(40,15) lands at (60,35)-(50,35).
+    let (out, dir) = convert(
+        "rot180-window",
+        sheet(rotated(2), vec![line(1, [30.0, 15.0], [40.0, 15.0])]),
+        |c| {
+            c.unit(SourceUnit::Millimeters)
+                .plot_settings(window([20.0, 10.0, 70.0, 40.0]))
+        },
+    );
+    let report = out.unwrap().report;
+    let s = report.sheet.clone().unwrap();
+    assert_eq!(
+        s.sheet_box
+            .clone()
+            .unwrap()
+            .map(|v| v.parse::<f64>().unwrap()),
+        [20.0, 10.0, 70.0, 40.0]
+    );
+    let (a, b) = ends(&report, &dir);
+    assert!(
+        (near(a, [60.0, 35.0]) && near(b, [50.0, 35.0]))
+            || (near(b, [60.0, 35.0]) && near(a, [50.0, 35.0])),
+        "{a:?} {b:?}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_rotation_90_is_reported_and_measured() {
+    // Rotations 1 and 3 swap the paper's sides today, and the spec lists that as honoured, so the
+    // report must not call it "not applied". The content stays where the drawing has it: whether
+    // 90 and 270 should also turn the content is the open question this pins what is measured of.
+    for rotation in [1, 3] {
+        let (out, dir) = convert(
+            "rot90",
+            sheet(rotated(rotation), vec![line(1, [10.0, 10.0], [40.0, 20.0])]),
+            |c| c.unit(SourceUnit::Millimeters),
+        );
+        let report = out.unwrap().report;
+        let s = report.sheet.clone().unwrap();
+        assert_eq!(
+            s.sheet_box
+                .clone()
+                .unwrap()
+                .map(|v| v.parse::<f64>().unwrap()),
+            [0.0, 0.0, 50.0, 100.0],
+            "rotation {rotation}: the sides swap"
+        );
+        assert_eq!(s.plot.clone().unwrap().rotation, rotation, "reported");
+        assert!(
+            !s.notes.contains(&"rotation-not-applied".to_string()),
+            "rotation {rotation}: {:?}",
+            s.notes
+        );
+        let (a, b) = ends(&report, &dir);
+        assert!(
+            near(a, [10.0, 10.0]) && near(b, [40.0, 20.0]),
+            "rotation {rotation}: {a:?} {b:?}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+}

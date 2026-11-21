@@ -765,6 +765,16 @@ annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_fit_to_pap
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_fit_with_centre_uses_the_tighter_side_and_centres_the_other
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_the_offset_moves_the_paper_against_the_drawing
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_without_plot_settings_nothing_is_applied_and_it_says_so
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_a_window_cuts_what_it_does_not_hold
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_a_window_is_in_the_layouts_paper_units_and_ignores_its_margins_and_origin
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_a_window_that_is_not_a_box_is_refused_not_framed
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_a_window_the_caller_gives_wins_over_the_layouts_plot_type
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_plot_area_window_frames_the_box
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_180_flips_about_the_frame_centre_not_the_origin
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_180_flips_about_the_paper_centre
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_180_turns_a_window_about_the_windows_centre
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_90_is_reported_and_measured
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_the_layouts_own_window_is_used_when_its_plot_type_says_window
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
