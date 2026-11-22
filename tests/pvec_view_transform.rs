@@ -265,6 +265,8 @@ fn n2_6_1055_every_row_of_the_decision_table_has_a_knob_and_every_knob_a_test_ab
             "layer-off",
             "layer-frozen",
             "layer-no-plot",
+            "layer-frozen-text",
+            "layer-no-plot-text",
             "layer-frozen-in-viewport",
             "insert-layer-override",
             "nested-insert",
@@ -273,7 +275,8 @@ fn n2_6_1055_every_row_of_the_decision_table_has_a_knob_and_every_knob_a_test_ab
         ]
     );
     // `layer-no-plot` is the print profile's row (#1559); its named tests are in
-    // `tests/pvec_1559_print_profile.rs`.
+    // `tests/pvec_1559_print_profile.rs`. The two text rows (#1621, #1639) are pinned in
+    // `tests/pvec_1621_text_layers.rs`.
     let me = include_str!("pvec_view_transform.rs");
     for needle in [
         "view_row_model_space",
@@ -377,7 +380,8 @@ fn n2_6_1055_matrix_cell_near_singular_is_classified_by_the_conditioning_rule() 
 #[test]
 fn n2_6_1055_every_cell_class_of_the_matrix_has_a_named_test() {
     // `layer-no-plot` is the print profile's row (#1559); its named tests are in
-    // `tests/pvec_1559_print_profile.rs`.
+    // `tests/pvec_1559_print_profile.rs`. The two text rows (#1621, #1639) are pinned in
+    // `tests/pvec_1621_text_layers.rs`.
     let me = include_str!("pvec_view_transform.rs");
     for cell in [
         "translation",
