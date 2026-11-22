@@ -6,8 +6,8 @@
 //! colour, which has no ACI to look up.
 //!
 //! Each honoured property gets its own table so a failure names the property. The real table is
-//! `Langara_2024-LW0.ctb`: ACI 1 to 9, 209 and 251 plot black, ACI 7 at 0.13 mm, everything else
-//! keeps its object colour and lineweight. The drawings are written with acadrust, one stroke per
+//! `Langara_2024-LW0.ctb`: ACI 1 to 9, 209 and 251 plot black, every ACI at 0.05 mm but ACI 7 at
+//! 0.13 mm, the rest keeps its object colour. The drawings are written with acadrust, one stroke per
 //! case, on the paper layout `Sheet` so the print profile walks them. Widths are compared as
 //! ratios, so the test does not depend on the unit the widths are written in. Needs
 //! `--features pvec-convert`.
@@ -203,7 +203,7 @@ fn done(run: Run) {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn print_profile_applies_ctb_colour_screening_lineweight_linetype() {
-    // The Langara table: ACI 1 to 9, 209 and 251 black, ACI 7 at 0.13 mm, the rest by object.
+    // The Langara table: ACI 1 to 9, 209 and 251 black, ACI 7 at 0.13 mm, the others at 0.05 mm.
     let table = PlotStyleTable::from_bytes("Langara_2024-LW0.ctb", CTB).unwrap();
     let acis = [1u8, 2, 5, 7, 9, 30, 100, 209, 251];
     let cases: Vec<Case> = acis.iter().map(|a| case(*a)).collect();
@@ -228,17 +228,19 @@ fn print_profile_applies_ctb_colour_screening_lineweight_linetype() {
         w[&h[0]], wp[&h[0]],
         "without the table ACI 1 is red, so the table is what changed it"
     );
+    // The table gives every ACI an explicit lineweight: 0.05 mm, and 0.13 mm for ACI 7 (the
+    // object's own lines are 0.25 mm).
     let s = styles(&run);
-    let object = width(&s, h[1]);
+    let sp = styles(&plain);
+    let object = width(&sp, h[1]);
     assert!(
         (width(&s, h[3]) / object - 0.13 / 0.25).abs() < 1e-9,
-        "ACI 7 is 0.13 mm where the object is 0.25 mm"
+        "ACI 7 is 0.13 mm"
     );
     for i in [0, 1, 2, 4, 5, 6, 7, 8] {
-        assert_eq!(
-            width(&s, h[i]),
-            object,
-            "ACI {} keeps its lineweight",
+        assert!(
+            (width(&s, h[i]) / object - 0.05 / 0.25).abs() < 1e-9,
+            "ACI {} is 0.05 mm",
             acis[i]
         );
     }

@@ -123,7 +123,7 @@ use crate::pvec::report::{
     ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, SheetViewport, UnresolvedXrefRow,
     ViewSummary, XrefSummary,
 };
-use crate::pvec::style::{LineStyleComponent, dwg_line_style, dwg_style_input};
+use crate::pvec::style::{DwgLineweight, LineStyleComponent, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
     CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, metres_per_unit,
@@ -246,7 +246,6 @@ pub struct PvecConversion<'a> {
     regions: Option<RegionConfig>,
     annotations: bool,
     element_rules: Option<ElementRules>,
-    #[allow(dead_code)]
     plot_style: Option<acadrust::plot_style::PlotStyleTable>,
 }
 
@@ -530,6 +529,7 @@ impl<'a> PvecConversion<'a> {
             annotations,
             element_rules,
             calibration: caller_calibration,
+            plot_style,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -661,6 +661,8 @@ impl<'a> PvecConversion<'a> {
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
             let text = |v: f64| format!("{v}");
+            // Only a CTB is applied: nothing says which named style an entity uses (#1630).
+            let stb = plot_style.as_ref().is_some_and(|t| t.is_stb);
             let mut summary = SheetSummary {
                 layout: layout.name.clone(),
                 frame: "extents".into(),
@@ -672,6 +674,9 @@ impl<'a> PvecConversion<'a> {
                 },
                 ..SheetSummary::default()
             };
+            if stb {
+                summary.notes.push("plot-style-stb-unsupported".into());
+            }
             let mut plot_unit = None;
             let mut frame_box = None;
             let mut drop_widths = false;
@@ -1248,6 +1253,8 @@ impl<'a> PvecConversion<'a> {
         }
         let frame = sheet.as_ref().and_then(|s| s.frame);
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
+        // The plot style table a CTB gives, applied per ACI (#1630); an STB applies nothing.
+        let table = plot_style.as_ref().filter(|t| !t.is_stb);
         // What the sheet clip did: outside, crossing, cut and the pieces the cut ones became.
         let mut clipped = [0u64; 4];
         // Ids are dense over what is written to the report, so a cut entity's pieces each take one.
@@ -1837,6 +1844,13 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
+                        // The ACI the stroke is drawn in, through BYLAYER and BYBLOCK; a true colour has none.
+                        let effective_aci = match paints.get(&leaf_key_of(&raw.provenance)) {
+                            Some(LeafPaint::Colour(SourceColour::Aci(i))) if table.is_some() => {
+                                Some(*i)
+                            }
+                            _ => None,
+                        };
                         let (style, bad_style, own_colour) = if pending.is_some() {
                             // A carrier is never drawn: the stream record is what shows.
                             let c = LineStyleComponent::new(id, None, None, false).ok();
@@ -1844,6 +1858,31 @@ impl<'a> PvecConversion<'a> {
                             (c, bad, false)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
+                            // The table's lineweight and linetype for the stroke's ACI beat the
+                            // object's; an entry that says "object" leaves them (#1630).
+                            if let (Some(t), Some(aci)) = (table, effective_aci) {
+                                if let Some(mm) = t.resolve_lineweight(aci) {
+                                    input.lineweight = Some(DwgLineweight::Hundredths(
+                                        (f64::from(mm) * 100.0).round() as i16,
+                                    ));
+                                }
+                                // Pattern lengths are in millimetres like the table's lineweights,
+                                // `linepattern_size` long: 0 solid, 1 dashed, 2 dotted, 3 dash dot.
+                                let size =
+                                    f64::from(t.aci_entries[usize::from(aci)].linepattern_size);
+                                let pattern = match t.aci_entries[usize::from(aci)].linetype {
+                                    0 => Some(Vec::new()),
+                                    1 => Some(vec![size, -size / 2.0]),
+                                    2 => Some(vec![0.0, -size / 2.0]),
+                                    3 => Some(vec![size, -size / 4.0, 0.0, -size / 4.0]),
+                                    _ => None,
+                                };
+                                if let Some(p) = pattern {
+                                    input.linetype_scale = 1.0;
+                                    input.linetype_name = None;
+                                    input.linetype_elements = Some(p).filter(|p| !p.is_empty());
+                                }
+                            }
                             // P-8: a layout that does not print lineweights has none on its sheet.
                             if drop_widths {
                                 input.lineweight = None;
@@ -1861,7 +1900,21 @@ impl<'a> PvecConversion<'a> {
                             None
                         };
                         let paint = match leaf_paint {
-                            Some(LeafPaint::Colour(c)) => paint_word(c),
+                            Some(LeafPaint::Colour(c)) => paint_word(c).map(|word| {
+                                let (Some(t), Some(aci)) = (table, effective_aci) else {
+                                    return word;
+                                };
+                                let [r, g, b, _] = word.to_be_bytes();
+                                let [r, g, b] = t.resolve_color(aci).map_or([r, g, b], |c| {
+                                    c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                                });
+                                // Screening is lighter ink on white paper, so it blends toward
+                                // white and the word stays opaque.
+                                let s = f64::from(t.resolve_screening(aci));
+                                let [r, g, b] = [r, g, b]
+                                    .map(|c| (255.0 - (255.0 - f64::from(c)) * s).round() as u8);
+                                u32::from_be_bytes([r, g, b, 255])
+                            }),
                             _ => None,
                         };
                         Side {
