@@ -375,6 +375,7 @@ pub struct VisibilityFilter {
     no_plot_text: LayerStateRule,
     overrides: Vec<(String, LayerOverride)>,
     state_overrides: Vec<(String, LayerOverride)>,
+    state_frozen: Vec<String>,
     freeze_mode: ViewportFreezeMode,
     viewports: Vec<ViewportInput>,
 }
@@ -445,6 +446,7 @@ impl VisibilityFilter {
             no_plot_text: profile.layers.no_plot_text,
             overrides: profile.layers.overrides.clone(),
             state_overrides: profile.layers.state_overrides.clone(),
+            state_frozen: profile.layers.state_frozen.clone(),
             freeze_mode: ViewportFreezeMode::default(),
             viewports: Vec::new(),
         }
@@ -503,17 +505,23 @@ impl VisibilityFilter {
         if forced == Some(LayerOverride::Hidden) {
             return Some(PolicyReason::LayerOverridden);
         }
-        if forced.is_none()
-            && let Some(ls) = self.layer_state(layer)
-        {
-            if ls.off && self.off == LayerStateRule::Exclude {
+        if forced.is_none() {
+            let ls = self.layer_state(layer);
+            if ls.is_some_and(|ls| ls.off) && self.off == LayerStateRule::Exclude {
                 return Some(PolicyReason::LayerOff);
             }
+            // A chosen state's freeze is a flag like the file's own, so it answers to `frozen` and
+            // `frozen_text` the same way (#1627).
+            let frozen_flag = ls.is_some_and(|ls| ls.frozen)
+                || self.state_frozen.iter().any(|n| n.eq_ignore_ascii_case(layer));
             let frozen = if text { self.frozen_text } else { self.frozen };
-            if ls.frozen && frozen == LayerStateRule::Exclude {
+            if frozen_flag && frozen == LayerStateRule::Exclude {
                 return Some(PolicyReason::LayerFrozen);
             }
-            if text && !ls.plottable && self.no_plot_text == LayerStateRule::Exclude {
+            if text
+                && ls.is_some_and(|ls| !ls.plottable)
+                && self.no_plot_text == LayerStateRule::Exclude
+            {
                 return Some(PolicyReason::LayerNoPlotText);
             }
         }

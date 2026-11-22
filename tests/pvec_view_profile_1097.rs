@@ -213,6 +213,7 @@ fn n3_3_1097_default_profile_is_pinned_field_by_field() {
             insert_override: InsertLayerRule::InheritOnLayerZero,
             overrides: Vec::new(),
             state_overrides: Vec::new(),
+            state_frozen: Vec::new(),
             viewport_overrides: Vec::new(),
         },
         nested_inserts: NestedInsertPolicy { max_depth: 64 },

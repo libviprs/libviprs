@@ -166,6 +166,10 @@ pub struct LayerVisibility {
     /// The overrides a chosen layer state comes to (#1627): they beat the file's flags like
     /// `overrides` do and lose to a user's entry for the same name, but never thaw a viewport.
     pub state_overrides: Vec<(String, LayerOverride)>,
+    /// The layers a chosen state freezes that the file does not, folded in as a frozen flag rather
+    /// than as an override: they answer to `frozen` and `frozen_text` like a frozen layer of the
+    /// file, so `frozenLayers: show` keeps their notes (#1627).
+    pub state_frozen: Vec<String>,
     /// Per-viewport overrides as `(viewport key, layer, override)`, the key being the layout's name
     /// and the viewport's handle in hex (`Sheet/2A3`); they edit that viewport's frozen list and
     /// leave the layout's own entities alone (#1627).
@@ -363,6 +367,7 @@ impl ViewProfile {
                 insert_override: InsertLayerRule::InheritOnLayerZero,
                 overrides: Vec::new(),
                 state_overrides: Vec::new(),
+                state_frozen: Vec::new(),
                 viewport_overrides: Vec::new(),
             },
             nested_inserts: NestedInsertPolicy { max_depth: 64 },
@@ -393,6 +398,7 @@ impl ViewProfile {
                 insert_override: InsertLayerRule::InheritOnLayerZero,
                 overrides: Vec::new(),
                 state_overrides: Vec::new(),
+                state_frozen: Vec::new(),
                 viewport_overrides: Vec::new(),
             },
             nested_inserts: NestedInsertPolicy { max_depth: 64 },
@@ -461,7 +467,7 @@ impl ViewProfile {
             },
             Knob {
                 field: "layers.overrides",
-                value: match self.layers.overrides.len() + self.layers.state_overrides.len() {
+                value: match self.layers.overrides.len() + self.layers.state_overrides.len() + self.layers.state_frozen.len() {
                     0 => "none".into(),
                     n => format!("{n} layers"),
                 },

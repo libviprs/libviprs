@@ -1016,10 +1016,11 @@ fn issue_1627_a_state_that_freezes_a_layer_hides_it_in_model_mode() {
         model(),
         r#"{"schema":1,"mode":"model","layerState":"S"}"#,
     );
-    assert_eq!(
-        p.layers.state_overrides,
-        [("WALLS".to_string(), LayerOverride::Hidden)]
+    assert!(
+        p.layers.state_overrides.is_empty(),
+        "a freeze is a flag, not an override"
     );
+    assert_eq!(p.layers.state_frozen, ["WALLS"]);
     assert!(
         p.layers.overrides.is_empty(),
         "nothing the user set by hand"
@@ -1027,7 +1028,7 @@ fn issue_1627_a_state_that_freezes_a_layer_hides_it_in_model_mode() {
     let report = convert("state-freeze", p);
     assert_eq!(
         fields(&report, L_WALLS, None),
-        [Some("layers.overrides".to_string())]
+        [Some("layers.frozen".to_string())]
     );
 }
 
@@ -1150,4 +1151,30 @@ fn issue_1627_a_users_layer_entry_beats_the_state_for_the_same_name() {
         "the state's entry for the same name is replaced: {:?}",
         p.layers.state_overrides
     );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1627_a_state_freeze_keeps_the_notes_under_frozen_layers_show() {
+    let m = state_manifest(
+        vec![layer("WALLS", true, false, true)],
+        ManifestMask {
+            frozen: true,
+            ..ManifestMask::default()
+        },
+        vec![recorded("WALLS", true, true, true)],
+    );
+    for (tag, text, note) in [
+        ("show", r#""frozenLayers":"show","noPlotLayers":"show""#, true),
+        ("hide", r#""frozenLayers":"hide","noPlotLayers":"show""#, false),
+    ] {
+        let json = format!(
+            r#"{{"schema":1,"mode":"model","layerState":"S","text":{{{text}}}}}"#
+        );
+        let p = folded(&m, model(), &json);
+        assert_eq!(p.layers.state_frozen, ["WALLS"], "{tag}");
+        let report = convert(&format!("state-freeze-text-{tag}"), p);
+        assert!(!shown(&report, L_WALLS, None), "{tag}: the line is frozen out");
+        assert_eq!(shown(&report, T_WALLS, None), note, "{tag}: the note");
+    }
 }
