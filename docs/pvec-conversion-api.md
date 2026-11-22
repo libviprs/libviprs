@@ -71,6 +71,12 @@ a state names that the drawing no longer has under `missingLayers`/`missingLayer
 with Defpoints and "turn off layers not in the state" handled there. It needs `DwgProvider::layer_states()` and `layout_handle()`, which
 default to "cannot report" (an empty list and `None`), so a provider that does not read them gets an empty `layer_states`.
 
+`apply_choices(profile, &manifest, &choices)` (#1627) is how those choices reach a conversion: it returns the `ViewProfile` with the text
+switches from `choices.text`, the layer overrides (`LayerVisibility::overrides`) and the per-viewport overrides applied, and the chosen
+layer state folded in where it changes the answer. A user's entry for a layer wins over the state's, and a state's `visible` never thaws a viewport.
+A layer a state only freezes goes in `state_frozen`, a frozen flag like the file's own, so it answers to `frozen` and `frozen_text` and its notes
+follow `frozenLayers`. An entity a layer override hides is counted as `layers.overrides` (`Exclusion::LayerOverridden`, code `LAYER_HIDDEN`).
+
 ## Every sheet of a drawing
 
 `PvecLayoutSet` (#1564) converts each paper layout to its own artifact, one call for the drawing. It opens the drawing once, walks the paper

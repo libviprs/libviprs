@@ -896,8 +896,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1639 adds 17: the `tests/pvec_1621_text_layers.rs` cells that convert a drawing into a temp dir (or read the ADRs) and read the artifact back. It said 1166 before this line moved.
 /// #1622 adds 1: `tests/pvec_1564_layout_set.rs::issue_1622_rom_s_floor_plan_lists_its_66_sheets_in_tab_order`, which reads Rom's drawing when `LIBVIPRS_DWG_LAYOUTS_FIXTURE` names it. It said 1183 before this line moved.
 /// #1624 adds 5: the `issue_1624_*` cells of `tests/pvec_1609_annotations.rs` that convert a drawing into a temp dir. It said 1184 before this line moved.
-/// #1621 (the text layout) adds 11: the `tests/pvec_1621_dwg_text.rs` cells that convert a drawing and read the artifact back. It said 1189 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1200;
+/// #1627 adds 19 (12, then 7 for the reason, the folded states, the most specific entry and the state freeze): the `tests/pvec_1627_layer_overrides.rs` cells that convert a drawing into a temp dir. It said 1189 before this line moved.
+/// #1635 adds 3: the `tests/pvec_1635_manifest_guids.rs` cells that write a drawing into a temp dir and list it (the 66-layout cell reads Rom's drawing when `LIBVIPRS_DWG_LAYOUTS_FIXTURE` names it, and is not-detected). It said 1208 before this line moved.
+/// #1621 (the text layout) adds 11: the `tests/pvec_1621_dwg_text.rs` cells that convert a drawing and read the artifact back. It said 1211 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1222;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
