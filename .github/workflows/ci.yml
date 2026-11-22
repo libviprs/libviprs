@@ -127,6 +127,8 @@ jobs:
       - run: cargo clippy --all-targets --features pvec-convert -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # `PdfConversion` (issue #1491) exists only with both of these on, so lint the pair (issue #1512).
       - run: cargo clippy --all-targets --features pvec-convert,pvec-raster -- -D warnings -W clippy::incompatible_msrv -W deprecated
+      # The sheet thumbnail (issue #1629) is behind its own feature, so nothing above type-checks it.
+      - run: cargo clippy --all-targets --features pvec-raster-thumbnail -- -D warnings -W clippy::incompatible_msrv -W deprecated
       # Same for the SVG rasteriser: `svg` is non-default because it costs 29
       # crates, so the default clippy job never sees `src/svg.rs` at all
       # (issue #502).
@@ -308,6 +310,8 @@ jobs:
       - run: cargo test --features pvec-convert
       # One call from a PDF page to a .pvec (issue #1491): needs both features, so neither cell above builds it.
       - run: cargo test --features pvec-convert,pvec-raster --test pvec_1491_pdf_conversion
+      # The PNG thumbnail of a converted sheet (issue #1629): its module and its test file are both behind the feature.
+      - run: cargo test --features pvec-raster-thumbnail
       # The SVG module and its unit tests are behind the non-default `svg`
       # feature, and the `<image xlink:href>` lockdown tests in
       # tests/path_traversal.rs are gated on it too. Bare `cargo test` runs

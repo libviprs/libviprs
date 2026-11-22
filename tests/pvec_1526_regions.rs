@@ -114,11 +114,12 @@ fn issue_1526_the_class_stream_reads_back_and_the_room_on_the_door_gap_is_droppe
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1526_the_class_stream_is_the_only_stream_without_components_and_the_fourth_with_them() {
+fn issue_1526_the_class_stream_is_the_only_stream_without_components_and_the_fifth_with_them() {
     let (_, only, d1) = convert("only", b"plan", StreamSelection::NONE, Some(config()));
     assert_eq!(streams_of(&only).len(), 1);
     let (out, all, d2) = convert("all", b"plan", StreamSelection::ALL, Some(config()));
-    assert_eq!(streams_of(&all).len(), 4);
+    // The class stream, the three component streams and the stroke paint stream of #1638.
+    assert_eq!(streams_of(&all).len(), 5);
     assert!(classes_of(&all).is_some());
     assert!(out.report.components.is_some() && out.report.regions.is_some());
     for d in [d1, d2] {
