@@ -909,7 +909,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1638 adds 8: the `tests/pvec_1638_stroke_paint.rs` cells that convert a drawing into a temp dir and read the paint stream back. It said 1261 before this line moved.
 /// #1638 adds 1 more: the colours_ignored cell with the paint stream off. It said 1269 before this line moved.
 /// #1630 adds 4: the `tests/pvec_1630_plot_style_tables.rs` cells that write a drawing and convert it into a temp dir (the other 8 of its 12 reach the filesystem through a helper the detector does not follow, and carry the annotation all the same). It said 1197 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1288;
+/// #1636 adds 12: the `tests/pvec_1636_pdf_plot.rs` cells that write a PDF into a temp dir and read it back. It said 1207 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1300;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
