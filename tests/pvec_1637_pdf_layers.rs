@@ -535,3 +535,136 @@ fn manifest_and_choices_serialise_as_camel_case_json() {
     assert_eq!(c.mode, PdfLayerMode::Print);
     assert_eq!(c.layers["A"], PdfLayerOverride::Hidden);
 }
+
+/// A one-page document with one group `G` (carrying `ocg_extra`) that marks a square at x = 10,
+/// and an unmarked square at x = 60.
+fn marked_square(ocg_extra: Dictionary, in_off: bool) -> (Vec<u8>, lopdf::ObjectId) {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let mut ocg = dictionary! { "Type" => "OCG", "Name" => Object::string_literal("G") };
+    for (k, v) in ocg_extra.iter() {
+        ocg.set(k.clone(), v.clone());
+    }
+    let g = doc.add_object(ocg);
+    let off = if in_off {
+        vec![Object::from(g)]
+    } else {
+        vec![]
+    };
+    let content = doc.add_object(Stream::new(
+        Dictionary::new(),
+        b"/OC /P1 BDC 10 10 20 20 re f EMC 60 10 20 20 re f".to_vec(),
+    ));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+        "Contents" => content,
+        "Resources" => dictionary! { "Properties" => dictionary! { "P1" => g } },
+    });
+    doc.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => vec![Object::from(page)], "Count" => 1 }.into(),
+    );
+    let catalog = doc.add_object(dictionary! {
+        "Type" => "Catalog", "Pages" => pages_id,
+        "OCProperties" => dictionary! {
+            "OCGs" => vec![Object::from(g)],
+            "D" => dictionary! { "BaseState" => "ON", "OFF" => off },
+        },
+    });
+    doc.trailer.set("Root", catalog);
+    let mut out = Vec::new();
+    doc.save_to(&mut out).unwrap();
+    (out, g)
+}
+
+#[test]
+fn a_design_intent_group_is_shown_until_the_user_hides_it() {
+    let design = dictionary! { "Intent" => "Design" };
+    let (bytes, _) = marked_square(design.clone(), true);
+    // Listed OFF, but its intent is not View, so a viewer ignores the state.
+    assert_eq!(xs(&bytes), [10, 60]);
+
+    // The user's word wins in both paths: hiding it hides the span and the manifest agrees.
+    let hidden = choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Hidden)]);
+    let out = apply_pdf_layers(&bytes, &hidden).unwrap();
+    assert_eq!(xs(&out), [60]);
+    let m = manifest(&out);
+    assert!(!m.layers[0].resolved.view);
+    assert_eq!(m.layers[0].intent, ["View"]);
+}
+
+#[test]
+fn showing_a_design_intent_group_keeps_it_shown_and_leaves_other_groups_alone() {
+    let (bytes, _) = marked_square(dictionary! { "Intent" => "Design" }, true);
+    let shown = choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Visible)]);
+    let out = apply_pdf_layers(&bytes, &shown).unwrap();
+    assert_eq!(xs(&out), [10, 60]);
+    assert!(manifest(&out).layers[0].resolved.view);
+
+    // A group that is not overridden keeps the intent it had.
+    let untouched = apply_pdf_layers(&bytes, &choices(PdfLayerMode::View, &[])).unwrap();
+    assert_eq!(manifest(&untouched).layers[0].intent, ["Design"]);
+}
+
+#[test]
+fn a_state_key_that_says_on_is_dropped_too() {
+    let usage = dictionary! { "View" => dictionary! { "ViewState" => "ON" } };
+    let (bytes, g) = marked_square(dictionary! { "Usage" => usage }, false);
+    assert_eq!(xs(&bytes), [10, 60]);
+
+    let hidden = choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Hidden)]);
+    let out = apply_pdf_layers(&bytes, &hidden).unwrap();
+    assert_eq!(xs(&out), [60]);
+    // pdfium reads the group's own ViewState before it reads /OFF, so it must be gone.
+    let re = Document::load_mem(&out).unwrap();
+    let view = re
+        .get_dictionary(g)
+        .and_then(|d| d.get(b"Usage"))
+        .and_then(Object::as_dict)
+        .and_then(|u| u.get(b"View"))
+        .and_then(Object::as_dict)
+        .unwrap();
+    assert!(!view.has(b"ViewState"));
+}
+
+/// The check the strip exists for: the raster pdfium draws agrees with the vector path. Needs
+/// libpdfium (feature `pdfium`, `PDFIUM_PATH` or a system library); without one it says so and
+/// passes, like the other pdfium cells here.
+#[cfg(feature = "pdfium")]
+#[test]
+#[cfg_attr(miri, ignore)]
+fn pdfium_draws_what_the_rewritten_layers_say() {
+    let usage = dictionary! { "View" => dictionary! { "ViewState" => "ON" } };
+    let (bytes, _) = marked_square(dictionary! { "Usage" => usage }, false);
+    let out = apply_pdf_layers(
+        &bytes,
+        &choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Hidden)]),
+    )
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let render = |name: &str, pdf: &[u8]| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, pdf).unwrap();
+        libviprs::render_page_pdfium(&path, 1, 72)
+    };
+    let before = match render("before.pdf", &bytes) {
+        Ok(r) => r,
+        Err(libviprs::PdfError::Pdfium(e)) => {
+            eprintln!("skipped: no libpdfium ({e})");
+            return;
+        }
+        Err(e) => panic!("{e}"),
+    };
+    let after = render("after.pdf", &out).unwrap();
+    // The page is 100 points square at 72 dpi; the squares sit at x 10 and x 60, y 10 to 30
+    // from the bottom, so their centres are at (20, 80) and (70, 80) from the top.
+    let dark = |r: &libviprs::Raster, x: u32, y: u32| {
+        let bpp = r.data().len() / (r.width() * r.height()) as usize;
+        let i = (y * r.width() + x) as usize * bpp;
+        r.data()[i] < 128
+    };
+    assert!(dark(&before, 20, 80) && dark(&before, 70, 80));
+    assert!(!dark(&after, 20, 80), "pdfium still draws the hidden group");
+    assert!(dark(&after, 70, 80));
+}
