@@ -19,7 +19,8 @@ use libviprs::pvec::{
     ProviderCaps, ProviderError, RawEntity, RawGeometry, SourceFact, SourceUnit, ViewProfile,
 };
 use libviprs::pvec_convert::{
-    Orientation, PlotArea, PlotSettings, PvecConversion, PvecConversionOutput, PvecConvertError,
+    Orientation, PlotArea, PlotScale, PlotSettings, PvecConversion, PvecConversionOutput,
+    PvecConvertError,
 };
 use pvec_facade::Curve;
 
@@ -805,10 +806,15 @@ fn issue_1628_orientation_turns_the_paper_to_portrait_or_landscape() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1628_a_scale_preset_or_a_custom_scale_replaces_the_layouts_plot_scale() {
+    let mm = |paper, drawing| PlotScale {
+        paper,
+        paper_unit: SourceUnit::Millimeters,
+        drawing,
+    };
     for (scale, written) in [
-        ([1.0, 50.0], "1:50"),
-        ([2.0, 5.0], "2:5"),
-        ([10.0, 1.0], "10:1"),
+        (mm(1.0, 50.0), "1:50"),
+        (mm(2.0, 5.0), "2:5"),
+        (mm(10.0, 1.0), "10:1"),
     ] {
         let (_, s, dir) = framed(
             "scale",
@@ -833,7 +839,11 @@ fn issue_1628_a_scale_preset_or_a_custom_scale_replaces_the_layouts_plot_scale()
         "scale-zero",
         one_line([10.0, 10.0], [20.0, 20.0]),
         PlotSettings {
-            scale: Some([0.0, 1.0]),
+            scale: Some(PlotScale {
+                paper: 0.0,
+                paper_unit: SourceUnit::Millimeters,
+                drawing: 1.0,
+            }),
             ..PlotSettings::default()
         },
     );
@@ -1174,5 +1184,35 @@ fn issue_1632_rotation_270_swaps_the_sides_and_flips() {
             || (point_near(b, [40.0, 90.0]) && point_near(a, [10.0, 80.0])),
         "{a:?} {b:?}"
     );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_a_scale_in_inches_on_a_millimetre_sheet_keeps_its_unit_in_the_record() {
+    // 1 inch = 50 drawing units, on a sheet of millimetres over a drawing in millimetres: a
+    // millimetre of paper is 1/25.4 inch, so it stands for 50/25.4 drawing millimetres.
+    let (_, s, dir) = framed(
+        "scale-inches",
+        one_line([10.0, 10.0], [20.0, 20.0]),
+        PlotSettings {
+            scale: Some(PlotScale {
+                paper: 1.0,
+                paper_unit: SourceUnit::Inches,
+                drawing: 50.0,
+            }),
+            ..PlotSettings::default()
+        },
+    );
+    assert_eq!(s.scale.as_deref(), Some("1:50"));
+    assert_eq!(s.calibration, "plot-scale");
+    let claim = stored_scale(&dir).expect("the scale is the calibration record");
+    let expected = 0.001 * 50.0 * (0.001 / 0.0254);
+    assert!(
+        (claim.metres_per_source_unit - expected).abs() < 1e-15,
+        "{claim:?}"
+    );
+    let provenance = format!("{:?}", claim.provenance);
+    assert!(provenance.contains("0.0254"), "{provenance}");
     let _ = fs::remove_dir_all(dir);
 }
