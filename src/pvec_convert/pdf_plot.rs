@@ -11,10 +11,12 @@ use std::path::{Path, PathBuf};
 use acadrust::plot_style::PlotStyleTable;
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
 use pvec_facade::Curve;
+use pvec_facade::components::{LineStyleStream, StrokePaintStream, StrokeWidth};
 use pvec_geometry::Curve2d;
 
 use super::{PlotSettings, PvecConversion, PvecConvertError};
 use crate::cad::CadSource;
+use crate::pvec::components::StreamSelection;
 use crate::pvec::publish::open_published;
 use crate::pvec::report::SheetSummary;
 use crate::pvec::view_profile::{SpaceSelection, ViewProfileError};
@@ -85,9 +87,9 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
-    /// The plot style table: stroke colour, width and screening per AutoCAD colour index. It is
-    /// not applied yet, because the conversion carries no per-entity colour or width until the
-    /// plot style work of #1630 lands; the output's notes say `plot-style-table-not-applied`.
+    /// The plot style table: stroke colour (screening included) and width per AutoCAD colour
+    /// index, as a PVec conversion applies it (#1630). An STB is reported in the notes as
+    /// `plot-style-stb-unsupported` and applies nothing. Dash patterns are not drawn yet.
     #[must_use]
     pub fn plot_style_table(mut self, table: PlotStyleTable) -> Self {
         self.table = Some(table);
@@ -164,6 +166,11 @@ impl<'a> PdfPlot<'a> {
                     .view_profile(profile)
                     .plot_settings(self.settings.clone());
                 conversion.empty_sheet_ok = true;
+                if let Some(table) = &self.table {
+                    conversion = conversion
+                        .plot_style_table(table.clone())
+                        .components(StreamSelection::ALL);
+                }
                 let out = conversion.run(&provider, unit)?;
                 let sheet = out.report.sheet;
                 let page = if out.written == 0 {
@@ -183,9 +190,6 @@ impl<'a> PdfPlot<'a> {
             if !notes.contains(n) {
                 notes.push(n.clone());
             }
-        }
-        if self.table.is_some() {
-            notes.push("plot-style-table-not-applied".into());
         }
         let count = pages.len() as u32;
         write_pdf(self.dest, pages.into_iter().map(|(p, _)| p))
@@ -215,11 +219,38 @@ fn read_page(artifact: &Path) -> Result<Page, crate::pvec::publish::PublishError
     let k = manifest.metres_per_unit * POINTS_PER_METRE;
     let size = [(hi[0] - lo[0]) * k, (hi[1] - lo[1]) * k];
     let to_pt = |x: f64, y: f64| ((x - lo[0]) * k, (y - lo[1]) * k);
-    let mut content = format!(
-        "{:.4} w\n0 0 0 RG\n",
-        DEFAULT_WIDTH_MM / 1000.0 * POINTS_PER_METRE
-    );
-    for (_, curve) in reader.entities().map_err(|e| other(&e))? {
+    let (streams, _) = reader.streams().map_err(|e| other(&e))?;
+    let payload = |capability| streams.iter().find(|s| s.capability == capability);
+    let paint = payload(StrokePaintStream::CAPABILITY)
+        .and_then(|s| StrokePaintStream::decode(&s.payload).ok());
+    let style =
+        payload(LineStyleStream::CAPABILITY).and_then(|s| LineStyleStream::decode(&s.payload).ok());
+    let width_pt = |mm: f64| mm / 1000.0 * POINTS_PER_METRE;
+    let mut content = String::new();
+    for (id, curve) in reader.entities().map_err(|e| other(&e))? {
+        // Stroke widths are in millimetres, as a lineweight is.
+        let mm = style
+            .as_ref()
+            .and_then(|s| {
+                let at = s.assignments.iter().find(|(e, _)| *e == id)?.1;
+                match s.styles.get(at as usize)?.width? {
+                    StrokeWidth::Width(w) => Some(w),
+                    StrokeWidth::Thinnest => Some(0.0),
+                }
+            })
+            .unwrap_or(DEFAULT_WIDTH_MM);
+        let [r, g, b, _] = paint
+            .as_ref()
+            .and_then(|p| p.colour_of(id))
+            .unwrap_or(0x0000_00ff)
+            .to_be_bytes();
+        content.push_str(&format!(
+            "{:.4} w\n{:.4} {:.4} {:.4} RG\n",
+            width_pt(mm),
+            f64::from(r) / 255.0,
+            f64::from(g) / 255.0,
+            f64::from(b) / 255.0
+        ));
         for run in polylines(&curve) {
             for (i, (x, y)) in run.into_iter().enumerate() {
                 let (x, y) = to_pt(x, y);

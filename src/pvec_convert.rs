@@ -62,10 +62,12 @@ mod calibration;
 mod capability;
 mod georef;
 mod layouts;
+mod manifest;
 mod pdf_plot;
 pub use pdf_plot::{PdfPlot, PdfPlotOutput};
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+pub use crate::pvec::LayerOverride;
 pub use crate::pvec::writer::recalibrate;
 pub use calibration::{
     Calibration, CalibrationError, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat,
@@ -80,6 +82,12 @@ pub use georef::{
 pub use layouts::{
     LayoutSetError, LayoutSetOutput, PaperSheet, PvecLayoutSet, SheetOutcome, SheetSkip,
     paper_sheets,
+};
+pub use manifest::{
+    CadChoices, CadManifest, CadMode, CadText, LayerCounts, ManifestColour, ManifestLayer,
+    ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace, ManifestPaper,
+    ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility, ResolvedLayer,
+    StateLayer, TextSwitch, Visibility, VpRef, cad_manifest, resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
@@ -117,7 +125,7 @@ use crate::pvec::report::{
     ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, SheetViewport, UnresolvedXrefRow,
     ViewSummary, XrefSummary,
 };
-use crate::pvec::style::{LineStyleComponent, dwg_line_style, dwg_style_input};
+use crate::pvec::style::{DwgLineweight, LineStyleComponent, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
     CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, metres_per_unit,
@@ -126,10 +134,11 @@ use crate::pvec::writer::{
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
     LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
-    SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError,
-    ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
+    SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile,
+    ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule,
+    select_layout,
 };
-use crate::pvec::{Normalized2DGeometry, ViewedEntity};
+use crate::pvec::{LeafPaint, Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
 use pvec_geometry::{Curve, Curve2d, CurveKind, Line, Point2, Polyline, Trimmed};
 
@@ -243,6 +252,7 @@ pub struct PvecConversion<'a> {
     /// A paper sheet with nothing to stroke is a success with `written == 0` and no artifact,
     /// for a caller (the PDF plot, #1636) that still wants the empty page.
     empty_sheet_ok: bool,
+    plot_style: Option<acadrust::plot_style::PlotStyleTable>,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -339,6 +349,7 @@ impl<'a> PvecConversion<'a> {
             element_rules: None,
             plot_settings: PlotSettings::default(),
             empty_sheet_ok: false,
+            plot_style: None,
         }
     }
 
@@ -387,6 +398,15 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn view_profile(mut self, profile: ViewProfile) -> Self {
         self.view_profile = profile;
+        self
+    }
+
+    /// The plot style table a print conversion applies to each stroke: colour (with the grayscale
+    /// policy), screening, lineweight and linetype, per ACI for a CTB and per named style for an
+    /// STB (#1630).
+    #[must_use]
+    pub fn plot_style_table(mut self, table: acadrust::plot_style::PlotStyleTable) -> Self {
+        self.plot_style = Some(table);
         self
     }
 
@@ -597,6 +617,7 @@ impl<'a> PvecConversion<'a> {
             element_rules,
             calibration: caller_calibration,
             plot_settings,
+            plot_style,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -653,96 +674,51 @@ impl<'a> PvecConversion<'a> {
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
             for v in listed.into_iter().filter(|v| v.layout == layout.id) {
-                let finite = [v.width, v.height, v.view_height, v.center[0], v.center[1]]
-                    .into_iter()
-                    .chain(v.view_center)
-                    .chain(v.view_target)
-                    .all(f64::is_finite);
-                let window = if paper_view(&v) {
-                    Window::Paper
-                } else if !v.visible {
-                    Window::Dropped("off")
-                } else if v.hide_plot {
-                    Window::Dropped("hide-plot")
-                } else if !(v.view_direction[0] == 0.0
-                    && v.view_direction[1] == 0.0
-                    && v.view_direction[2] > 0.0)
-                {
-                    Window::Refused("non-plan")
-                } else if v.perspective {
-                    Window::Refused("perspective")
-                } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
-                    Window::Refused("view-height")
-                } else if v.twist != 0.0 {
-                    // The twist sign is not measured against AutoCAD yet (the ADR's open item).
-                    Window::Refused("twist")
-                } else {
-                    // A rectangle, or a polygon with straight edges (#1565), whose vertices are
-                    // in paper units and cut what the viewport shows. A bulged edge or a curved
-                    // boundary is not cut yet.
-                    let polygon = match &v.clip {
-                        ViewportClip::Rectangle(_) => Ok(None),
-                        ViewportClip::Polygon(vs) if vs.iter().any(|q| q.bulge != 0.0) => {
-                            Err("clip-bulge")
-                        }
-                        ViewportClip::Polygon(vs)
-                            if vs.len() < 3
-                                || !vs.iter().all(|q| q.x.is_finite() && q.y.is_finite()) =>
-                        {
-                            Err("clip-polygon")
-                        }
-                        ViewportClip::Polygon(vs) => {
-                            Ok(Some(vs.iter().map(|q| [q.x, q.y]).collect::<Vec<_>>()))
-                        }
-                        ViewportClip::Circle(_) => Err("clip-circle"),
-                        ViewportClip::Ellipse(_) => Err("clip-ellipse"),
-                        ViewportClip::Spline(_) => Err("clip-spline"),
-                        _ => Err("clip-other"),
-                    };
-                    match polygon {
-                        Err(why) => Window::Refused(why),
-                        Ok(ring) => {
-                            // paper = centre + s * (model - target - view centre), for a plan view.
-                            // The view centre is in display coordinates, whose origin is the target
-                            // (DXF), so a target off the origin shifts the view (#1610).
-                            let s = v.height / v.view_height;
-                            let (hw, hh) = (v.width / 2.0, v.height / 2.0);
-                            let rect = match &ring {
-                                Some(r) => r.iter().fold(
+                let window = match viewport_class(&v) {
+                    ViewportClass::Paper => Window::Paper,
+                    ViewportClass::Dropped(why) => Window::Dropped(why),
+                    ViewportClass::Refused(why) => Window::Refused(why),
+                    ViewportClass::Drawn(ring) => {
+                        // paper = centre + s * (model - target - view centre), for a plan view.
+                        // The view centre is in display coordinates, whose origin is the target
+                        // (DXF), so a target off the origin shifts the view (#1610).
+                        let s = v.height / v.view_height;
+                        let (hw, hh) = (v.width / 2.0, v.height / 2.0);
+                        let rect = match &ring {
+                            Some(r) => r.iter().fold(
+                                [
+                                    f64::INFINITY,
+                                    f64::INFINITY,
+                                    f64::NEG_INFINITY,
+                                    f64::NEG_INFINITY,
+                                ],
+                                |b, q| {
                                     [
-                                        f64::INFINITY,
-                                        f64::INFINITY,
-                                        f64::NEG_INFINITY,
-                                        f64::NEG_INFINITY,
-                                    ],
-                                    |b, q| {
-                                        [
-                                            b[0].min(q[0]),
-                                            b[1].min(q[1]),
-                                            b[2].max(q[0]),
-                                            b[3].max(q[1]),
-                                        ]
-                                    },
-                                ),
-                                None => [
-                                    v.center[0] - hw,
-                                    v.center[1] - hh,
-                                    v.center[0] + hw,
-                                    v.center[1] + hh,
-                                ],
-                            };
-                            Window::Drawn {
-                                map: [
-                                    s,
-                                    0.0,
-                                    0.0,
-                                    s,
-                                    v.center[0] - s * (v.view_center[0] + v.view_target[0]),
-                                    v.center[1] - s * (v.view_center[1] + v.view_target[1]),
-                                ],
-                                rect,
-                                ring,
-                            }
+                                        b[0].min(q[0]),
+                                        b[1].min(q[1]),
+                                        b[2].max(q[0]),
+                                        b[3].max(q[1]),
+                                    ]
+                                },
+                            ),
+                            None => [
+                                v.center[0] - hw,
+                                v.center[1] - hh,
+                                v.center[0] + hw,
+                                v.center[1] + hh,
+                            ],
+                        };
+                        Window::Drawn {
+                            map: [
+                                s,
+                                0.0,
+                                0.0,
+                                s,
+                                v.center[0] - s * (v.view_center[0] + v.view_target[0]),
+                                v.center[1] - s * (v.view_center[1] + v.view_target[1]),
+                            ],
+                            rect,
+                            ring,
                         }
                     }
                 };
@@ -773,6 +749,8 @@ impl<'a> PvecConversion<'a> {
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
             let text = |v: f64| format!("{v}");
+            // Only a CTB is applied: nothing says which named style an entity uses (#1630).
+            let stb = plot_style.as_ref().is_some_and(|t| t.is_stb);
             let mut summary = SheetSummary {
                 layout: layout.name.clone(),
                 frame: "extents".into(),
@@ -784,6 +762,9 @@ impl<'a> PvecConversion<'a> {
                 },
                 ..SheetSummary::default()
             };
+            if stb {
+                summary.notes.push("plot-style-stb-unsupported".into());
+            }
             let mut plot_unit = None;
             let mut frame_box = None;
             let mut drop_widths = false;
@@ -1003,6 +984,13 @@ impl<'a> PvecConversion<'a> {
         // the composed maps, so a flattened leaf is drawn when the view pass kept the same one.
         let kept: BTreeSet<(Option<u64>, String, String)> =
             view.included.iter().map(leaf_key).collect();
+        // The colour each kept leaf is drawn in, found by the view pass (#1638); what a viewport
+        // shows is read from the model's own pass below.
+        let mut paints: BTreeMap<(Option<u64>, String, String), LeafPaint> = view
+            .included
+            .iter()
+            .map(|v| (leaf_key(v), v.paint))
+            .collect();
         drop(view.included);
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
@@ -1141,6 +1129,9 @@ impl<'a> PvecConversion<'a> {
             }
         }
         // The effective layer of each kept model leaf, which a viewport freeze is matched against.
+        if let Some(v) = &model_view {
+            paints.extend(v.included.iter().map(|e| (leaf_key(e), e.paint)));
+        }
         let model_layers: BTreeMap<(Option<u64>, String, String), String> = model_view
             .as_ref()
             .map(|v| {
@@ -1445,6 +1436,8 @@ impl<'a> PvecConversion<'a> {
         }
         let frame = sheet.as_ref().and_then(|s| s.frame);
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
+        // The plot style table a CTB gives, applied per ACI (#1630); an STB applies nothing.
+        let table = plot_style.as_ref().filter(|t| !t.is_stb);
         // What the sheet clip did: outside, crossing, cut and the pieces the cut ones became.
         let mut clipped = [0u64; 4];
         // Ids are dense over what is written to the report, so a cut entity's pieces each take one.
@@ -2034,22 +2027,78 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
-                        let (style, colour, bad_style) = if pending.is_some() {
+                        // The ACI the stroke is drawn in, through BYLAYER and BYBLOCK; a true colour has none.
+                        let effective_aci = match paints.get(&leaf_key_of(&raw.provenance)) {
+                            Some(LeafPaint::Colour(SourceColour::Aci(i))) if table.is_some() => {
+                                Some(*i)
+                            }
+                            _ => None,
+                        };
+                        let (style, bad_style, own_colour) = if pending.is_some() {
                             // A carrier is never drawn: the stream record is what shows.
                             let c = LineStyleComponent::new(id, None, None, false).ok();
                             let bad = c.is_none();
-                            (c, false, bad)
+                            (c, bad, false)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
+                            // The table's lineweight and linetype for the stroke's ACI beat the
+                            // object's; an entry that says "object" leaves them (#1630).
+                            if let (Some(t), Some(aci)) = (table, effective_aci) {
+                                if let Some(mm) = t.resolve_lineweight(aci) {
+                                    input.lineweight = Some(DwgLineweight::Hundredths(
+                                        (f64::from(mm) * 100.0).round() as i16,
+                                    ));
+                                }
+                                // Pattern lengths are in millimetres like the table's lineweights,
+                                // `linepattern_size` long: 0 solid, 1 dashed, 2 dotted, 3 dash dot.
+                                let size =
+                                    f64::from(t.aci_entries[usize::from(aci)].linepattern_size);
+                                let pattern = match t.aci_entries[usize::from(aci)].linetype {
+                                    0 => Some(Vec::new()),
+                                    1 => Some(vec![size, -size / 2.0]),
+                                    2 => Some(vec![0.0, -size / 2.0]),
+                                    3 => Some(vec![size, -size / 4.0, 0.0, -size / 4.0]),
+                                    _ => None,
+                                };
+                                if let Some(p) = pattern {
+                                    input.linetype_scale = 1.0;
+                                    input.linetype_name = None;
+                                    input.linetype_elements = Some(p).filter(|p| !p.is_empty());
+                                }
+                            }
                             // P-8: a layout that does not print lineweights has none on its sheet.
                             if drop_widths {
                                 input.lineweight = None;
                             }
                             let c = dwg_line_style(id, &input).ok();
                             let bad = c.is_none();
-                            (c, input.colour_index.is_some(), bad)
+                            (c, bad, input.colour_index.is_some())
                         } else {
                             (None, false, false)
+                        };
+                        // A carrier is never drawn, so it has no colour either.
+                        let leaf_paint = if components.stroke_paint && pending.is_none() {
+                            paints.get(&leaf_key_of(&raw.provenance)).copied()
+                        } else {
+                            None
+                        };
+                        let paint = match leaf_paint {
+                            Some(LeafPaint::Colour(c)) => paint_word(c).map(|word| {
+                                let (Some(t), Some(aci)) = (table, effective_aci) else {
+                                    return word;
+                                };
+                                let [r, g, b, _] = word.to_be_bytes();
+                                let [r, g, b] = t.resolve_color(aci).map_or([r, g, b], |c| {
+                                    c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                                });
+                                // Screening is lighter ink on white paper, so it blends toward
+                                // white and the word stays opaque.
+                                let s = f64::from(t.resolve_screening(aci));
+                                let [r, g, b] = [r, g, b]
+                                    .map(|c| (255.0 - (255.0 - f64::from(c)) * s).round() as u8);
+                                u32::from_be_bytes([r, g, b, 255])
+                            }),
+                            _ => None,
                         };
                         Side {
                             // Only the handle, the layer and the outermost INSERT are read; the class name and
@@ -2067,7 +2116,20 @@ impl<'a> PvecConversion<'a> {
                                 layer: raw.provenance.layer.clone(),
                             },
                             style,
-                            colour,
+                            paint,
+                            // A colour the drawing names and the walk cannot reach, or one with no
+                            // RGB behind it, is counted and not painted.
+                            // With the paint stream off nothing writes a colour, so every explicit colour
+                            // index is ignored, counted as before (read only with the line style stream on).
+                            colour_ignored: if !components.stroke_paint {
+                                own_colour
+                            } else {
+                                match leaf_paint {
+                                    Some(LeafPaint::Unresolved) => true,
+                                    Some(LeafPaint::Colour(_)) => paint.is_none(),
+                                    _ => false,
+                                }
+                            },
                             bad_style,
                             viewport: window.map(|k| windows[k].0.handle),
                         }
@@ -2353,6 +2415,7 @@ impl<'a> PvecConversion<'a> {
                         stub: &s.stub,
                         style: s.style.as_ref(),
                         viewport: s.viewport,
+                        paint: s.paint,
                     })
                     .collect();
                 let built = build_streams(select, &open.source_ids, &layers, &rows)
@@ -2368,7 +2431,7 @@ impl<'a> PvecConversion<'a> {
                 let mut made = ComponentsSummary {
                     streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
                     dropped: BTreeMap::new(),
-                    colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
+                    colours_ignored: kept_sides().filter(|s| s.colour_ignored).count() as u64,
                     annotations: annotation_counts.clone(),
                 };
                 let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
@@ -2695,8 +2758,10 @@ struct Place {
 struct Side {
     stub: ProvenanceStub,
     style: Option<LineStyleComponent>,
-    /// The entity carries a DWG colour index (read only when the line style stream is on).
-    colour: bool,
+    /// The colour word, `0xRRGGBBAA`, when the drawing settles it (#1638).
+    paint: Option<u32>,
+    /// The paint stream is on and the colour could not be resolved (#1638).
+    colour_ignored: bool,
     /// The line style stream is on and the DWG facts could not make a component of this entity.
     bad_style: bool,
     /// The viewport a model entity was drawn through on a sheet (#1563).
@@ -2709,6 +2774,68 @@ struct Side {
 /// sheet test both decide it here (#1583).
 fn paper_view(v: &ViewportEntity) -> bool {
     v.id == 1 && v.center == v.view_center && v.height == v.view_height
+}
+
+/// What a viewport of a sheet comes to, decided from its record alone (#1563, #1626): the
+/// conversion and the manifest's listing both ask this, so the reason a viewport is refused is
+/// the same one before and after the conversion.
+enum ViewportClass {
+    /// The sheet's own paper view.
+    Paper,
+    /// Contributes nothing to a print: `off` or `hide-plot` (P-3).
+    Dropped(&'static str),
+    /// A view the print cannot map, and why.
+    Refused(&'static str),
+    /// Model space shows through it, cut by this polygon when it is clipped to one (#1565).
+    Drawn(Option<Vec<[f64; 2]>>),
+}
+
+fn viewport_class(v: &ViewportEntity) -> ViewportClass {
+    let finite = [v.width, v.height, v.view_height, v.center[0], v.center[1]]
+        .into_iter()
+        .chain(v.view_center)
+        .chain(v.view_target)
+        .all(f64::is_finite);
+    if paper_view(v) {
+        ViewportClass::Paper
+    } else if !v.visible {
+        ViewportClass::Dropped("off")
+    } else if v.hide_plot {
+        ViewportClass::Dropped("hide-plot")
+    } else if !(v.view_direction[0] == 0.0
+        && v.view_direction[1] == 0.0
+        && v.view_direction[2] > 0.0)
+    {
+        ViewportClass::Refused("non-plan")
+    } else if v.perspective {
+        ViewportClass::Refused("perspective")
+    } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
+        ViewportClass::Refused("view-height")
+    } else if v.twist != 0.0 {
+        // The twist sign is not measured against AutoCAD yet (the ADR's open item).
+        ViewportClass::Refused("twist")
+    } else {
+        // A rectangle, or a polygon with straight edges (#1565), whose vertices are in paper
+        // units and cut what the viewport shows. A bulged edge or a curved boundary is not cut yet.
+        match &v.clip {
+            ViewportClip::Rectangle(_) => ViewportClass::Drawn(None),
+            ViewportClip::Polygon(vs) if vs.iter().any(|q| q.bulge != 0.0) => {
+                ViewportClass::Refused("clip-bulge")
+            }
+            ViewportClip::Polygon(vs)
+                if vs.len() < 3 || !vs.iter().all(|q| q.x.is_finite() && q.y.is_finite()) =>
+            {
+                ViewportClass::Refused("clip-polygon")
+            }
+            ViewportClip::Polygon(vs) => {
+                ViewportClass::Drawn(Some(vs.iter().map(|q| [q.x, q.y]).collect()))
+            }
+            ViewportClip::Circle(_) => ViewportClass::Refused("clip-circle"),
+            ViewportClip::Ellipse(_) => ViewportClass::Refused("clip-ellipse"),
+            ViewportClip::Spline(_) => ViewportClass::Refused("clip-spline"),
+            _ => ViewportClass::Refused("clip-other"),
+        }
+    }
 }
 
 /// What the print profile makes of one viewport of a sheet (#1563).
@@ -2862,7 +2989,14 @@ struct Done {
 
 /// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
 fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
-    let p = &f.entity.provenance;
+    leaf_key_of(&f.entity.provenance)
+}
+
+fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
+    leaf_key_of(&v.entity.provenance)
+}
+
+fn leaf_key_of(p: &ProvenanceStub) -> (Option<u64>, String, String) {
     (
         p.handle.map(|h| h.get()),
         p.block_path.to_string(),
@@ -2870,13 +3004,17 @@ fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
     )
 }
 
-fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
-    let p = &v.entity.provenance;
-    (
-        p.handle.map(|h| h.get()),
-        p.block_path.to_string(),
-        p.class_name.clone(),
-    )
+/// The colour word of a resolved colour: its RGB with an opaque alpha. ACI 7 is white on a dark
+/// screen and black on paper, and a plot prints it black, so that is how it is written. An index
+/// with no RGB behind it has no word.
+fn paint_word(c: SourceColour) -> Option<u32> {
+    let (r, g, b) = match c {
+        SourceColour::Aci(7) => (0, 0, 0),
+        SourceColour::Aci(i) => acadrust::Color::Index(i).rgb()?,
+        SourceColour::True { r, g, b } => (r, g, b),
+        _ => return None,
+    };
+    Some(u32::from_be_bytes([r, g, b, 255]))
 }
 
 /// A stand-in `RawEntity` for something that has no geometry of its own, so it can be ordered and

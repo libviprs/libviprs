@@ -59,6 +59,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::limits::{Limit, LimitError, SourceGuard, SourceLimits, over};
@@ -66,7 +67,7 @@ use super::view::{EntityState, PolicyReason, VisibilityFilter, draws_text};
 
 use super::provider::{
     DwgProvider, EntityScope, InstancePath, LayerState, LayoutKind, ProviderError, RawEntity,
-    RawGeometry,
+    RawGeometry, SourceColour,
 };
 use crate::cad::ItemHandle;
 
@@ -126,6 +127,19 @@ pub enum InsertLayerRule {
 pub enum XrefPolicy {
     /// Contribute nothing, report as external.
     ReportExternal,
+}
+
+/// What the user forces for one layer: it wins over every flag, Defpoints included (#1626).
+///
+/// This is the user's visibility choice, not [`Facet::LayerOverride`](super::Facet::LayerOverride),
+/// which is a layer a drawing gives one entity in place of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LayerOverride {
+    /// Draw the layer.
+    Visible,
+    /// Leave the layer out.
+    Hidden,
 }
 
 /// Layer visibility.
@@ -217,6 +231,19 @@ pub struct ExcludedEntity {
     pub reason: Exclusion,
 }
 
+/// The colour a kept leaf is drawn in once BYLAYER and BYBLOCK are resolved along its INSERT chain
+/// (#1638).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafPaint {
+    /// The provider says nothing about the colour, so there is nothing to write.
+    Silent,
+    /// The drawing names a colour through BYLAYER or BYBLOCK and the walk cannot reach it: the
+    /// effective layer has no colour in the table.
+    Unresolved,
+    /// An ACI index or a true colour.
+    Colour(SourceColour),
+}
+
 /// One kept leaf.
 #[derive(Debug, Clone)]
 pub struct ViewedEntity {
@@ -224,6 +251,8 @@ pub struct ViewedEntity {
     pub entity: RawEntity,
     /// Effective layer.
     pub effective_layer: String,
+    /// The colour it is drawn in (#1638).
+    pub paint: LeafPaint,
     /// Instances.
     pub instances: u64,
 }
@@ -559,11 +588,18 @@ impl ViewProfile {
             || self.layers.no_plot == LayerStateRule::Exclude
             || self.layers.frozen_text == LayerStateRule::Exclude
             || self.layers.no_plot_text == LayerStateRule::Exclude;
-        let layer_table: Vec<LayerState> = if needs_layers {
+        // The layer colours are read for BYLAYER on an INSERT chain (#1638); a provider that cannot
+        // report layers has no colour to resolve through them.
+        let all_layers = if needs_layers {
             provider.layers()?
         } else {
-            Vec::new()
+            provider.layers().unwrap_or_default()
         };
+        let layer_colours: Vec<(String, Option<SourceColour>)> = all_layers
+            .iter()
+            .map(|l| (l.name.clone(), l.color))
+            .collect();
+        let layer_table: Vec<LayerState> = if needs_layers { all_layers } else { Vec::new() };
         // P-3: the layers a print leaves out, from the provider's plottable flag (#1560).
         let no_plot: Vec<String> = if self.layers.no_plot == LayerStateRule::Exclude {
             layer_table
@@ -584,6 +620,7 @@ impl ViewProfile {
             excluded: Vec::new(),
             guard: SourceGuard::new(self.limits),
             expanded: 0,
+            layer_colours,
         };
         let mut cursor = provider.entities(&EntityScope::Layout(model.id))?;
         let mut top = Vec::new();
@@ -592,7 +629,7 @@ impl ViewProfile {
         }
         drop(cursor);
         for e in top {
-            walk.visit(e, 0, None, 1)?;
+            walk.visit(e, 0, None, None, 1)?;
         }
 
         let mut by_field = BTreeMap::new();
@@ -630,6 +667,8 @@ struct Walk<'a, P: ?Sized> {
     guard: SourceGuard,
     /// Instances of blocks placed so far, the product of the grids down to each INSERT, summed.
     expanded: u64,
+    /// The colour each layer is drawn in, for BYLAYER (#1638).
+    layer_colours: Vec<(String, Option<SourceColour>)>,
 }
 
 impl<P: DwgProvider + ?Sized> Walk<'_, P> {
@@ -660,6 +699,7 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
         entity: RawEntity,
         depth: u32,
         container_layer: Option<&str>,
+        container_paint: Option<LeafPaint>,
         instances: u64,
     ) -> Result<(), ViewProfileError> {
         self.guard.check_entity(&entity)?;
@@ -679,10 +719,37 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
             return Ok(());
         }
 
+        // The colour it is drawn in (#1638). BYBLOCK takes the nearest INSERT's, ACI 7 at the top;
+        // BYLAYER, handed on only for layer "0" inside a block, takes the effective layer's colour.
+        let paint = match entity.style.colour.present() {
+            Some(c @ (SourceColour::Aci(_) | SourceColour::True { .. })) => LeafPaint::Colour(*c),
+            Some(SourceColour::ByBlock) => {
+                container_paint.unwrap_or(LeafPaint::Colour(SourceColour::Aci(7)))
+            }
+            Some(SourceColour::ByLayer) => {
+                match self
+                    .layer_colours
+                    .iter()
+                    .find(|(n, _)| n.eq_ignore_ascii_case(&effective))
+                    .and_then(|(_, c)| *c)
+                {
+                    Some(SourceColour::ByBlock) => {
+                        container_paint.unwrap_or(LeafPaint::Colour(SourceColour::Aci(7)))
+                    }
+                    Some(c @ (SourceColour::Aci(_) | SourceColour::True { .. })) => {
+                        LeafPaint::Colour(c)
+                    }
+                    _ => LeafPaint::Unresolved,
+                }
+            }
+            _ => LeafPaint::Silent,
+        };
+
         let RawGeometry::Insert(block) = &entity.geometry else {
             self.included.push(ViewedEntity {
                 entity,
                 effective_layer: effective,
+                paint,
                 instances,
             });
             return Ok(());
@@ -731,7 +798,7 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
             .into());
         }
         for c in children {
-            self.visit(c, depth + 1, Some(&effective), child_instances)?;
+            self.visit(c, depth + 1, Some(&effective), Some(paint), child_instances)?;
         }
         Ok(())
     }

@@ -92,11 +92,7 @@ impl DwgProvider for Mock {
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
         Ok(vec![LayerState {
             name: "0".into(),
-            handle: None,
-            off: false,
-            frozen: false,
-            locked: false,
-            plottable: true,
+            ..LayerState::default()
         }])
     }
     fn entities<'a>(
