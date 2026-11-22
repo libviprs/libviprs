@@ -55,7 +55,9 @@ use super::provider::{
     DwgProvider, EntityScope, Facet, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     ProviderError, RawEntity, ViewportClip, ViewportEntity,
 };
-use super::view_profile::{LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError};
+use super::view_profile::{
+    LayerOverride, LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError,
+};
 use crate::cad::ItemHandle;
 
 /// Why an entity was dropped by policy. A closed set, one reason per dropped entity.
@@ -365,6 +367,7 @@ pub struct VisibilityFilter {
     frozen: LayerStateRule,
     frozen_text: LayerStateRule,
     no_plot_text: LayerStateRule,
+    overrides: Vec<(String, LayerOverride)>,
     freeze_mode: ViewportFreezeMode,
     viewports: Vec<ViewportInput>,
 }
@@ -433,6 +436,7 @@ impl VisibilityFilter {
             frozen: profile.layers.frozen,
             frozen_text: profile.layers.frozen_text,
             no_plot_text: profile.layers.no_plot_text,
+            overrides: profile.layers.overrides.clone(),
             freeze_mode: ViewportFreezeMode::default(),
             viewports: Vec::new(),
         }
@@ -453,6 +457,14 @@ impl VisibilityFilter {
             .filter(|v| v.layout == self.layout.id)
             .collect();
         self
+    }
+
+    /// The override the user set on `name`, if any (ASCII case-insensitive).
+    pub(crate) fn forced(&self, name: &str) -> Option<LayerOverride> {
+        self.overrides
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, o)| *o)
     }
 
     fn layer_state(&self, name: &str) -> Option<&LayerState> {
@@ -476,7 +488,15 @@ impl VisibilityFilter {
         if state.layout.is_some_and(|l| l != self.layout.id) {
             return Some(PolicyReason::NotInSelectedLayout);
         }
-        if let Some(ls) = self.layer_state(layer) {
+        // The user's word on the layer comes before anything the file says (#1627): Hidden drops
+        // the entity, Visible skips the layer flags and the viewport freezes below.
+        let forced = self.forced(layer);
+        if forced == Some(LayerOverride::Hidden) {
+            return Some(PolicyReason::LayerOff);
+        }
+        if forced.is_none()
+            && let Some(ls) = self.layer_state(layer)
+        {
             if ls.off && self.off == LayerStateRule::Exclude {
                 return Some(PolicyReason::LayerOff);
             }
@@ -488,7 +508,10 @@ impl VisibilityFilter {
                 return Some(PolicyReason::LayerNoPlotText);
             }
         }
-        if self.freeze_mode == ViewportFreezeMode::Apply && self.viewport_freezes(layer, state) {
+        if forced.is_none()
+            && self.freeze_mode == ViewportFreezeMode::Apply
+            && self.viewport_freezes(layer, state)
+        {
             return Some(PolicyReason::ViewportFrozen);
         }
         if !state.visible {

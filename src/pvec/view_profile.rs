@@ -59,6 +59,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::limits::{Limit, LimitError, SourceGuard, SourceLimits, over};
@@ -128,11 +129,14 @@ pub enum XrefPolicy {
     ReportExternal,
 }
 
-/// What the user forces for one layer: wins over every flag, Defpoints included.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// What the user forces for one layer: it wins over every flag, Defpoints included (#1626).
+///
+/// This is the user's visibility choice, not [`Facet::LayerOverride`](super::Facet::LayerOverride),
+/// which is a layer a drawing gives one entity in place of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum LayerOverride {
-    /// Draw the layer, and thaw it in every viewport.
+    /// Draw the layer.
     Visible,
     /// Leave the layer out.
     Hidden,
@@ -668,6 +672,7 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
             // Off and frozen come first, so a layer that is both off and no-plot counts as off.
             // Text on a no-plot layer was decided by the filter under `layers.no_plot_text`.
             _ if !draws_text(&entity.provenance.class_name)
+                && self.filter.forced(layer).is_none()
                 && self.no_plot.iter().any(|n| n.eq_ignore_ascii_case(layer)) =>
             {
                 Some(Exclusion::LayerNoPlot)

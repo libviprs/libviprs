@@ -168,6 +168,8 @@ const P_OFF: u64 = 0x24;
 const P_DEFPOINTS: u64 = 0x25;
 /// A paper line on a layer that viewport A freezes: a viewport freeze never touches paper entities.
 const P_VPCOLD: u64 = 0x26;
+/// A paper line on layer 0, which no test overrides, so a conversion never ends up empty.
+const P_ZERO: u64 = 0x27;
 
 // Viewports: the paper view, A (freezes VPCOLD and BOTHCOLD) and B (freezes BOTHCOLD).
 const VP_A: u64 = 0x31;
@@ -344,6 +346,7 @@ fn drawing() -> Mock {
         line(P_OFF, "OFFL", [10.0, 40.0], [410.0, 40.0]),
         line(P_DEFPOINTS, "Defpoints", [10.0, 50.0], [410.0, 50.0]),
         line(P_VPCOLD, "VPCOLD", [10.0, 60.0], [410.0, 60.0]),
+        line(P_ZERO, "0", [10.0, 70.0], [410.0, 70.0]),
     ];
     for v in viewports() {
         paper.push(unmapped(v.handle.get(), "VIEWPORT", &v.layer));

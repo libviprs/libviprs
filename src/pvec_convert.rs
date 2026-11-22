@@ -65,6 +65,7 @@ mod layouts;
 mod manifest;
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+pub use crate::pvec::LayerOverride;
 pub use crate::pvec::writer::recalibrate;
 pub use calibration::{
     Calibration, CalibrationError, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat,
@@ -81,10 +82,10 @@ pub use layouts::{
     paper_sheets,
 };
 pub use manifest::{
-    CadChoices, CadManifest, CadMode, CadText, LayerCounts, LayerOverride, ManifestColour,
-    ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace,
-    ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility, ResolvedLayer, StateLayer,
-    TextSwitch, Visibility, VpRef, apply_choices, cad_manifest, resolve_visibility,
+    CadChoices, CadManifest, CadMode, CadText, LayerCounts, ManifestColour, ManifestLayer,
+    ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace, ManifestPaper,
+    ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility, ResolvedLayer,
+    StateLayer, TextSwitch, Visibility, VpRef, apply_choices, cad_manifest, resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
@@ -571,7 +572,24 @@ impl<'a> PvecConversion<'a> {
                 Err(ProviderError::CannotReport(_)) => Vec::new(),
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
-            for v in listed.into_iter().filter(|v| v.layout == layout.id) {
+            for mut v in listed.into_iter().filter(|v| v.layout == layout.id) {
+                // The user's overrides edit this viewport's frozen list before anything is drawn
+                // (#1627): a Visible layer is thawed everywhere, then the viewport's own
+                // overrides thaw or freeze it here only.
+                let layers = &view_profile.layers;
+                v.frozen_layers.retain(|f| {
+                    !layers
+                        .overrides
+                        .iter()
+                        .any(|(n, o)| *o == LayerOverride::Visible && n.eq_ignore_ascii_case(f))
+                });
+                let key = format!("{}/{:X}", layout.name, v.handle.get());
+                for (_, name, o) in layers.viewport_overrides.iter().filter(|(k, ..)| *k == key) {
+                    v.frozen_layers.retain(|f| !f.eq_ignore_ascii_case(name));
+                    if *o == LayerOverride::Hidden {
+                        v.frozen_layers.push(name.clone());
+                    }
+                }
                 let window = match viewport_class(&v) {
                     ViewportClass::Paper => Window::Paper,
                     ViewportClass::Dropped(why) => Window::Dropped(why),

@@ -2,7 +2,7 @@
 //! `cad_manifest` lists a drawing without converting it, `resolve_visibility` applies the truth
 //! table of spec section 1 (tests 9.1 to 9.6). Needs `--features pvec-convert`.
 //!
-//! The big-file test reads the drawing named by `IASBUILT_DWG_LAYOUTS_FIXTURE` and says so when
+//! The big-file test reads the drawing named by `LIBVIPRS_DWG_LAYOUTS_FIXTURE` and says so when
 //! the variable is unset.
 
 #![cfg(feature = "pvec-convert")]
@@ -11,7 +11,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use libviprs::cad::CadSource;
+use libviprs::cad::ItemHandle;
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
+use libviprs::pvec::{
+    Availability, DwgProvider, EntityCursor, EntityScope, Facet, FacetSource, LayerState,
+    LayerStateMask, LayoutId, LayoutKind, LayoutState, NamedLayerState, ProviderCaps,
+    ProviderError, RawEntity,
+};
 use libviprs::pvec_convert::{
     CadChoices, CadManifest, CadMode, LayerOverride, ManifestLayer, ManifestLayerState,
     ManifestLayout, ManifestMask, ManifestViewport, PlotsVisibility, StateLayer, Visibility, VpRef,
@@ -301,8 +307,8 @@ fn cad_manifest_lists_a_dxf_without_converting() {
 // 9.6 cad-manifest-lists-without-converting
 #[test]
 fn cad_manifest_lists_without_converting() {
-    let Some(path) = std::env::var_os("IASBUILT_DWG_LAYOUTS_FIXTURE") else {
-        eprintln!("skipped: IASBUILT_DWG_LAYOUTS_FIXTURE is not set (the 66-layout drawing)");
+    let Some(path) = std::env::var_os("LIBVIPRS_DWG_LAYOUTS_FIXTURE") else {
+        eprintln!("skipped: LIBVIPRS_DWG_LAYOUTS_FIXTURE is not set (the 66-layout drawing)");
         return;
     };
     let m = cad_manifest::<AcadrustProvider>(CadSource::Path(Path::new(&path)))
@@ -323,4 +329,189 @@ fn cad_manifest_lists_without_converting() {
     assert_eq!(viewports, 113, "113 viewports");
     assert!(!m.layers.is_empty() && m.layers.iter().all(|l| !l.name.is_empty()));
     assert!(m.model_space.entity_count > 0, "the count pass ran");
+    let sheet = m
+        .layouts
+        .iter()
+        .find(|l| l.name == "SHEET_011")
+        .expect("SHEET_011 is listed");
+    let paper = sheet.paper.as_ref().expect("SHEET_011 lists its paper");
+    assert!((paper.width_mm - 215.9).abs() < 0.5 && (paper.height_mm - 279.4).abs() < 0.5);
+    assert_eq!(paper.orientation, "portrait");
+}
+
+// What a server needs to request one thumbnail per layout: name, tab order, paper, plot area.
+#[test]
+fn cad_manifest_carries_what_a_thumbnail_needs() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pvec-dxf/paper-space-multi-viewport-001.dxf");
+    let m = cad_manifest::<AcadrustProvider>(CadSource::Path(&path)).expect("the DXF lists");
+    for l in m.layouts.iter().filter(|l| l.sheet) {
+        let paper = l.paper.as_ref().expect("a sheet lists its paper");
+        assert!(
+            paper.width_mm >= 0.0 && paper.height_mm >= 0.0,
+            "{}",
+            l.name
+        );
+        assert!(l.plot.is_some(), "a sheet lists its plot area: {}", l.name);
+        assert!(l.tab >= 1, "{}", l.name);
+    }
+}
+
+fn dxf(name: &str) -> CadManifest {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/pvec-cad-import")
+        .join(name);
+    cad_manifest::<AcadrustProvider>(CadSource::Path(&path)).expect("the DXF lists")
+}
+
+fn layer<'a>(m: &'a CadManifest, name: &str) -> &'a ManifestLayer {
+    m.layers
+        .iter()
+        .find(|l| l.name == name)
+        .unwrap_or_else(|| panic!("{name} is listed"))
+}
+
+// The flags fixture: every flag is read and the xref warning fires.
+#[test]
+fn cad_import_flags_fixture_lists_every_flag() {
+    let m = dxf("cad-import-flags.dxf");
+    assert!(layer(&m, "A-ON").on && !layer(&m, "A-OFF").on);
+    assert!(layer(&m, "A-FROZEN").frozen && !layer(&m, "A-ON").frozen);
+    assert!(layer(&m, "A-LOCKED").locked);
+    assert!(!layer(&m, "A-NOPLOT").plot && layer(&m, "A-ON").plot);
+    assert!(layer(&m, "A-NEWVP").frozen_in_new_viewports);
+    assert_eq!(layer(&m, "XR|A-WALL").xref.as_deref(), Some("XR"));
+    let codes: Vec<&str> = m.warnings.iter().map(|w| w.code.as_str()).collect();
+    assert!(codes.contains(&"XREF_LAYERS"), "{codes:?}");
+
+    let resolved = resolve_visibility(&m, &choices());
+    let of = |n: &str| resolved.iter().find(|r| r.name == n).expect("resolved");
+    assert_eq!(of("A-OFF").model, Visibility::Hidden);
+    assert_eq!(of("A-FROZEN").model, Visibility::Hidden);
+    assert_eq!(of("A-NOPLOT").model, Visibility::Visible);
+    assert_eq!(of("A-NOPLOT").plots, PlotsVisibility::Hidden);
+    assert_eq!(of("Defpoints").plots, PlotsVisibility::Hidden);
+}
+
+// The plot fixture: a viewport freezes a layer, so the layer is "Visible (Viewport)".
+#[test]
+fn cad_import_plot_fixture_resolves_a_viewport_freeze() {
+    let m = dxf("cad-import-plot.dxf");
+    let frozen = layer(&m, "A-VPFROZEN");
+    assert_eq!(
+        frozen.vp_frozen_in.len(),
+        1,
+        "one viewport freezes it: {:?}",
+        frozen.vp_frozen_in
+    );
+    let resolved = resolve_visibility(&m, &choices());
+    let of = |n: &str| resolved.iter().find(|r| r.name == n).expect("resolved");
+    assert_eq!(of("A-VPFROZEN").model, Visibility::Visible);
+    assert_eq!(of("A-VPFROZEN").plots, PlotsVisibility::Viewport);
+    assert_eq!(of("A-VPFROZEN").plots_count.frozen_in, 1);
+    assert_eq!(of("A-PLOTTED").plots, PlotsVisibility::Visible);
+    assert_eq!(of("A-NOPLOT").plots, PlotsVisibility::Hidden);
+}
+
+// ---- a mock drawing whose one layer state names layers the drawing no longer has ----
+
+struct Mock {
+    caps: ProviderCaps,
+}
+
+struct Empty;
+
+impl EntityCursor for Empty {
+    fn next_entity(&mut self) -> Result<Option<RawEntity>, ProviderError> {
+        Ok(None)
+    }
+}
+
+fn state_layer(name: &str, handle: u64) -> LayerState {
+    LayerState {
+        name: name.into(),
+        handle: Some(ItemHandle::new(handle)),
+        ..LayerState::default()
+    }
+}
+
+impl DwgProvider for Mock {
+    fn probe(_: CadSource<'_>) -> Result<bool, ProviderError> {
+        Ok(true)
+    }
+
+    fn open(_: CadSource<'_>) -> Result<Self, ProviderError> {
+        let caps = Facet::ALL.iter().fold(ProviderCaps::new(), |c, f| {
+            c.with(*f, Availability::Reported, FacetSource::DecoderAdapter)
+        });
+        Ok(Mock { caps })
+    }
+
+    fn name(&self) -> &'static str {
+        "mock"
+    }
+
+    fn caps(&self) -> &ProviderCaps {
+        &self.caps
+    }
+
+    fn layouts(&self) -> Result<Vec<LayoutState>, ProviderError> {
+        Ok(vec![LayoutState {
+            id: LayoutId(0),
+            name: "Model".into(),
+            kind: LayoutKind::Model,
+            block_name: "*Model_Space".into(),
+        }])
+    }
+
+    fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
+        Ok(vec![state_layer("0", 0x10), state_layer("A-WALL", 0x11)])
+    }
+
+    fn layer_states(&self) -> Result<Vec<NamedLayerState>, ProviderError> {
+        Ok(vec![NamedLayerState {
+            name: "Floor Plan".into(),
+            description: String::new(),
+            mask: LayerStateMask::default(),
+            hidden: false,
+            // A-WALL is in the drawing; OLD-DEMO is named but gone; the two with no name are layers
+            // deleted from the table, which the reader reports with an empty name and their handle.
+            layers: vec![
+                state_layer("A-WALL", 0x11),
+                state_layer("OLD-DEMO", 0x20),
+                state_layer("", 0x99),
+                state_layer("", 0x9A),
+            ],
+        }])
+    }
+
+    fn entities<'a>(
+        &'a self,
+        _: &EntityScope,
+    ) -> Result<Box<dyn EntityCursor + 'a>, ProviderError> {
+        Ok(Box::new(Empty))
+    }
+}
+
+// Panel call C3: missingLayers lists names only, and a layer with no name is a handle in its own list.
+#[test]
+fn a_state_naming_a_deleted_layer_lists_its_handle_not_a_blank() {
+    let m = cad_manifest::<Mock>(CadSource::Bytes(b"mock")).expect("the mock lists");
+    let s = &m.layer_states[0];
+    assert_eq!(
+        s.missing_layers,
+        vec!["OLD-DEMO".to_string()],
+        "no blank names"
+    );
+    let json = serde_json::to_value(s).expect("serialises");
+    assert_eq!(json["missingLayerHandles"], serde_json::json!(["99", "9A"]));
+    assert!(
+        s.layers.iter().all(|l| !l.name.is_empty()),
+        "a nameless row matches nothing"
+    );
+    assert!(
+        s.unlisted_layers == vec!["0".to_string()],
+        "unlisted: {:?}",
+        s.unlisted_layers
+    );
 }
