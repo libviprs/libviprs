@@ -53,6 +53,7 @@ fn sources<'a>(
             stub,
             style: styles.get(i),
             viewport: None,
+            paint: None,
         })
         .collect()
 }

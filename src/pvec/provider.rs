@@ -64,6 +64,7 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::cad::{CadSource, ItemHandle};
+use crate::pvec::units::SourceUnit;
 
 /// A source-space point, `[x, y, z]`, as the drawing stores it.
 pub type Point3 = [f64; 3];
@@ -852,6 +853,10 @@ pub enum SourceColour {
     /// consumer to resolve along the INSERT chain, because the provider hands out
     /// one block definition at a time.
     ByBlock,
+    /// BYLAYER, handed on only where the layer is the INSERT chain's to name: an entity on layer
+    /// `0` inside a block takes the layer of the INSERT that places it, which the provider cannot
+    /// see (#1638). Anywhere else the provider resolves BYLAYER through the layer table itself.
+    ByLayer,
 }
 
 /// A lineweight as the drawing states it, after the BYLAYER rule has been applied.
@@ -1338,6 +1343,12 @@ pub trait DwgProvider {
     /// [`ProviderError::CannotReport`] with [`Facet::ViewportEntities`] when the caps say so.
     fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
         Err(ProviderError::CannotReport(Facet::ViewportEntities))
+    }
+
+    /// The unit the drawing declares for its coordinates, when it declares one. The default says
+    /// the provider does not know; an xref's unit is compared with its host's through this (#1631).
+    fn declared_unit(&self) -> Option<SourceUnit> {
+        None
     }
 
     /// The drawing's external-reference block records, in the block table's order.

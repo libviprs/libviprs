@@ -55,8 +55,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 mod calibration;
 mod capability;
@@ -65,6 +65,7 @@ mod layouts;
 mod manifest;
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+mod xref;
 pub use crate::pvec::LayerOverride;
 pub use crate::pvec::writer::recalibrate;
 pub use calibration::{
@@ -133,10 +134,11 @@ use crate::pvec::writer::{
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
     LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
-    SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError,
-    ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
+    SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile,
+    ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule,
+    select_layout,
 };
-use crate::pvec::{Normalized2DGeometry, ViewedEntity};
+use crate::pvec::{LeafPaint, Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
 use pvec_geometry::{Curve, Curve2d, CurveKind, Line, Point2, Polyline, Trimmed};
 
@@ -257,6 +259,8 @@ pub struct PvecConversion<'a> {
     plot_settings: PlotSettings,
     #[cfg(feature = "pvec-raster-thumbnail")]
     thumbnail_width: Option<u32>,
+    xrefs: Vec<(String, CadSource<'a>)>,
+    xref_note: Arc<Mutex<xref::XrefNote>>,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -355,6 +359,8 @@ impl<'a> PvecConversion<'a> {
             plot_settings: PlotSettings::default(),
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail_width: None,
+            xrefs: Vec::new(),
+            xref_note: Arc::default(),
         }
     }
 
@@ -416,6 +422,14 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn regions(mut self, config: Option<RegionConfig>) -> Self {
         self.regions = config;
+        self
+    }
+
+    /// The drawing an xref block stands for, matched to the host's xref block records by block name
+    /// (ASCII case ignored). The path stored in the host is never opened (#1631).
+    #[must_use]
+    pub fn xref(mut self, block_name: impl Into<String>, source: CadSource<'a>) -> Self {
+        self.xrefs.push((block_name.into(), source));
         self
     }
 
@@ -572,7 +586,11 @@ impl<'a> PvecConversion<'a> {
     /// [`convert_with`](Self::convert_with) would.
     pub fn probe_with<P: DwgProvider>(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-        let c = self.classify(&provider, self.unit)?;
+        let c = if self.xrefs.is_empty() {
+            self.classify(&provider, self.unit)?
+        } else {
+            self.classify(&self.with_xrefs(provider)?, self.unit)?
+        };
         c.tally
             .finish(c.encountered)
             .map_err(PvecConvertError::Tally)
@@ -622,10 +640,28 @@ impl<'a> PvecConversion<'a> {
                 .ok_or(PvecConvertError::UnitRequired)
                 .and_then(|unit| {
                     let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-                    self.run(&provider, unit)
+                    if self.xrefs.is_empty() {
+                        return self.run(&provider, unit);
+                    }
+                    let with = self.with_xrefs(provider)?;
+                    self.run(&with, unit)
                 })
         };
         report_failure(observer.as_deref(), result)
+    }
+
+    /// `host` with the xref drawings the caller supplied behind it (#1631).
+    fn with_xrefs<P: DwgProvider>(
+        &self,
+        host: P,
+    ) -> Result<xref::XrefProvider<P>, PvecConvertError> {
+        xref::attach(
+            host,
+            &self.xrefs,
+            self.view_profile.limits.max_block_depth,
+            self.xref_note.clone(),
+        )
+        .map_err(PvecConvertError::Open)
     }
 
     /// Everything a conversion decides about its entities, up to but not including the write.
@@ -1050,6 +1086,13 @@ impl<'a> PvecConversion<'a> {
             .iter()
             .map(|e| (leaf_key(e), e.effective_layer.clone()))
             .collect();
+        // The colour each kept leaf is drawn in, found by the view pass (#1638); what a viewport
+        // shows is read from the model's own pass below.
+        let mut paints: BTreeMap<(Option<u64>, String, String), LeafPaint> = view
+            .included
+            .iter()
+            .map(|v| (leaf_key(v), v.paint))
+            .collect();
         drop(view.included);
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
@@ -1199,6 +1242,9 @@ impl<'a> PvecConversion<'a> {
             }
         }
         // The effective layer of each kept model leaf, which a viewport freeze is matched against.
+        if let Some(v) = &model_view {
+            paints.extend(v.included.iter().map(|e| (leaf_key(e), e.paint)));
+        }
         let model_layers: BTreeMap<(Option<u64>, String, String), String> = model_view
             .as_ref()
             .map(|v| {
@@ -2161,11 +2207,11 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
-                        let (style, colour, bad_style) = if pending.is_some() {
+                        let (style, bad_style, own_colour) = if pending.is_some() {
                             // A carrier is never drawn: the stream record is what shows.
                             let c = LineStyleComponent::new(id, None, None, false).ok();
                             let bad = c.is_none();
-                            (c, false, bad)
+                            (c, bad, false)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
                             // P-8: a layout that does not print lineweights has none on its sheet.
@@ -2174,9 +2220,19 @@ impl<'a> PvecConversion<'a> {
                             }
                             let c = dwg_line_style(id, &input).ok();
                             let bad = c.is_none();
-                            (c, input.colour_index.is_some(), bad)
+                            (c, bad, input.colour_index.is_some())
                         } else {
                             (None, false, false)
+                        };
+                        // A carrier is never drawn, so it has no colour either.
+                        let leaf_paint = if components.stroke_paint && pending.is_none() {
+                            paints.get(&leaf_key_of(&raw.provenance)).copied()
+                        } else {
+                            None
+                        };
+                        let paint = match leaf_paint {
+                            Some(LeafPaint::Colour(c)) => paint_word(c),
+                            _ => None,
                         };
                         Side {
                             // Only the handle, the layer and the outermost INSERT are read; the class name and
@@ -2198,7 +2254,20 @@ impl<'a> PvecConversion<'a> {
                                 .unwrap_or_else(|| raw.provenance.layer.clone()),
                             },
                             style,
-                            colour,
+                            paint,
+                            // A colour the drawing names and the walk cannot reach, or one with no
+                            // RGB behind it, is counted and not painted.
+                            // With the paint stream off nothing writes a colour, so every explicit colour
+                            // index is ignored, counted as before (read only with the line style stream on).
+                            colour_ignored: if !components.stroke_paint {
+                                own_colour
+                            } else {
+                                match leaf_paint {
+                                    Some(LeafPaint::Unresolved) => true,
+                                    Some(LeafPaint::Colour(_)) => paint.is_none(),
+                                    _ => false,
+                                }
+                            },
                             bad_style,
                             viewport: window.map(|k| windows[k].0.handle),
                         }
@@ -2279,6 +2348,10 @@ impl<'a> PvecConversion<'a> {
                 .collect();
             s
         });
+        let xref_note = self
+            .xref_note
+            .lock()
+            .expect("the xref note is not poisoned");
         let xrefs = XrefSummary {
             unresolved: flat
                 .skipped
@@ -2291,8 +2364,20 @@ impl<'a> PvecConversion<'a> {
                     path_refusal: None,
                 })
                 .collect(),
-            resolved: Vec::new(),
+            resolved: xref_note.resolved.iter().cloned().collect(),
+            unattached: xref_note.unattached.clone(),
+            notes: xref_note.notes.clone(),
         };
+        let mut diagnostics = consumed.diagnostics;
+        for name in &xref_note.unattached {
+            diagnostics.push(Diagnostic::new(
+                DiagnosticCode::XrefNotAttached,
+                "xref-not-attached",
+                format!(
+                    "a drawing was supplied for xref {name}, and no xref block of that name exists"
+                ),
+            ));
+        }
         // No rule named a wall, so the layer names carry no meaning here: the straight lines are
         // the walls, and the derivation drops the ones that join nothing (#1610).
         let wall_source = if walls.is_empty() && !lines.is_empty() {
@@ -2309,7 +2394,7 @@ impl<'a> PvecConversion<'a> {
             encountered,
             view: ViewSummary::from_report(&view.report),
             xrefs,
-            diagnostics: consumed.diagnostics,
+            diagnostics,
             peak_queue_depth: consumed.peak,
             sides: consumed.sides,
             walls,
@@ -2487,6 +2572,7 @@ impl<'a> PvecConversion<'a> {
                         stub: &s.stub,
                         style: s.style.as_ref(),
                         viewport: s.viewport,
+                        paint: s.paint,
                     })
                     .collect();
                 let built = build_streams(select, &open.source_ids, &layers, &rows)
@@ -2502,7 +2588,7 @@ impl<'a> PvecConversion<'a> {
                 let mut made = ComponentsSummary {
                     streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
                     dropped: BTreeMap::new(),
-                    colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
+                    colours_ignored: kept_sides().filter(|s| s.colour_ignored).count() as u64,
                     annotations: annotation_counts.clone(),
                     texts: ask_texts && select.line_style,
                     fills: ask_fills && select.line_style,
@@ -2863,8 +2949,10 @@ struct Place {
 struct Side {
     stub: ProvenanceStub,
     style: Option<LineStyleComponent>,
-    /// The entity carries a DWG colour index (read only when the line style stream is on).
-    colour: bool,
+    /// The colour word, `0xRRGGBBAA`, when the drawing settles it (#1638).
+    paint: Option<u32>,
+    /// The paint stream is on and the colour could not be resolved (#1638).
+    colour_ignored: bool,
     /// The line style stream is on and the DWG facts could not make a component of this entity.
     bad_style: bool,
     /// The viewport a model entity was drawn through on a sheet (#1563).
@@ -3092,7 +3180,14 @@ struct Done {
 
 /// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
 fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
-    let p = &f.entity.provenance;
+    leaf_key_of(&f.entity.provenance)
+}
+
+fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
+    leaf_key_of(&v.entity.provenance)
+}
+
+fn leaf_key_of(p: &ProvenanceStub) -> (Option<u64>, String, String) {
     (
         p.handle.map(|h| h.get()),
         p.block_path.to_string(),
@@ -3100,13 +3195,17 @@ fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
     )
 }
 
-fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
-    let p = &v.entity.provenance;
-    (
-        p.handle.map(|h| h.get()),
-        p.block_path.to_string(),
-        p.class_name.clone(),
-    )
+/// The colour word of a resolved colour: its RGB with an opaque alpha. ACI 7 is white on a dark
+/// screen and black on paper, and a plot prints it black, so that is how it is written. An index
+/// with no RGB behind it has no word.
+fn paint_word(c: SourceColour) -> Option<u32> {
+    let (r, g, b) = match c {
+        SourceColour::Aci(7) => (0, 0, 0),
+        SourceColour::Aci(i) => acadrust::Color::Index(i).rgb()?,
+        SourceColour::True { r, g, b } => (r, g, b),
+        _ => return None,
+    };
+    Some(u32::from_be_bytes([r, g, b, 255]))
 }
 
 /// A stand-in `RawEntity` for something that has no geometry of its own, so it can be ordered and

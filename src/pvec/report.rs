@@ -146,6 +146,13 @@ pub struct XrefSummary {
     pub unresolved: Vec<UnresolvedXrefRow>,
     /// Names of the xrefs that were resolved, sorted.
     pub resolved: Vec<String>,
+    /// Names the caller supplied a drawing for that no xref block names, in the order given.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unattached: Vec<String>,
+    /// Notes on how the xrefs were drawn, by id: `xref-units-differ` when a supplied drawing's
+    /// units are not its host's (the INSERT's own scale is what maps one to the other).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl XrefSummary {
@@ -169,6 +176,8 @@ impl XrefSummary {
                 })
                 .collect(),
             resolved,
+            unattached: Vec::new(),
+            notes: Vec::new(),
         }
     }
 }

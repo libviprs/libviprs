@@ -175,6 +175,6 @@ pub use view::{
 };
 pub use view_profile::{
     EntityPolicy, ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerOverride, LayerStateRule,
-    LayerVisibility, NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile,
+    LayerVisibility, LeafPaint, NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile,
     ViewProfileError, ViewReport, ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
 };
