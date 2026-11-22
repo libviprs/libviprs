@@ -857,6 +857,30 @@ impl DwgProvider for AcadrustProvider {
             .collect())
     }
 
+    fn drawing_guids(&self) -> Result<(Option<String>, Option<String>), ProviderError> {
+        let h = &self.doc.header;
+        let some = |s: &String| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
+        Ok((some(&h.fingerprint_guid), some(&h.version_guid)))
+    }
+
+    fn layout_plot_config(&self, layout: LayoutId) -> Option<String> {
+        let name = &self.layouts.iter().find(|l| l.id == layout)?.name;
+        self.doc
+            .objects
+            .values()
+            .find_map(|o| match o {
+                ObjectType::Layout(l) if l.name == *name => {
+                    Some(l.plot_printer_name.trim().to_owned())
+                }
+                _ => None,
+            })
+            .filter(|c| {
+                !c.is_empty()
+                    && !c.eq_ignore_ascii_case("none")
+                    && !c.eq_ignore_ascii_case("none_device")
+            })
+    }
+
     fn layer_states(&self) -> Result<Vec<NamedLayerState>, ProviderError> {
         use acr::layer_state::LayerStateMask as M;
         Ok(self

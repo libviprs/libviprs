@@ -83,7 +83,7 @@ pub use layouts::{
 pub use manifest::{
     CadChoices, CadManifest, CadMode, CadText, LayerCounts, LayerOverride, ManifestColour,
     ManifestFile, ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask,
-    ManifestModelSpace, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount,
+    ManifestModelSpace, ManifestPaper, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount,
     PlotsVisibility, ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, cad_manifest,
     resolve_visibility,
 };

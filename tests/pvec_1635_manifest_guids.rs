@@ -32,6 +32,10 @@ fn drawing(guids: Option<(&str, &str)>, layouts: &[(&str, &str, &str)]) -> CadDo
     }
     for (name, printer, style) in layouts {
         doc.add_layout(name).expect("the layout is added");
+        // An empty layout is not a sheet and carries no plot block, so give each one a line.
+        let line = acadrust::entities::Line::from_coords(0.0, 0.0, 0.0, 10.0, 10.0, 0.0);
+        doc.add_entity_to_layout(acadrust::EntityType::Line(line), name)
+            .expect("the line is added");
         for object in doc.objects.values_mut() {
             if let ObjectType::Layout(l) = object {
                 if l.name == *name {
@@ -181,6 +185,7 @@ fn the_manifest_serialises_the_new_fields_under_the_spec_names() {
     m.layouts[0].plot = Some(libviprs::pvec_convert::ManifestPlot {
         style_sheet: "Langara_2024-LW0.ctb".into(),
         config_name: Some("Langara_2026_Master_Plan.pc3".into()),
+        ..Default::default()
     });
     let v = serde_json::to_value(&m).unwrap();
     assert_eq!(v["file"]["fingerprintGuid"], FINGERPRINT);
