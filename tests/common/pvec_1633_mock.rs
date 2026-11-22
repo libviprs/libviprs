@@ -159,6 +159,7 @@ impl DwgProvider for Mock {
                 frozen: false,
                 locked: false,
                 plottable: true,
+                colour: None,
             })
             .to_vec())
     }
