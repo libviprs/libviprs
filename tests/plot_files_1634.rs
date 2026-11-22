@@ -151,3 +151,29 @@ fn ctb_announced_length_over_cap_is_refused_before_inflating() {
         .to_string();
     assert!(error.contains("announces"), "{error}");
 }
+
+#[test]
+fn issue_1634_a_non_finite_paper_value_is_refused_not_a_panic() {
+    // a file that spells a printable bound 1e999 reads back as infinity...
+    let hostile = text(PC3).replace("274.39999389648438", "1e999");
+    let mut pc3 = Pc3::parse(hostile.as_bytes()).unwrap();
+    let mut media = pc3.media().unwrap();
+    assert!(media.printable_mm[2].is_infinite());
+    // ...and an edit of another bound recomputes the area from it
+    media.printable_mm[0] += 1.0;
+    assert_eq!(
+        pc3.set_media(&media),
+        Err(Pc3Error::NotFinite("printable bound"))
+    );
+    // the same through the caller: NaN, infinity, and finite values whose area overflows
+    let mut pc3 = Pc3::parse(PC3).unwrap();
+    for bad in [
+        Pc3Media { size_mm: [f64::NAN, 297.0], ..a4() },
+        Pc3Media { printable_mm: [0.0, 0.0, f64::INFINITY, 1.0], ..a4() },
+        Pc3Media { printable_mm: [-1e200, -1e200, 1e200, 1e200], ..a4() },
+    ] {
+        assert!(matches!(pc3.set_media(&bad), Err(Pc3Error::NotFinite(_))), "{bad:?}");
+    }
+    // a refused edit leaves the file as it was
+    assert!(pc3.to_bytes() == PC3);
+}

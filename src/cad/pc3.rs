@@ -43,6 +43,9 @@ pub enum Pc3Error {
     BinaryNotEditable(&'static str),
     /// The document lacks a section a typed accessor needs.
     Missing(&'static str),
+    /// A paper value is not a finite number, or the printable area computed from the values
+    /// overflows. A file can spell one (`1e999`), so an edit refuses it instead of writing it.
+    NotFinite(&'static str),
 }
 
 impl fmt::Display for Pc3Error {
@@ -56,6 +59,7 @@ impl fmt::Display for Pc3Error {
             Pc3Error::Syntax(at, what) => write!(f, "PC3 JSON, byte {at}: {what}"),
             Pc3Error::BinaryNotEditable(reason) => write!(f, "{reason}"),
             Pc3Error::Missing(what) => write!(f, "PC3 has no {what}"),
+            Pc3Error::NotFinite(what) => write!(f, "PC3 {what} is not a finite number"),
         }
     }
 }
@@ -244,6 +248,16 @@ impl Pc3 {
     /// file spells it with; a new real is written at 17 significant digits.
     pub fn set_media(&mut self, media: &Pc3Media) -> Result<(), Pc3Error> {
         let now = self.media()?;
+        let p = media.printable_mm;
+        if !media.size_mm.iter().all(|v| v.is_finite()) {
+            return Err(Pc3Error::NotFinite("paper size"));
+        }
+        if !p.iter().all(|v| v.is_finite()) {
+            return Err(Pc3Error::NotFinite("printable bound"));
+        }
+        if !((p[2] - p[0]) * (p[3] - p[1])).is_finite() {
+            return Err(Pc3Error::NotFinite("printable area"));
+        }
         let (m, md) = (
             ["data", "media"],
             ["data", "media", "size", "media_description"],
@@ -283,7 +297,6 @@ impl Pc3 {
             }
         }
         if printable_changed {
-            let p = media.printable_mm;
             let area_path = [md[0], md[1], md[2], md[3], "printable_area"];
             let held = |key: &str| {
                 at(&self.baseline, &["data", "media", key]).and_then(|v| match v {
