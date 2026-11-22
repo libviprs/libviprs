@@ -895,16 +895,21 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1609 (the rest of it) adds 1: `tests/pvec_1609_annotations.rs::issue_1609_a_disc_and_a_sliver_are_stored_and_a_line_is_said_to_have_no_area`. #1615 adds 4: the three `tests/pvec_1615_bake_default.rs` cells and the `tests/pvec_1615_baked_report.rs` cell that convert a PDF into a temp dir. It said 1153 before this line moved.
 /// #1639 adds 17: the `tests/pvec_1621_text_layers.rs` cells that convert a drawing into a temp dir (or read the ADRs) and read the artifact back. It said 1166 before this line moved.
 /// #1622 adds 1: `tests/pvec_1564_layout_set.rs::issue_1622_rom_s_floor_plan_lists_its_66_sheets_in_tab_order`, which reads Rom's drawing when `LIBVIPRS_DWG_LAYOUTS_FIXTURE` names it. It said 1183 before this line moved.
+/// #1628 adds 13: the `tests/pvec_1628_plot_settings.rs` cells that convert a sheet into a temp dir and read the report back. It said 1183 before this line moved.
+/// #1628 (the plot settings review) adds 9 more: eight more `tests/pvec_1628_plot_settings.rs` cells and `tests/pvec_1563_viewports.rs::issue_1628_paperspace_last_overrides_the_layouts_draw_order`, which convert a sheet into a temp dir. It said 1197 before this line moved.
+/// #1628 (a scale carries its unit) adds 1: `tests/pvec_1628_plot_settings.rs::issue_1628_a_scale_in_inches_on_a_millimetre_sheet_keeps_its_unit_in_the_record`, which converts a sheet into a temp dir and reads the calibration back. It said 1206 before this line moved.
+/// #1624 adds 5: the `issue_1624_*` cells of `tests/pvec_1609_annotations.rs` that convert a drawing into a temp dir. It said 1184 before this line moved.
 /// #1624 adds 5: the `issue_1624_*` cells of `tests/pvec_1609_annotations.rs` that convert a drawing into a temp dir. It said 1227 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1270;
 /// #1627 adds 19 (12, then 7 for the reason, the folded states, the most specific entry and the state freeze): the `tests/pvec_1627_layer_overrides.rs` cells that convert a drawing into a temp dir. It said 1189 before this line moved.
 /// #1635 adds 3: the `tests/pvec_1635_manifest_guids.rs` cells that write a drawing into a temp dir and list it (the 66-layout cell reads Rom's drawing when `LIBVIPRS_DWG_LAYOUTS_FIXTURE` names it, and is not-detected). It said 1208 before this line moved.
 /// #1633 adds 4: the two `tests/pvec_1633_effective_layer.rs` cells and the two `tests/pvec_1633_invisible_flag.rs` cells, each of which converts a mock drawing into a temp dir. It said 1211 before this line moved.
 /// #1637 adds 1: `tests/pvec_1637_pdf_layers.rs::pdfium_draws_what_the_rewritten_layers_say`, which writes a PDF into a temp dir and renders it. It said 1215 before this line moved.
 /// #1621 (the text layout) adds 11: the `tests/pvec_1621_dwg_text.rs` cells that convert a drawing and read the artifact back. It said 1216 before this line moved.
 /// #1631 adds 11: the `tests/pvec_1631_xref.rs` cells that convert a drawing served from memory into a temp dir. It said 1227 before this line moved.
-/// #1638 adds 8: the `tests/pvec_1638_stroke_paint.rs` cells that convert a drawing into a temp dir and read the paint stream back. It said 1238 before this line moved.
-/// #1638 adds 1 more: the colours_ignored cell with the paint stream off. It said 1246 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1247;
+/// #1638 adds 8: the `tests/pvec_1638_stroke_paint.rs` cells that convert a drawing into a temp dir and read the paint stream back. It said 1261 before this line moved.
+/// #1638 adds 1 more: the colours_ignored cell with the paint stream off. It said 1269 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1270;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
