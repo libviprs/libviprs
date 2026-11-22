@@ -34,7 +34,9 @@ use libviprs::pvec::{
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact,
     SourceLimits, SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
 };
-use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput, PvecConvertError};
+use libviprs::pvec_convert::{
+    PlotSettings, PvecConversion, PvecConversionOutput, PvecConvertError,
+};
 use pvec_facade::Curve;
 use pvec_facade::components::{ProvenanceStream, Stream};
 
@@ -878,6 +880,26 @@ fn issue_1563_draw_viewports_first_puts_what_they_show_under_the_sheet() {
         let title = row(&report, TITLE, None).id;
         let model = row(&report, SHORT, Some(VP_A)).id;
         assert_eq!(model < title, first, "draw_viewports_first = {first}");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_paperspace_last_overrides_the_layouts_draw_order() {
+    // The layout says one thing, the caller the other; paper space last is viewports first.
+    for (layout_first, last) in [(false, true), (true, false)] {
+        let settings = PlotSettings {
+            paperspace_last: Some(last),
+            ..PlotSettings::default()
+        };
+        let (out, dir) = convert("order-override", drawing(layout_first), |c| {
+            c.plot_settings(settings)
+        });
+        let report = out.expect("the sheet converts").report;
+        let title = row(&report, TITLE, None).id;
+        let model = row(&report, SHORT, Some(VP_A)).id;
+        assert_eq!(model < title, last, "layout {layout_first}, last {last}");
         let _ = fs::remove_dir_all(dir);
     }
 }

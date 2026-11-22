@@ -253,13 +253,37 @@ pub struct PlotSettings {
     /// Paper size in millimetres, width then height, before the layout's rotation. `None` is the
     /// layout's own paper. An override clears the layout's margins, which belong to its paper.
     pub paper_mm: Option<[f64; 2]>,
-    /// Scale the plot so its extents fit the printable area of the paper. The scale becomes the
-    /// calibration record, and the frame is the part of the drawing the paper then shows.
+    /// Portrait or landscape. `None` is the layout's own, after its rotation.
+    pub orientation: Option<Orientation>,
+    /// Scale the plot so what it covers fits the printable area of the paper. Under
+    /// [`PlotArea::Extents`] that is the sheet's extents. Under [`PlotArea::Layout`] it is the
+    /// layout's own printable area, which only changes anything with a paper override. The frame is
+    /// the part of the drawing the paper then shows; the calibration stays the plot scale, and the
+    /// fit ratio is a note in the report.
     pub fit_to_paper: bool,
-    /// The plot offset in millimetres, added to the layout's own plot origin.
-    pub offset_mm: [f64; 2],
-    /// Centre the extents on the printable area. The offset is then ignored.
+    /// The plot scale, paper units to drawing units, in place of the layout's own: a preset and a
+    /// custom scale are both a numerator and a denominator. `None` is the layout's own.
+    pub scale: Option<[f64; 2]>,
+    /// The plot offset in millimetres, in place of the layout's own plot origin. `None` is the
+    /// layout's own.
+    pub offset_mm: Option<[f64; 2]>,
+    /// Centre the extents on the printable area. The offset is then ignored. Only for
+    /// [`PlotArea::Extents`], as in AutoCAD; under `Layout` it is ignored and the report says so.
     pub center: bool,
+    /// Lineweights print. `None` is the layout's own; `Some(false)` drops widths.
+    pub print_lineweights: Option<bool>,
+    /// Paper space draws after what the viewports show. `None` is the layout's own.
+    pub paperspace_last: Option<bool>,
+}
+
+/// Portrait or landscape, the drawing orientation of the plot dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Orientation {
+    /// Taller than wide.
+    Portrait,
+    /// Wider than tall.
+    Landscape,
 }
 
 /// The part of a layout a plot covers.
@@ -801,8 +825,8 @@ impl<'a> PvecConversion<'a> {
                             p.margins
                         };
                         let shift = [
-                            p.origin[0] + plot_settings.offset_mm[0],
-                            p.origin[1] + plot_settings.offset_mm[1],
+                            p.origin[0] + plot_settings.offset_mm.map_or(0.0, |o| o[0]),
+                            p.origin[1] + plot_settings.offset_mm.map_or(0.0, |o| o[1]),
                         ];
                         // UNMEASURED (the print profile ADR's open item): the paper's lower left
                         // is taken to sit at -(margin + plot origin) from the paper-space origin.
@@ -845,7 +869,9 @@ impl<'a> PvecConversion<'a> {
                         if plot_settings.paper_mm.is_some() {
                             summary.notes.push("plot-paper-overridden".into());
                         }
-                        if plot_settings.offset_mm != [0.0; 2] && !plot_settings.center {
+                        if plot_settings.offset_mm.is_some_and(|o| o != [0.0; 2])
+                            && !plot_settings.center
+                        {
                             summary.notes.push("plot-offset".into());
                         }
                         if p.plot_type != 5 {
@@ -1273,98 +1299,97 @@ impl<'a> PvecConversion<'a> {
         let wants_extents = plot_settings.area == PlotArea::Extents
             || plot_settings.center
             || plot_settings.fit_to_paper;
-        if let Some(sh) = sheet.as_mut().filter(|_| wants_extents) {
-            if let Some(pl) = sh.place {
-                let mut ext: Option<[f64; 4]> = None;
-                let mut grow = |b: [f64; 4]| {
-                    ext = Some(ext.map_or(b, |e| {
-                        [
-                            e[0].min(b[0]),
-                            e[1].min(b[1]),
-                            e[2].max(b[2]),
-                            e[3].max(b[3]),
-                        ]
-                    }));
-                };
-                for (at, item) in items.iter().enumerate() {
-                    let Item::Leaf(f) = item else { continue };
-                    if via[at].1.is_some() || f.entity.provenance.class_name == "VIEWPORT" {
-                        continue;
-                    }
-                    if let Ok(done) = classify_item(item, &f.entity, gate, None) {
-                        if let Some(b) = done.geometry.source_bounds() {
-                            let (lo, hi) = (b.min(), b.max());
-                            grow([lo.x, lo.y, hi.x, hi.y]);
+        if let Some(sh) = sheet.as_mut().filter(|_| wants_extents)
+            && let Some(pl) = sh.place
+        {
+            let mut ext: Option<[f64; 4]> = None;
+            let mut grow = |b: [f64; 4]| {
+                ext = Some(ext.map_or(b, |e| {
+                    [
+                        e[0].min(b[0]),
+                        e[1].min(b[1]),
+                        e[2].max(b[2]),
+                        e[3].max(b[3]),
+                    ]
+                }));
+            };
+            for (at, item) in items.iter().enumerate() {
+                let Item::Leaf(f) = item else { continue };
+                if via[at].1.is_some() || f.entity.provenance.class_name == "VIEWPORT" {
+                    continue;
+                }
+                if let Ok(done) = classify_item(item, &f.entity, gate, None)
+                    && let Some(b) = done.geometry.source_bounds()
+                {
+                    let (lo, hi) = (b.min(), b.max());
+                    grow([lo.x, lo.y, hi.x, hi.y]);
+                }
+            }
+            for (_, w) in &windows {
+                if let Window::Drawn { rect, .. } = w {
+                    grow(*rect);
+                }
+            }
+            let sheet_unit = sh.unit;
+            let mut ratio = pl.scale;
+            if let Some(e) = ext {
+                let [ml, mb, mr, mt] = pl.margin;
+                let (printable_w, printable_h) = (pl.size[0] - ml - mr, pl.size[1] - mb - mt);
+                let (ew, eh) = (e[2] - e[0], e[3] - e[1]);
+                // Drawing units to a paper unit: the reciprocal of the plot scale, one division.
+                let mut k = 1.0;
+                if plot_settings.fit_to_paper {
+                    let by_width = (printable_w / ew, printable_w, ew);
+                    let by_height = (printable_h / eh, printable_h, eh);
+                    let tight = [by_width, by_height]
+                        .into_iter()
+                        .filter(|r| r.0.is_finite() && r.0 > 0.0)
+                        .min_by(|a, b| a.0.total_cmp(&b.0));
+                    match tight {
+                        Some((_, n, d)) => {
+                            (k, ratio) = (d / n, [n, d]);
+                            sh.summary.notes.push("plot-fit-to-paper".into());
                         }
+                        None => sh.summary.notes.push("plot-fit-skipped".into()),
                     }
                 }
-                for (_, w) in &windows {
-                    if let Window::Drawn { rect, .. } = w {
-                        grow(*rect);
-                    }
-                }
-                let sheet_unit = sh.unit;
-                let mut ratio = pl.scale;
-                if let Some(e) = ext {
-                    let [ml, mb, mr, mt] = pl.margin;
-                    let (printable_w, printable_h) = (pl.size[0] - ml - mr, pl.size[1] - mb - mt);
-                    let (ew, eh) = (e[2] - e[0], e[3] - e[1]);
-                    // Drawing units to a paper unit: the reciprocal of the plot scale, one division.
-                    let mut k = 1.0;
-                    if plot_settings.fit_to_paper {
-                        let by_width = (printable_w / ew, printable_w, ew);
-                        let by_height = (printable_h / eh, printable_h, eh);
-                        let tight = [by_width, by_height]
-                            .into_iter()
-                            .filter(|r| r.0.is_finite() && r.0 > 0.0)
-                            .min_by(|a, b| a.0.total_cmp(&b.0));
-                        match tight {
-                            Some((_, n, d)) => {
-                                (k, ratio) = (d / n, [n, d]);
-                                sh.summary.notes.push("plot-fit-to-paper".into());
-                            }
-                            None => sh.summary.notes.push("plot-fit-skipped".into()),
-                        }
-                    }
-                    let (x0, y0) = if plot_settings.center {
-                        sh.summary.notes.push("plot-centered".into());
-                        (
-                            (e[0] + e[2]) / 2.0 - printable_w * k / 2.0 - ml * k,
-                            (e[1] + e[3]) / 2.0 - printable_h * k / 2.0 - mb * k,
-                        )
-                    } else {
-                        let at = if plot_settings.area == PlotArea::Extents
-                            || plot_settings.fit_to_paper
-                        {
+                let (x0, y0) = if plot_settings.center {
+                    sh.summary.notes.push("plot-centered".into());
+                    (
+                        (e[0] + e[2]) / 2.0 - printable_w * k / 2.0 - ml * k,
+                        (e[1] + e[3]) / 2.0 - printable_h * k / 2.0 - mb * k,
+                    )
+                } else {
+                    let at =
+                        if plot_settings.area == PlotArea::Extents || plot_settings.fit_to_paper {
                             [e[0], e[1]]
                         } else {
                             [0.0, 0.0]
                         };
-                        (
-                            at[0] - (ml + pl.shift[0]) * k,
-                            at[1] - (mb + pl.shift[1]) * k,
-                        )
-                    };
-                    if plot_settings.area == PlotArea::Extents {
-                        sh.summary.notes.push("plot-area-extents".into());
-                    }
-                    let b = [x0, y0, x0 + pl.size[0] * k, y0 + pl.size[1] * k];
-                    sh.frame = Some(b);
-                    sh.summary.sheet_box = Some(b.map(|v| format!("{v}")));
-                } else {
-                    sh.summary.notes.push("plot-extents-empty".into());
+                    (
+                        at[0] - (ml + pl.shift[0]) * k,
+                        at[1] - (mb + pl.shift[1]) * k,
+                    )
+                };
+                if plot_settings.area == PlotArea::Extents {
+                    sh.summary.notes.push("plot-area-extents".into());
                 }
-                if let Some(sheet_unit) = sheet_unit.filter(|_| plot_settings.fit_to_paper) {
-                    sh.calibration = plot_scale_record(
-                        ratio[0],
-                        ratio[1],
-                        sheet_unit,
-                        unit,
-                        single_scale.as_deref(),
-                        caller_calibration.is_some(),
-                        &mut sh.summary,
-                    );
-                }
+                let b = [x0, y0, x0 + pl.size[0] * k, y0 + pl.size[1] * k];
+                sh.frame = Some(b);
+                sh.summary.sheet_box = Some(b.map(|v| format!("{v}")));
+            } else {
+                sh.summary.notes.push("plot-extents-empty".into());
+            }
+            if let Some(sheet_unit) = sheet_unit.filter(|_| plot_settings.fit_to_paper) {
+                sh.calibration = plot_scale_record(
+                    ratio[0],
+                    ratio[1],
+                    sheet_unit,
+                    unit,
+                    single_scale.as_deref(),
+                    caller_calibration.is_some(),
+                    &mut sh.summary,
+                );
             }
         }
         let frame = sheet.as_ref().and_then(|s| s.frame);
