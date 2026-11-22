@@ -15,8 +15,8 @@ use super::layouts::{listed_viewports, sheet_skip};
 use super::{ViewportClass, viewport_class};
 use crate::cad::{CadSource, ItemHandle};
 use crate::pvec::{
-    DwgProvider, EntityScope, LayerOverride, LayoutId, LayoutKind, ProviderError, SourceColour,
-    SourceFact,
+    DwgProvider, EntityScope, LayerOverride, LayerStateRule, LayoutId, LayoutKind, ProviderError,
+    SourceColour, SourceFact, ViewProfile,
 };
 use crate::pvec_convert::{LayoutSetError, SheetSkip};
 
@@ -794,4 +794,99 @@ pub fn resolve_visibility(manifest: &CadManifest, choices: &CadChoices) -> Vec<R
             }
         })
         .collect()
+}
+
+/// The profile the server converts a plan with: `profile`, then the text switches from
+/// `choices.text`, then the layer overrides and the per-viewport overrides from `choices` (spec
+/// section 2.4). With nothing chosen the profile comes back as it went in.
+#[must_use]
+pub fn apply_choices(
+    profile: ViewProfile,
+    manifest: &CadManifest,
+    choices: &CadChoices,
+) -> ViewProfile {
+    // A chosen layer state folds into the overrides where it changes the answer for the mode of
+    // `choices` (model space, or the drawing-wide plot value in layouts mode), by resolving the
+    // choices with and without the state and the user's own rows. A user's entry for the same
+    // name wins, and a state's Visible never thaws a viewport: those entries stay apart from the
+    // user's. A layer the state hides only by freezing it is a frozen flag (`state_frozen`) and not
+    // an override, so its text still follows `frozenLayers`.
+    let mut profile = profile;
+    let switch = |s: TextSwitch| match s {
+        TextSwitch::Show => LayerStateRule::Ignore,
+        TextSwitch::Hide => LayerStateRule::Exclude,
+    };
+    if let Some(t) = choices.text {
+        profile.layers.frozen_text = switch(t.frozen_layers);
+        profile.layers.no_plot_text = switch(t.no_plot_layers);
+    }
+    profile.layers.overrides = choices
+        .layers
+        .iter()
+        .map(|(n, o)| (n.clone(), *o))
+        .collect();
+    if choices.layer_state.is_some() {
+        let mut file = choices.clone();
+        file.layer_state = None;
+        file.turn_off_layers_not_in_state = false;
+        file.layers.clear();
+        let seen = |r: &ResolvedLayer| match choices.mode {
+            CadMode::Model => r.model == Visibility::Visible,
+            CadMode::Layouts => r.plots != PlotsVisibility::Hidden,
+        };
+        let mut with_state = file.clone();
+        with_state.layer_state = choices.layer_state.clone();
+        with_state.turn_off_layers_not_in_state = choices.turn_off_layers_not_in_state;
+        let state = manifest.layer_states.iter().find(|st| {
+            choices
+                .layer_state
+                .as_deref()
+                .is_some_and(|n| same(&st.name, n))
+        });
+        let flips = resolve_visibility(manifest, &with_state)
+            .into_iter()
+            .zip(resolve_visibility(manifest, &file))
+            .filter(|(s, f)| seen(s) != seen(f))
+            .filter(|(s, _)| !choices.layers.keys().any(|k| same(k, &s.name)));
+        for (s, _) in flips {
+            // A layer the state hides only by freezing it (on, and plotting where that matters,
+            // but frozen by the state and not by the file) becomes a frozen flag, so its text
+            // follows `frozenLayers`. Anything else is a plain override.
+            let by_freeze = state
+                .and_then(|st| {
+                    let sl = st.layers.iter().find(|sl| same(&sl.name, &s.name))?;
+                    let fl = manifest.layers.iter().find(|l| same(&l.name, &s.name))?;
+                    let on = if st.mask.on { sl.on } else { fl.on };
+                    let plot = if st.mask.plot { sl.plot } else { fl.plot };
+                    Some(
+                        st.mask.frozen
+                            && sl.frozen
+                            && !fl.frozen
+                            && on
+                            && (choices.mode == CadMode::Model || plot),
+                    )
+                })
+                .unwrap_or(false);
+            if by_freeze {
+                profile.layers.state_frozen.push(s.name.clone());
+            } else {
+                let o = if seen(&s) {
+                    LayerOverride::Visible
+                } else {
+                    LayerOverride::Hidden
+                };
+                profile.layers.state_overrides.push((s.name.clone(), o));
+            }
+        }
+    }
+    profile.layers.viewport_overrides = choices
+        .viewports
+        .iter()
+        .flat_map(|(key, layers)| {
+            layers
+                .iter()
+                .map(move |(n, o)| (key.clone(), n.clone(), *o))
+        })
+        .collect();
+    profile
 }

@@ -85,7 +85,8 @@ pub use manifest::{
     CadChoices, CadManifest, CadMode, CadText, LayerCounts, ManifestColour, ManifestFile,
     ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace,
     ManifestPaper, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility,
-    ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, cad_manifest, resolve_visibility,
+    ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, apply_choices, cad_manifest,
+    resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
@@ -243,7 +244,8 @@ pub struct PvecConversion<'a> {
     queue_capacity: usize,
     components: StreamSelection,
     regions: Option<RegionConfig>,
-    annotations: bool,
+    texts: bool,
+    fills: bool,
     element_rules: Option<ElementRules>,
 }
 
@@ -265,20 +267,41 @@ impl<'a> PvecConversion<'a> {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             components: StreamSelection::NONE,
             regions: None,
-            annotations: false,
+            texts: false,
+            fills: false,
             element_rules: None,
         }
     }
 
-    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Off by
-    /// default, and it only takes effect with the line style stream selected
-    /// ([`components`](Self::components)): each text is anchored on a short polyline and each hatch
-    /// boundary is an entity of its own, and the line style stream is what marks those hidden, so
-    /// without it they would draw as stray lines. With it off, or without the line style stream,
-    /// these classes are counted as unmapped, as before.
+    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Shorthand
+    /// for [`texts`](Self::texts) and [`fills`](Self::fills) together, so a call to either after it
+    /// wins for its half. Off by default, and it only takes effect with the line style stream
+    /// selected ([`components`](Self::components)): each text is anchored on a short polyline and
+    /// each hatch boundary is an entity of its own, and the line style stream is what marks those
+    /// hidden, so without it they would draw as stray lines. With it off, or without the line style
+    /// stream, these classes are counted as unmapped, as before.
     #[must_use]
     pub fn annotations(mut self, on: bool) -> Self {
-        self.annotations = on;
+        self.texts = on;
+        self.fills = on;
+        self
+    }
+
+    /// Carry TEXT, MTEXT and ATTDEF in PVec's text stream (#1624), without HATCH and SOLID: those
+    /// stay unmapped, each with a warning saying fills are off, until [`fills`](Self::fills) is on.
+    /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    #[must_use]
+    pub fn texts(mut self, on: bool) -> Self {
+        self.texts = on;
+        self
+    }
+
+    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT and ATTDEF
+    /// stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
+    /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    #[must_use]
+    pub fn fills(mut self, on: bool) -> Self {
+        self.fills = on;
         self
     }
 
@@ -514,7 +537,8 @@ impl<'a> PvecConversion<'a> {
             queue_capacity,
             components,
             regions,
-            annotations,
+            texts: want_texts,
+            fills: want_fills,
             element_rules,
             calibration: caller_calibration,
             ..
@@ -551,6 +575,8 @@ impl<'a> PvecConversion<'a> {
         // nothing (P-3), one refused with 508 for a view this slice cannot map, or one drawn
         // through its similarity onto the sheet and its rectangle.
         let mut windows: Vec<(ViewportEntity, Window)> = Vec::new();
+        // The layers an override froze in each of `windows`, by position (#1627).
+        let mut window_hidden: Vec<Vec<String>> = Vec::new();
         // The layers that do not plot. A viewport on one still draws what it shows; only its
         // border is hidden, as AutoCAD prints it (P-3, #1577).
         let no_plot: BTreeSet<String> = if layout.kind == LayoutKind::Paper
@@ -572,7 +598,37 @@ impl<'a> PvecConversion<'a> {
                 Err(ProviderError::CannotReport(_)) => Vec::new(),
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
-            for v in listed.into_iter().filter(|v| v.layout == layout.id) {
+            for mut v in listed.into_iter().filter(|v| v.layout == layout.id) {
+                // The user's overrides edit this viewport's frozen list before anything is drawn
+                // (#1627): a Visible layer is thawed everywhere, a Hidden one that this layout's
+                // other viewports show is frozen here, then the viewport's own entries thaw or
+                // freeze it here only, the most specific word winning. `added` is what an
+                // override froze, so the report can say so.
+                let layers = &view_profile.layers;
+                v.frozen_layers.retain(|f| {
+                    !layers
+                        .overrides
+                        .iter()
+                        .any(|(n, o)| *o == LayerOverride::Visible && n.eq_ignore_ascii_case(f))
+                });
+                let mut added: Vec<String> = Vec::new();
+                for n in layers.hidden_but_shown_in_a_viewport(&layout.name) {
+                    added.push(n.to_owned());
+                    v.frozen_layers.push(n.to_owned());
+                }
+                let key = format!("{}/{:X}", layout.name, v.handle.get());
+                for (_, name, o) in layers
+                    .viewport_overrides
+                    .iter()
+                    .filter(|(k, ..)| k.eq_ignore_ascii_case(&key))
+                {
+                    v.frozen_layers.retain(|f| !f.eq_ignore_ascii_case(name));
+                    added.retain(|f| !f.eq_ignore_ascii_case(name));
+                    if *o == LayerOverride::Hidden {
+                        added.push(name.clone());
+                        v.frozen_layers.push(name.clone());
+                    }
+                }
                 let window = match viewport_class(&v) {
                     ViewportClass::Paper => Window::Paper,
                     ViewportClass::Dropped(why) => Window::Dropped(why),
@@ -622,6 +678,7 @@ impl<'a> PvecConversion<'a> {
                     }
                 };
                 windows.push((v, window));
+                window_hidden.push(added);
             }
         }
         // `1:N`, one paper unit to N model units, of a drawn viewport.
@@ -939,6 +996,18 @@ impl<'a> PvecConversion<'a> {
             through_profile.space = SpaceSelection::Model;
             through_profile.viewport_clipping = ViewportClipping::Unsupported;
             through_profile.layers.frozen_in_viewport = ViewportFreezeRule::IgnoreAndReport;
+            // A layer hidden for the drawing that one viewport shows again stays in the model
+            // walk, and the other viewports freeze it (#1627).
+            let rescued: Vec<String> = view_profile
+                .layers
+                .hidden_but_shown_in_a_viewport(&layout.name)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            through_profile
+                .layers
+                .overrides
+                .retain(|(n, _)| !rescued.iter().any(|r| r.eq_ignore_ascii_case(n)));
             model_view = Some(
                 through_profile
                     .apply(provider)
@@ -1123,7 +1192,7 @@ impl<'a> PvecConversion<'a> {
         let mut labels: Vec<RoomLabel> = Vec::new();
         // The texts and hatches carried in streams (#1609): the entity a text hangs on, the entities
         // a hatch lists, and how many of each class were mapped or not.
-        let annotate = *annotations && components.line_style;
+        let annotate = (*want_texts || *want_fills) && components.line_style;
         let mut texts: Vec<(EntityId, TextBody)> = Vec::new();
         let mut fills: Vec<(Vec<EntityId>, FillBody)> = Vec::new();
         let mut annotation_counts: BTreeMap<String, u64> = BTreeMap::new();
@@ -1352,6 +1421,12 @@ impl<'a> PvecConversion<'a> {
                             .iter()
                             .any(|l| l.eq_ignore_ascii_case(layer))
                     };
+                    let by_override = |layer: &str| {
+                        window_hidden[k]
+                            .iter()
+                            .any(|l| l.eq_ignore_ascii_case(layer))
+                    };
+                    let mut overridden = false;
                     // The leaf's own effective layer, or that of any INSERT it is reached
                     // through: an INSERT on layer 0 takes its parent's (V1-2).
                     let mut parent = "0";
@@ -1362,23 +1437,36 @@ impl<'a> PvecConversion<'a> {
                                 parent = own;
                             }
                             through_cold |= cold(parent);
+                            overridden |= cold(parent) && by_override(parent);
                         }
                     }
                     let frozen = through_cold
                         || model_layers
                             .get(&flat_key(f))
                             .is_some_and(|layer| cold(layer));
+                    overridden |= model_layers
+                        .get(&flat_key(f))
+                        .is_some_and(|layer| cold(layer) && by_override(layer));
                     if frozen {
                         if view_profile.layers.frozen_in_viewport == ViewportFreezeRule::Apply {
                             frozen_here = true;
                             done = without_geometry(
                                 Classification::ignored_by_policy(
-                                    "layers.frozen_in_viewport",
+                                    if overridden {
+                                        PolicyReason::LayerOverridden.field()
+                                    } else {
+                                        "layers.frozen_in_viewport"
+                                    },
                                     raw.provenance.class_name.as_str(),
                                 ),
                                 vec![format!(
-                                    "{}: its layer is frozen in viewport {:X}",
-                                    PolicyReason::ViewportFrozen.code(),
+                                    "{}: its layer is {} in viewport {:X}",
+                                    if overridden {
+                                        PolicyReason::LayerOverridden.code()
+                                    } else {
+                                        PolicyReason::ViewportFrozen.code()
+                                    },
+                                    if overridden { "hidden" } else { "frozen" },
                                     v.handle.get()
                                 )],
                             );
@@ -1693,15 +1781,35 @@ impl<'a> PvecConversion<'a> {
                 // draws, and is counted as unmapped otherwise (#1609). Its carriers are written
                 // hidden, so only the model space of a drawing with no sheet clip is mapped.
                 let mut pending: Option<Body> = None;
+                // Texts and fills are two choices (#1624): a class whose choice is off stays
+                // unmapped and says so, so a caller that asked for one never gets the other.
+                let (text_class, fill_class) = (
+                    matches!(
+                        raw.provenance.class_name.as_str(),
+                        "TEXT" | "MTEXT" | "ATTDEF"
+                    ),
+                    matches!(raw.provenance.class_name.as_str(), "HATCH" | "SOLID"),
+                );
+                if annotate
+                    && window.is_none()
+                    && clip_box.is_none()
+                    && matches!(item, Item::Leaf(_))
+                    && matches!(raw.geometry, RawGeometry::Unmapped { .. })
+                    && ((text_class && !*want_texts) || (fill_class && !*want_fills))
+                {
+                    let (class, choice) = (
+                        raw.provenance.class_name.as_str(),
+                        if text_class { "texts" } else { "fills" },
+                    );
+                    done.warnings
+                        .push(format!("{class}: not carried, {choice} are off"));
+                }
                 if annotate
                     && window.is_none()
                     && clip_box.is_none()
                     && let Item::Leaf(f) = item
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && matches!(
-                        raw.provenance.class_name.as_str(),
-                        "TEXT" | "MTEXT" | "ATTDEF" | "HATCH" | "SOLID"
-                    )
+                    && ((text_class && *want_texts) || (fill_class && *want_fills))
                 {
                     let class = raw.provenance.class_name.as_str();
                     let made = raw
@@ -1995,6 +2103,7 @@ impl<'a> PvecConversion<'a> {
             annotation_counts,
             sheet,
         } = self.classify(provider, Some(unit))?;
+        let (ask_texts, ask_fills) = (self.texts, self.fills);
         let Self {
             dest,
             leaves,
@@ -2150,6 +2259,8 @@ impl<'a> PvecConversion<'a> {
                     dropped: BTreeMap::new(),
                     colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
                     annotations: annotation_counts.clone(),
+                    texts: ask_texts && select.line_style,
+                    fills: ask_fills && select.line_style,
                 };
                 let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
                 for d in &built.dropped {
