@@ -433,7 +433,9 @@ pub fn paper_sheets<P: DwgProvider>(
 
 /// The drawing's viewports, read once for all its layouts. A provider that cannot list viewports
 /// has none to show.
-fn listed_viewports<P: DwgProvider>(provider: &P) -> Result<Vec<ViewportEntity>, ProviderError> {
+pub(super) fn listed_viewports<P: DwgProvider>(
+    provider: &P,
+) -> Result<Vec<ViewportEntity>, ProviderError> {
     provider.viewports().or_else(|e| match e {
         ProviderError::CannotReport(_) => Ok(Vec::new()),
         e => Err(e),
@@ -448,7 +450,7 @@ fn listed_viewports<P: DwgProvider>(provider: &P) -> Result<Vec<ViewportEntity>,
 /// whose only such viewport is its paper view (the conversion's own rule, #1583) is a blank sheet,
 /// `EmptyAfterView` without being converted; one with neither is `Empty`. [`PvecLayoutSet`] and
 /// [`paper_sheets`] both ask this, so a listing and a set never disagree.
-fn sheet_skip<P: DwgProvider>(
+pub(super) fn sheet_skip<P: DwgProvider>(
     provider: &P,
     layout: &LayoutState,
     viewports: &Result<Vec<ViewportEntity>, ProviderError>,
