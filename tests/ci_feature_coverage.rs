@@ -296,6 +296,18 @@ const EXPECTED: &[(&str, Coverage)] = &[
         ),
     ),
     (
+        "pvec-raster-thumbnail",
+        cov(
+            true,
+            false,
+            true,
+            "gates src/pvec/thumbnail.rs, the PNG thumbnail of a converted sheet \
+             (issue #1629), the thumbnail arms of src/pvec_convert.rs and \
+             tests/pvec_1629_thumbnail.rs; adds nothing beyond `pvec-convert` and \
+             `svg`, so it takes the lint and Test cells and no MSRV cell of its own",
+        ),
+    ),
+    (
         "pvec-write",
         cov(
             true,
