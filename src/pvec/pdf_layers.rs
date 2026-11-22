@@ -703,7 +703,9 @@ pub fn pdf_manifest(bytes: &[u8]) -> Result<PdfManifest, PdfLayersError> {
 /// `/ON` and `/OFF` lists, with `/AS` removed so no usage can change the answer afterwards. A
 /// group in a radio group that is forced visible turns the others of its radio groups off
 /// unless they are overridden too. pdfium reads a group's own `ViewState` and `PrintState`
-/// without asking `/AS`, so those two keys are removed from the groups that carry them.
+/// without asking `/AS`, so those two keys are removed from every group that carries them,
+/// whatever their value. A group whose `/Intent` is neither View nor All is always shown to a
+/// viewer, so an overridden one is rewritten to `/Intent /View` and the override takes hold.
 ///
 /// The result is the input followed by an incremental update, so everything else is byte for
 /// byte what it was. A PDF with no `/OCProperties` comes back unchanged.
@@ -786,39 +788,53 @@ pub fn apply_pdf_layers(
     d.set("OFF", list(false));
     d.remove(b"AS");
 
-    // `Usage` and its `View` and `Print` entries may each be direct or indirect, and the state
-    // key is dropped wherever it lives.
+    // Group edits. `Usage` and its `View` and `Print` entries may each be direct or indirect,
+    // and the state key is dropped wherever it lives, whatever its value: pdfium reads it
+    // before `/D`, so an `ON` that the user hid would still draw. A group whose intent is
+    // neither View nor All is always shown to a viewer, so one the user overrides gets
+    // `/Intent /View`, and the override then works in the vector path and the raster path.
     let mut strip: Vec<(ObjectId, Dictionary)> = Vec::new();
-    for g in model.groups.iter().filter(|g| g.view_off || g.print_off) {
+    for g in &model.groups {
         let Ok(mut group) = doc.get_dictionary(g.id).cloned() else {
             continue;
         };
-        let (usage_id, mut usage) = match group.get(b"Usage") {
-            Ok(Object::Reference(u)) => match doc.get_dictionary(*u) {
-                Ok(d) => (Some(*u), d.clone()),
-                Err(_) => continue,
-            },
-            Ok(Object::Dictionary(d)) => (None, d.clone()),
-            _ => continue,
+        let mut group_changed = false;
+        if choices.layers.contains_key(&g.name)
+            && !g.intent.iter().any(|i| i == "View" || i == "All")
+        {
+            group.set("Intent", Object::Name(b"View".to_vec()));
+            group_changed = true;
+        }
+        let slot = match group.get(b"Usage") {
+            Ok(Object::Reference(u)) => doc.get_dictionary(*u).ok().map(|d| (Some(*u), d.clone())),
+            Ok(Object::Dictionary(d)) => Some((None, d.clone())),
+            _ => None,
         };
-        for (event, key) in [(&b"View"[..], &b"ViewState"[..]), (b"Print", b"PrintState")] {
-            match usage.get_mut(event) {
-                Ok(Object::Dictionary(u)) => {
-                    u.remove(key);
-                }
-                Ok(Object::Reference(r)) => {
-                    if let Ok(mut u) = doc.get_dictionary(*r).cloned() {
-                        u.remove(key);
-                        strip.push((*r, u));
+        if let Some((usage_id, mut usage)) = slot {
+            let mut usage_changed = false;
+            for (event, key) in [(&b"View"[..], &b"ViewState"[..]), (b"Print", b"PrintState")] {
+                match usage.get_mut(event) {
+                    Ok(Object::Dictionary(u)) => usage_changed |= u.remove(key).is_some(),
+                    Ok(Object::Reference(r)) => {
+                        if let Ok(mut u) = doc.get_dictionary(*r).cloned()
+                            && u.remove(key).is_some()
+                        {
+                            strip.push((*r, u));
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
+            }
+            if usage_changed {
+                if let Some(u) = usage_id {
+                    strip.push((u, usage));
+                } else {
+                    group.set("Usage", usage);
+                    group_changed = true;
+                }
             }
         }
-        if let Some(u) = usage_id {
-            strip.push((u, usage));
-        } else {
-            group.set("Usage", usage);
+        if group_changed {
             strip.push((g.id, group));
         }
     }

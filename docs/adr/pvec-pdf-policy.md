@@ -99,3 +99,5 @@ The vector path used to draw every `/OC` span whatever its state. It now reads `
 
 Two decisions the issue did not spell out. A group whose `/Intent` has neither `View` nor `All` is always shown, because viewers leave it alone. And the rewrite also drops `ViewState` and `PrintState` from the usage of the groups that carry them: pdfium reads those keys without asking `/AS` (from its source, not measured here on a pdfium build), so stripping `/AS` alone would let it hide a group the user forced on, and the raster tiles and the PVec would disagree.
 
+Owner decisions on those two calls (2026-11-21, panel): a group whose `/Intent` has neither View nor All stays always shown, but `apply_pdf_layers` rewrites an overridden one to `/Intent /View`, so a user's Hidden or Visible works in both paths. The `ViewState` and `PrintState` strip applies whether the value is ON or OFF, since pdfium reads the key before `/D` and an ON the user hid would still draw. `tests/pvec_1637_pdf_layers.rs::pdfium_draws_what_the_rewritten_layers_say` renders a page before and after the rewrite and checks a pixel per group (it needs libpdfium and says so when it has none).
+
