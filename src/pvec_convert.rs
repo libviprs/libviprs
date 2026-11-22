@@ -872,9 +872,12 @@ impl<'a> PvecConversion<'a> {
                             .zip(su([margins[2], margins[3]]))
                             .zip(su(shift))
                             .zip(su([w, h]))
-                            .zip(su(own));
+                            .zip(su(own))
+                            // The lower left adds margin and offset in millimetres and converts
+                            // once, so it does not pick up a rounding step per term.
+                            .zip(su([margins[0] + shift[0], margins[1] + shift[1]]));
                         match converted {
-                            Some((((((l, b), (r, t)), sh), size), own)) => {
+                            Some(((((((l, b), (r, t)), sh), size), own), low)) => {
                                 let at = Place {
                                     margin: [l, b, r, t],
                                     shift: [sh.0, sh.1],
@@ -903,7 +906,7 @@ impl<'a> PvecConversion<'a> {
                                 if plot_settings.center && plot_settings.area == PlotArea::Layout {
                                     summary.notes.push("plot-centre-not-applicable".into());
                                 }
-                                let (x0, y0) = (-(l + sh.0) * k, -(b + sh.1) * k);
+                                let (x0, y0) = (-low.0 * k, -low.1 * k);
                                 frame_box =
                                     Some([x0, y0, x0 + at.size[0] * k, y0 + at.size[1] * k]);
                                 plot_unit = sheet_unit;
