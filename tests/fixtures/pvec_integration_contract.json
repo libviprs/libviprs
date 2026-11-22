@@ -44,7 +44,7 @@
   },
   "provider": {
    "name": "acadrust",
-   "crate_rev": "f1e00c11f6371c8cfcff2c726620a51a45a2ad1b",
+   "crate_rev": "5bf63c7b1653fbb5a51f2f8a5a5a3f01a567c094",
    "minimum": "AC1014",
    "dwg_versions": [
     "AC1014",
