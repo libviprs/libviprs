@@ -325,8 +325,19 @@ fn cad_manifest_lists_without_converting() {
             .enumerate()
             .all(|(i, l)| l.tab as usize == i + 1)
     );
-    let viewports: usize = m.layouts.iter().map(|l| l.viewports.len()).sum();
-    assert_eq!(viewports, 113, "113 viewports");
+    // Every layout lists its own paper view too (status "paper"), so 66 paper views come with the
+    // 113 windows onto the model.
+    let all = || m.layouts.iter().flat_map(|l| l.viewports.iter());
+    assert_eq!(
+        all().filter(|v| v.status == "paper").count(),
+        66,
+        "one paper view per layout"
+    );
+    assert_eq!(
+        all().filter(|v| v.status != "paper").count(),
+        113,
+        "113 model viewports"
+    );
     assert!(!m.layers.is_empty() && m.layers.iter().all(|l| !l.name.is_empty()));
     assert!(m.model_space.entity_count > 0, "the count pass ran");
     let sheet = m
