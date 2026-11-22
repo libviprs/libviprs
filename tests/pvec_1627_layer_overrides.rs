@@ -24,8 +24,8 @@ use libviprs::pvec::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope,
     EntityStyle, Facet, FacetSource, InstancePath, LayerOverride, LayerState, LayerStateRule,
     LayoutId, LayoutKind, LayoutPlot, LayoutState, ProvenanceStub, ProviderCaps, ProviderError,
-    RawEntity, RawGeometry, SourceFact, SourceTransform, SourceUnit, ViewProfile, ViewportClip,
-    ViewportEntity,
+    RawEntity, RawGeometry, SourceFact, SourceTransform, SourceUnit, TextAnchorV, ViewProfile,
+    ViewportClip, ViewportEntity,
 };
 use libviprs::pvec_convert::{
     CadChoices, CadManifest, ManifestLayer, ManifestLayerState, ManifestMask, PvecConversion,
@@ -159,6 +159,11 @@ impl DwgProvider for Mock {
             rotation: 0.0,
             content: format!("NOTE {h:X}"),
             normal: [0.0, 0.0, 1.0],
+            width_factor: 1.0,
+            anchor: (0.0, TextAnchorV::Baseline),
+            fit: None,
+            block_width: 0.0,
+            line_spacing: 1.0,
         })
     }
 }
