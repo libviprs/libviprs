@@ -40,37 +40,6 @@ pub(crate) enum Body {
 /// Why [`map`] returns nothing for a text with no line inside the clip it was asked to keep to.
 pub(crate) const CLIPPED: &str = "it is outside the sheet or viewport it is drawn through";
 
-/// How far below its baseline a line's descenders reach, in text heights. Capitals stand one text
-/// height above the baseline.
-const DESCENT: f64 = 0.25;
-
-/// The advance of `line` in text heights, from Helvetica's widths (the face the PDF export's
-/// standard fonts fill `/Widths` from), scaled so a capital stands one text height. The drawing's
-/// own face is not read, so this is an estimate: close for TrueType Arial, a little wide for the
-/// SHX stroke fonts.
-fn run_advance(line: &str) -> f64 {
-    // Helvetica's widths for U+0020 to U+007E, in 1/1000 em, and its capital height.
-    const WIDTHS: [u16; 95] = [
-        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
-        556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722,
-        722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722,
-        667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556,
-        556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
-        500, 334, 260, 334, 584,
-    ];
-    const CAPITAL: f64 = 0.716;
-    line.chars()
-        .map(|c| match c as u32 {
-            0x20..=0x7e => f64::from(WIDTHS[c as usize - 0x20]),
-            // East Asian full width characters are one em wide.
-            0x2e80..=0x9fff | 0xac00..=0xd7a3 | 0xff00..=0xff60 => 1000.0,
-            _ => 556.0,
-        })
-        .sum::<f64>()
-        / 1000.0
-        / CAPITAL
-}
-
 /// The hidden entities to write for `annotation`, in block space like every other leaf, and the
 /// stream record that goes with them, or why it cannot be mapped. A text is laid out in its own
 /// plane, one anchor and record per printed line, and `keep` says whether a line starting at a
@@ -81,6 +50,36 @@ pub(crate) fn map(
     annotation: Annotation,
     keep: &dyn Fn([f64; 2]) -> bool,
 ) -> Result<(Vec<RawEntity>, Body), &'static str> {
+    /// How far below its baseline a line's descenders reach, in text heights. Capitals stand one text
+    /// height above the baseline.
+    const DESCENT: f64 = 0.25;
+
+    /// The advance of `line` in text heights, from Helvetica's widths (the face the PDF export's
+    /// standard fonts fill `/Widths` from), scaled so a capital stands one text height. The drawing's
+    /// own face is not read, so this is an estimate: close for TrueType Arial, a little wide for the
+    /// SHX stroke fonts.
+    fn run_advance(line: &str) -> f64 {
+        // Helvetica's widths for U+0020 to U+007E, in 1/1000 em, and its capital height.
+        const WIDTHS: [u16; 95] = [
+            278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556,
+            556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667,
+            667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722,
+            667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500,
+            556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278,
+            556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
+        ];
+        const CAPITAL: f64 = 0.716;
+        line.chars()
+            .map(|c| match c as u32 {
+                0x20..=0x7e => f64::from(WIDTHS[c as usize - 0x20]),
+                // East Asian full width characters are one em wide.
+                0x2e80..=0x9fff | 0xac00..=0xd7a3 | 0xff00..=0xff60 => 1000.0,
+                _ => 556.0,
+            })
+            .sum::<f64>()
+            / 1000.0
+            / CAPITAL
+    }
     let carrier = |geometry: RawGeometry| RawEntity {
         geometry,
         provenance: leaf.entity.provenance.clone(),
