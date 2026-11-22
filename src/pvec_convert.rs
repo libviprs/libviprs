@@ -918,8 +918,12 @@ impl<'a> PvecConversion<'a> {
 
         // The leaves the profile kept. The view pass decides visibility and the flatten pass owns
         // the composed maps, so a flattened leaf is drawn when the view pass kept the same one.
-        let kept: BTreeSet<(Option<u64>, String, String)> =
-            view.included.iter().map(leaf_key).collect();
+        // Each is kept with its effective layer, which the layer stream names (#1633).
+        let mut kept: BTreeMap<(Option<u64>, String, String), String> = view
+            .included
+            .iter()
+            .map(|e| (leaf_key(e), e.effective_layer.clone()))
+            .collect();
         drop(view.included);
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
@@ -930,7 +934,7 @@ impl<'a> PvecConversion<'a> {
         let mut items: Vec<Item<'_>> = Vec::new();
         for f in &flat.entities {
             let p = &f.entity.provenance;
-            if kept.contains(&(
+            if kept.contains_key(&(
                 p.handle.map(|h| h.get()),
                 p.block_path.to_string(),
                 p.class_name.clone(),
@@ -940,7 +944,7 @@ impl<'a> PvecConversion<'a> {
         }
         for u in &flat.unplaced {
             let p = &u.entity.provenance;
-            if kept.contains(&(
+            if kept.contains_key(&(
                 p.handle.map(|h| h.get()),
                 p.block_path.to_string(),
                 p.class_name.clone(),
@@ -948,7 +952,6 @@ impl<'a> PvecConversion<'a> {
                 items.push(Item::Unplaced(u));
             }
         }
-        drop(kept);
         items.extend(view.excluded.iter().map(Item::Excluded));
         for s in &flat.skipped {
             if s.insert_handle
@@ -1119,6 +1122,9 @@ impl<'a> PvecConversion<'a> {
                 }
             }
         }
+        // The model leaves are keyed apart from the sheet's by handle and block path, so one map
+        // answers for both.
+        kept.extend(model_layers.iter().map(|(k, v)| (k.clone(), v.clone())));
         let once = u32::try_from(windows.len()).unwrap_or(u32::MAX - 2) + 1;
         if let (Some(mv), Some(mf)) = (&model_view, &model_flat) {
             let excluded: BTreeSet<u64> = mv
@@ -1952,7 +1958,11 @@ impl<'a> PvecConversion<'a> {
                                             .child(String::new(), s.insert_handle)
                                     },
                                 ),
-                                layer: raw.provenance.layer.clone(),
+                                layer: match item {
+                                    Item::Leaf(f) => kept.get(&flat_key(f)).cloned(),
+                                    _ => None,
+                                }
+                                .unwrap_or_else(|| raw.provenance.layer.clone()),
                             },
                             style,
                             colour,

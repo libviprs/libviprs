@@ -168,11 +168,23 @@ fn issue_1634_a_non_finite_paper_value_is_refused_not_a_panic() {
     // the same through the caller: NaN, infinity, and finite values whose area overflows
     let mut pc3 = Pc3::parse(PC3).unwrap();
     for bad in [
-        Pc3Media { size_mm: [f64::NAN, 297.0], ..a4() },
-        Pc3Media { printable_mm: [0.0, 0.0, f64::INFINITY, 1.0], ..a4() },
-        Pc3Media { printable_mm: [-1e200, -1e200, 1e200, 1e200], ..a4() },
+        Pc3Media {
+            size_mm: [f64::NAN, 297.0],
+            ..a4()
+        },
+        Pc3Media {
+            printable_mm: [0.0, 0.0, f64::INFINITY, 1.0],
+            ..a4()
+        },
+        Pc3Media {
+            printable_mm: [-1e200, -1e200, 1e200, 1e200],
+            ..a4()
+        },
     ] {
-        assert!(matches!(pc3.set_media(&bad), Err(Pc3Error::NotFinite(_))), "{bad:?}");
+        assert!(
+            matches!(pc3.set_media(&bad), Err(Pc3Error::NotFinite(_))),
+            "{bad:?}"
+        );
     }
     // a refused edit leaves the file as it was
     assert!(pc3.to_bytes() == PC3);

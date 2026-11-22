@@ -20,6 +20,7 @@
 //! | `layers.overrides` | `layer-overrides` (print profile ADR) | none |
 //! | `layers.frozen_in_viewport` | `layer-frozen-in-viewport` | ignore and report |
 //! | `layers.insert_override` | `insert-layer-override` | layer "0" inherits the INSERT's layer |
+//! | `entities.invisible` | `entity-invisible` (print profile ADR) | exclude |
 //! | `nested_inserts.max_depth` | `nested-insert` | 64, the decoder's own limit |
 //! | `xrefs` | `xref` | report as external |
 //!
@@ -57,7 +58,7 @@
 //! is the proposed code of N1.4 and N4.6 allocates it; here it is a string, not a
 //! `DiagnosticCode`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -199,6 +200,14 @@ impl LayerVisibility {
     }
 }
 
+/// What an entity's own flags do.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityPolicy {
+    /// Entities whose invisible flag (DXF group 60) is set: excluded, or drawn when ignored. A
+    /// hidden INSERT takes its whole block with it (#1633).
+    pub invisible: LayerStateRule,
+}
+
 /// Nested inserts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NestedInsertPolicy {
@@ -215,6 +224,8 @@ pub struct ViewProfile {
     pub viewport_clipping: ViewportClipping,
     /// Layers.
     pub layers: LayerVisibility,
+    /// Entity flags.
+    pub entities: EntityPolicy,
     /// Nested inserts.
     pub nested_inserts: NestedInsertPolicy,
     /// Xrefs.
@@ -250,6 +261,8 @@ pub enum Exclusion {
     LayerNoPlotText,
     /// The user set the layer to Hidden (#1627).
     LayerOverridden,
+    /// The entity's own invisible flag, under `entities.invisible = exclude` (#1633).
+    EntityInvisible,
     /// Too deep.
     DepthLimit,
     /// Unresolved block.
@@ -371,6 +384,9 @@ impl ViewProfile {
                 state_frozen: Vec::new(),
                 viewport_overrides: Vec::new(),
             },
+            entities: EntityPolicy {
+                invisible: LayerStateRule::Exclude,
+            },
             nested_inserts: NestedInsertPolicy { max_depth: 64 },
             xrefs: XrefPolicy::ReportExternal,
             limits: SourceLimits::default(),
@@ -401,6 +417,9 @@ impl ViewProfile {
                 state_overrides: Vec::new(),
                 state_frozen: Vec::new(),
                 viewport_overrides: Vec::new(),
+            },
+            entities: EntityPolicy {
+                invisible: LayerStateRule::Exclude,
             },
             nested_inserts: NestedInsertPolicy { max_depth: 64 },
             xrefs: XrefPolicy::ReportExternal,
@@ -496,6 +515,11 @@ impl ViewProfile {
                 row: "insert-layer-override",
             },
             Knob {
+                field: "entities.invisible",
+                value: rule(self.entities.invisible).into(),
+                row: "entity-invisible",
+            },
+            Knob {
                 field: "nested_inserts.max_depth",
                 value: self.nested_inserts.max_depth.to_string(),
                 row: "nested-insert",
@@ -552,6 +576,9 @@ impl ViewProfile {
         }
         if matches!(self.space, SpaceSelection::PaperLayout(_)) {
             out.push("space");
+        }
+        if self.entities.invisible == LayerStateRule::Exclude {
+            out.push(Exclusion::EntityInvisible.field());
         }
         out.push(Exclusion::DepthLimit.field());
         out.push(Exclusion::Unresolved.field());
@@ -669,7 +696,11 @@ impl ViewProfile {
             excluded: Vec::new(),
             guard: SourceGuard::new(self.limits),
             expanded: 0,
+            hidden: BTreeSet::new(),
         };
+        if self.entities.invisible == LayerStateRule::Exclude {
+            walk.load_hidden(&EntityScope::Layout(model.id))?;
+        }
         let mut cursor = provider.entities(&EntityScope::Layout(model.id))?;
         let mut top = Vec::new();
         while let Some(e) = cursor.next_entity()? {
@@ -715,9 +746,28 @@ struct Walk<'a, P: ?Sized> {
     guard: SourceGuard,
     /// Instances of blocks placed so far, the product of the grids down to each INSERT, summed.
     expanded: u64,
+    /// Handles of the entities whose own invisible flag is set (#1633). An entity hidden this way
+    /// is not drawn, and a hidden INSERT takes its whole block with it.
+    hidden: BTreeSet<crate::cad::ItemHandle>,
 }
 
 impl<P: DwgProvider + ?Sized> Walk<'_, P> {
+    /// Notes the entities of `scope` that carry the invisible flag. A provider that cannot report
+    /// the flag leaves every entity drawn, as it did before.
+    fn load_hidden(&mut self, scope: &EntityScope) -> Result<(), ViewProfileError> {
+        match self.provider.entity_facts(scope) {
+            Ok(facts) => self.hidden.extend(
+                facts
+                    .into_iter()
+                    .filter(|(_, f)| f.visible.present() == Some(&false))
+                    .map(|(h, _)| h),
+            ),
+            Err(ProviderError::CannotReport(_) | ProviderError::NoSuchScope(_)) => {}
+            Err(e) => return Err(e.into()),
+        }
+        Ok(())
+    }
+
     /// The reason a layer hides an entity under this profile, if it does. The layer is the
     /// effective one (V1-2 already applied), handed to the filter as an override.
     fn layer_exclusion(&self, entity: &RawEntity, layer: &str) -> Option<Exclusion> {
@@ -761,6 +811,14 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
             _ => entity.provenance.layer.clone(),
         };
 
+        if entity
+            .provenance
+            .handle
+            .is_some_and(|h| self.hidden.contains(&h))
+        {
+            self.exclude(&entity, effective, Exclusion::EntityInvisible);
+            return Ok(());
+        }
         if let Some(reason) = self.layer_exclusion(&entity, &effective) {
             self.exclude(&entity, effective, reason);
             return Ok(());
@@ -789,6 +847,9 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
             name: block.block_name.clone(),
             reached_via: via,
         };
+        if self.profile.entities.invisible == LayerStateRule::Exclude {
+            self.load_hidden(&scope)?;
+        }
         let mut cursor = match self.provider.entities(&scope) {
             Ok(c) => c,
             Err(ProviderError::NoSuchScope(_)) => {
@@ -836,12 +897,13 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
 
 impl Exclusion {
     /// Every way an entity can be excluded.
-    pub const ALL: [Exclusion; 7] = [
+    pub const ALL: [Exclusion; 8] = [
         Exclusion::LayerOff,
         Exclusion::LayerFrozen,
         Exclusion::LayerNoPlot,
         Exclusion::LayerNoPlotText,
         Exclusion::LayerOverridden,
+        Exclusion::EntityInvisible,
         Exclusion::DepthLimit,
         Exclusion::Unresolved,
     ];
@@ -870,6 +932,7 @@ impl Exclusion {
             Exclusion::LayerFrozen => "layers.frozen",
             Exclusion::LayerNoPlot => "layers.no_plot",
             Exclusion::LayerNoPlotText => "layers.no_plot_text",
+            Exclusion::EntityInvisible => "entities.invisible",
             Exclusion::LayerOverridden => "layers.overrides",
             Exclusion::DepthLimit => "nested_inserts.max_depth",
             Exclusion::Unresolved => "xrefs",
@@ -886,6 +949,7 @@ impl Exclusion {
             | Exclusion::LayerNoPlot
             | Exclusion::LayerNoPlotText
             | Exclusion::LayerOverridden => "LAYER_HIDDEN",
+            Exclusion::EntityInvisible => "ENTITY_INVISIBLE",
             Exclusion::DepthLimit => "BLOCK_DEPTH_EXCEEDED",
             Exclusion::Unresolved => "UNRESOLVED_BLOCK",
         }
@@ -903,6 +967,7 @@ impl Exclusion {
             | Exclusion::LayerFrozen
             | Exclusion::LayerNoPlot
             | Exclusion::LayerNoPlotText
+            | Exclusion::EntityInvisible
             | Exclusion::LayerOverridden
             | Exclusion::DepthLimit => FidelityClass::IgnoredByPolicy,
             Exclusion::Unresolved => FidelityClass::Unsupported,
