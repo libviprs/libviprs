@@ -19,7 +19,8 @@
 //! # Order, and exactly one reason
 //!
 //! An entity is checked in a fixed order and the first match is its only reason:
-//! [`PolicyReason::NotInSelectedLayout`], then layer state on the effective layer (the layer
+//! [`PolicyReason::NotInSelectedLayout`], then [`PolicyReason::LayerOverridden`] (the user's own
+//! Hidden, which also stops the flags below from being read for a Visible layer), then layer state on the effective layer (the layer
 //! override when there is one): [`PolicyReason::LayerOff`], [`PolicyReason::LayerFrozen`],
 //! [`PolicyReason::LayerNoPlotText`], [`PolicyReason::ViewportFrozen`], then
 //! [`PolicyReason::EntityInvisible`], then
@@ -55,7 +56,9 @@ use super::provider::{
     DwgProvider, EntityScope, Facet, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState,
     ProviderError, RawEntity, ViewportClip, ViewportEntity,
 };
-use super::view_profile::{LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError};
+use super::view_profile::{
+    LayerOverride, LayerStateRule, SpaceSelection, ViewProfile, ViewProfileError,
+};
 use crate::cad::ItemHandle;
 
 /// Why an entity was dropped by policy. A closed set, one reason per dropped entity.
@@ -67,6 +70,8 @@ pub enum PolicyReason {
     LayerFrozen,
     /// It is text and its effective layer does not plot, under `layers.no_plot_text = exclude`.
     LayerNoPlotText,
+    /// The user set its layer to Hidden (#1627): their word, not the file's.
+    LayerOverridden,
     /// Its effective layer is frozen in the viewport it is seen through (opt-in).
     ViewportFrozen,
     /// The entity's own visibility flag is off.
@@ -81,8 +86,9 @@ pub enum PolicyReason {
 
 impl PolicyReason {
     /// Every reason, in evaluation order.
-    pub const ALL: [PolicyReason; 8] = [
+    pub const ALL: [PolicyReason; 9] = [
         PolicyReason::NotInSelectedLayout,
+        PolicyReason::LayerOverridden,
         PolicyReason::LayerOff,
         PolicyReason::LayerFrozen,
         PolicyReason::LayerNoPlotText,
@@ -99,6 +105,7 @@ impl PolicyReason {
             PolicyReason::LayerOff => "layers.off",
             PolicyReason::LayerFrozen => "layers.frozen",
             PolicyReason::LayerNoPlotText => "layers.no_plot_text",
+            PolicyReason::LayerOverridden => "layers.overrides",
             PolicyReason::ViewportFrozen => "layers.frozen_in_viewport",
             PolicyReason::EntityInvisible => "entity.visible",
             PolicyReason::NotInSelectedLayout
@@ -113,9 +120,10 @@ impl PolicyReason {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
-            PolicyReason::LayerOff | PolicyReason::LayerFrozen | PolicyReason::LayerNoPlotText => {
-                "LAYER_HIDDEN"
-            }
+            PolicyReason::LayerOff
+            | PolicyReason::LayerFrozen
+            | PolicyReason::LayerNoPlotText
+            | PolicyReason::LayerOverridden => "LAYER_HIDDEN",
             PolicyReason::ViewportFrozen => "VIEWPORT_STATE_IGNORED",
             PolicyReason::EntityInvisible => "ENTITY_INVISIBLE",
             PolicyReason::NotInSelectedLayout => "NOT_IN_SELECTED_LAYOUT",
@@ -365,6 +373,9 @@ pub struct VisibilityFilter {
     frozen: LayerStateRule,
     frozen_text: LayerStateRule,
     no_plot_text: LayerStateRule,
+    overrides: Vec<(String, LayerOverride)>,
+    state_overrides: Vec<(String, LayerOverride)>,
+    state_frozen: Vec<String>,
     freeze_mode: ViewportFreezeMode,
     viewports: Vec<ViewportInput>,
 }
@@ -433,6 +444,9 @@ impl VisibilityFilter {
             frozen: profile.layers.frozen,
             frozen_text: profile.layers.frozen_text,
             no_plot_text: profile.layers.no_plot_text,
+            overrides: profile.layers.overrides.clone(),
+            state_overrides: profile.layers.state_overrides.clone(),
+            state_frozen: profile.layers.state_frozen.clone(),
             freeze_mode: ViewportFreezeMode::default(),
             viewports: Vec::new(),
         }
@@ -453,6 +467,15 @@ impl VisibilityFilter {
             .filter(|v| v.layout == self.layout.id)
             .collect();
         self
+    }
+
+    /// The override the user set on `name`, if any (ASCII case-insensitive).
+    pub(crate) fn forced(&self, name: &str) -> Option<LayerOverride> {
+        self.overrides
+            .iter()
+            .chain(&self.state_overrides)
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, o)| *o)
     }
 
     fn layer_state(&self, name: &str) -> Option<&LayerState> {
@@ -476,19 +499,39 @@ impl VisibilityFilter {
         if state.layout.is_some_and(|l| l != self.layout.id) {
             return Some(PolicyReason::NotInSelectedLayout);
         }
-        if let Some(ls) = self.layer_state(layer) {
-            if ls.off && self.off == LayerStateRule::Exclude {
+        // The user's word on the layer comes before anything the file says (#1627): Hidden drops
+        // the entity, Visible skips the layer flags and the viewport freezes below.
+        let forced = self.forced(layer);
+        if forced == Some(LayerOverride::Hidden) {
+            return Some(PolicyReason::LayerOverridden);
+        }
+        if forced.is_none() {
+            let ls = self.layer_state(layer);
+            if ls.is_some_and(|ls| ls.off) && self.off == LayerStateRule::Exclude {
                 return Some(PolicyReason::LayerOff);
             }
+            // A chosen state's freeze is a flag like the file's own, so it answers to `frozen` and
+            // `frozen_text` the same way (#1627).
+            let frozen_flag = ls.is_some_and(|ls| ls.frozen)
+                || self
+                    .state_frozen
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(layer));
             let frozen = if text { self.frozen_text } else { self.frozen };
-            if ls.frozen && frozen == LayerStateRule::Exclude {
+            if frozen_flag && frozen == LayerStateRule::Exclude {
                 return Some(PolicyReason::LayerFrozen);
             }
-            if text && !ls.plottable && self.no_plot_text == LayerStateRule::Exclude {
+            if text
+                && ls.is_some_and(|ls| !ls.plottable)
+                && self.no_plot_text == LayerStateRule::Exclude
+            {
                 return Some(PolicyReason::LayerNoPlotText);
             }
         }
-        if self.freeze_mode == ViewportFreezeMode::Apply && self.viewport_freezes(layer, state) {
+        if forced.is_none()
+            && self.freeze_mode == ViewportFreezeMode::Apply
+            && self.viewport_freezes(layer, state)
+        {
             return Some(PolicyReason::ViewportFrozen);
         }
         if !state.visible {

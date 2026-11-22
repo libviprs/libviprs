@@ -24,6 +24,12 @@ NAME=${NAME:-n41}
 IN_NAME=${IN_NAME:-n41in}
 NAS_SH=${NAS_SH:-$REPO/../tools/nas.sh}
 NAS=${NAS:-devshell@192.168.0.100}
+# Where nas.sh keeps scratch trees on that host: /work on MARS, the account's
+# ~/workspace on the UGREEN NAS. The remote shell expands $HOME.
+case $NAS in
+  devshell@*) WORK_DIR=/work/nas-work ;;
+  *)          WORK_DIR='$HOME/workspace/nas-work' ;;
+esac
 UPSTREAM=${UPSTREAM:-$REPO/../review-acadsharp-upstream}
 IMG=rust:1.99.1-bookworm
 REV=$(sed -n 's/^acadrust = { git = [^,]*, rev = "\([0-9a-f]*\)".*/\1/p' "$REPO/Cargo.toml" | head -1)
@@ -48,7 +54,7 @@ cp "$S"/sample_AC10*.dwg "$S"/sample_base/sample_base.dwg "$S"/sample_base/empty
 OUT=$STAGE/out.tsv
 ssh -o BatchMode=yes -o LogLevel=ERROR "$NAS" "docker run --rm --platform linux/amd64 \
   -v ${NAME}-cargo:/cargo -v ${NAME}-target:/target \
-  -v /work/nas-work/$NAME:/work -v /work/nas-work/$IN_NAME:/in:ro -w /work \
+  -v $WORK_DIR/$NAME:/work -v $WORK_DIR/$IN_NAME:/in:ro -w /work \
   -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/target -e CARGO_TERM_COLOR=never \
   $IMG bash -c $(printf '%q' '
 set -u
@@ -73,7 +79,7 @@ for f in tests/fixtures/pvec/provider/vc_layers.dwg tests/fixtures/pvec/provider
 {
   echo "# acadrust $REV"
   echo "# libviprs $LIBREV (AcadrustProvider over acadrust, release build, example dwg_gate0)"
-  echo "# host devshell@192.168.0.100 (MARS), native x86_64, $IMG, one process per file"
+  echo "# host $NAS, native x86_64, $IMG, one process per file"
   echo "# corpus ACadSharp samples at d7dc111023477d8a9fffc2153139459c95b4f345 (MIT); tier A AutoCAD-authored, B and S ACadSharp-writer"
   cat "$OUT"
 } > "$HERE/results-x64.tsv"

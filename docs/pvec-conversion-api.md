@@ -14,8 +14,26 @@ assert_eq!(out.report.totals.encountered, out.fidelity.encountered());
 ## Builder
 
 `view_profile`, `limits`, `unit`, `leaves` (spatial directory and Tier 0), `cancel`, `observer`, `queue_capacity`, `calibration` (a `Calibration`, written into the artifact's calibration block),
-`profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
+`plot_settings`, `profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
 writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the trait carries no unit, so `unit` is required there.
+
+## Plot settings
+
+`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`.
+
+| field | effect |
+|---|---|
+| `area` | `PlotArea::Layout` (default) frames the paper from its margins and origin. `PlotArea::Extents` places the paper at the lower left of the extents: the sheet's kept geometry plus the rectangles of its drawn viewports. |
+| `paper_mm` | Paper size in millimetres, width then height, before the layout's rotation. It replaces the layout's paper and clears the layout's margins. A size that is zero, negative or not finite is refused as `paper-size-zero` and the frame is the extents. |
+| `orientation` | `Orientation::Portrait` or `Landscape`: turns the paper, after the layout's rotation, to the shape asked for. `None` is the layout's own. |
+| `scale` | A `PlotScale { paper, paper_unit, drawing }` in place of the layout's plot scale: `paper` paper units of `paper_unit` to `drawing` drawing units (the conversion's own unit), as the dialog's custom row and its presets give it. `1 inch = 50 units` is `{ 1, Inches, 50 }` on a sheet of any unit. It is the calibration record, with `paper_unit` as its paper unit. |
+| `offset_mm` | The plot offset, in place of the layout's own plot origin (the dialog shows one value). `None` is the layout's own. |
+| `center` | Centres the extents on the printable area (the paper less its margins); the offset is then ignored. Plot area Extents only: under Layout it is ignored with `plot-centre-not-applicable`. |
+| `fit_to_paper` | Scales what the plot covers into the printable area, the tighter side binding. Under Extents that is the extents. Under Layout it is the layout's own printable area, which only changes anything with a paper override (otherwise `plot-fit-no-change`). The frame is the window of the drawing the paper then shows, so the report's box is not the paper: read the paper size from the report's plot fields. The calibration stays the plot scale, and the fit ratio is the note `plot-fit-ratio 1:N`. |
+| `print_lineweights` | Lineweights print. `Some(false)` drops widths. `None` is the layout's own. |
+| `paperspace_last` | Paper space draws after what the viewports show. `None` is the layout's own. |
+
+Rotation 180 and the plot Window area are reported, not applied. The report's `sheet.notes` carry `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-centre-not-applicable`, `plot-paper-overridden`, `plot-orientation`, `plot-scale-overridden`, `plot-lineweights-overridden`, `plot-fit-to-paper`, `plot-fit-ratio 1:N`, `plot-fit-no-change` and `plot-fit-skipped`.
 
 ## Profiles and the capability gate
 
@@ -47,6 +65,35 @@ cancel token is polled once per batch of 256 entities and during the write. A ca
 
 The artifact (with its calibration block when there is a calibration, `docs/pvec-georeference.md`) and `<dest>.report.json`
 (`docs/pvec-conversion-report.md`), published together or not at all. No georeference sidecar is written since #1554. Diagnostics have stable codes (`docs/pvec-diagnostics.md`).
+
+## Listing a drawing before converting it
+
+`pvec_convert::cad_manifest::<P>(source)` (#1626) opens the drawing once and returns a `CadManifest` (`camelCase` serde, `schema` 1). It converts and
+writes nothing, so an import wizard can show the drawing first and ask second.
+
+```rust
+let manifest = cad_manifest::<AcadrustProvider>(CadSource::Path(&dwg))?;
+let choices: CadChoices = serde_json::from_str(r#"{"schema":1,"mode":"layouts","layerState":"Plot"}"#)?;
+let layers = resolve_visibility(&manifest, &choices);   // one ResolvedLayer per manifest layer
+```
+
+The manifest has `layers` (every flag, the layer's colour, linetype, lineweight, transparency, plot style and description, and counts per
+layer), `layouts` in tab order with the skipped ones included (`ManifestPaper`, `ManifestPlot`, the layout's handle, and one `ManifestViewport`
+per viewport with its frozen layers and whether the print draws, drops or refuses it), `layer_states` (`ManifestLayerState`, with the layers
+a state names that the drawing no longer has under `missingLayers`/`missingLayerHandles`, and the ones it does not mention as unlisted) and
+`warnings` (`XREF_LAYERS` is the only code). A layer is counted by the entity's own layer, not the effective one inside an INSERT.
+
+`CadChoices` holds only the differences from the file: `mode` (`model` or `layouts`), `layer_state`, `turn_off_layers_not_in_state`, `text`,
+`layers` (a `LayerOverride` per layer name, ASCII case-insensitive), and `unit`. It refuses unknown fields; the manifest does not.
+`resolve_visibility` is the one place the truth table is applied: the file's flags, then the chosen state under its mask, then the overrides,
+with Defpoints and "turn off layers not in the state" handled there. It needs `DwgProvider::layer_states()` and `layout_handle()`, which
+default to "cannot report" (an empty list and `None`), so a provider that does not read them gets an empty `layer_states`.
+
+`apply_choices(profile, &manifest, &choices)` (#1627) is how those choices reach a conversion: it returns the `ViewProfile` with the text
+switches from `choices.text`, the layer overrides (`LayerVisibility::overrides`) and the per-viewport overrides applied, and the chosen
+layer state folded in where it changes the answer. A user's entry for a layer wins over the state's, and a state's `visible` never thaws a viewport.
+A layer a state only freezes goes in `state_frozen`, a frozen flag like the file's own, so it answers to `frozen` and `frozen_text` and its notes
+follow `frozenLayers`. An entity a layer override hides is counted as `layers.overrides` (`Exclusion::LayerOverridden`, code `LAYER_HIDDEN`).
 
 ## Every sheet of a drawing
 

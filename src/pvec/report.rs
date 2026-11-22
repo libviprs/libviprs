@@ -146,6 +146,13 @@ pub struct XrefSummary {
     pub unresolved: Vec<UnresolvedXrefRow>,
     /// Names of the xrefs that were resolved, sorted.
     pub resolved: Vec<String>,
+    /// Names the caller supplied a drawing for that no xref block names, in the order given.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unattached: Vec<String>,
+    /// Notes on how the xrefs were drawn, by id: `xref-units-differ` when a supplied drawing's
+    /// units are not its host's (the INSERT's own scale is what maps one to the other).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 impl XrefSummary {
@@ -169,6 +176,8 @@ impl XrefSummary {
                 })
                 .collect(),
             resolved,
+            unattached: Vec::new(),
+            notes: Vec::new(),
         }
     }
 }
@@ -264,9 +273,17 @@ pub struct ComponentsSummary {
     pub colours_ignored: u64,
     /// What became of each text and fill entity when annotations were asked for (#1609), keyed
     /// `CLASS.outcome`: `TEXT.mapped`, `HATCH.unmapped`. Counts source entities, not curves: a
-    /// hatch of three boundary loops is one `HATCH.mapped`. Empty when they were not asked for.
+    /// hatch of three boundary loops is one `HATCH.mapped`. A class whose choice (`texts`, `fills`)
+    /// was off is not counted. Empty when neither was asked for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub annotations: BTreeMap<String, u64>,
+    /// Whether texts were carried as asked (#1624): `texts(true)` or `annotations(true)`, with the
+    /// line style stream selected. Absent when off.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub texts: bool,
+    /// Whether fills (HATCH and SOLID) were carried as asked (#1624), on the same terms as `texts`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub fills: bool,
 }
 
 /// What the room and corridor step of a conversion found (#1526). Optional and ignorable, like

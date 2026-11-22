@@ -267,6 +267,7 @@ fn n2_6_1055_every_row_of_the_decision_table_has_a_knob_and_every_knob_a_test_ab
             "layer-no-plot",
             "layer-frozen-text",
             "layer-no-plot-text",
+            "layer-overrides",
             "layer-frozen-in-viewport",
             "insert-layer-override",
             "entity-invisible",

@@ -64,6 +64,7 @@ use std::fmt;
 use thiserror::Error;
 
 use crate::cad::{CadSource, ItemHandle};
+use crate::pvec::units::SourceUnit;
 
 /// A source-space point, `[x, y, z]`, as the drawing stores it.
 pub type Point3 = [f64; 3];
@@ -779,6 +780,21 @@ pub enum Annotation {
         content: String,
         /// The extrusion normal.
         normal: Point3,
+        /// The width factor, 1.0 when the style leaves it alone.
+        width_factor: f64,
+        /// Where `position` sits on the printed block of text: the fraction of the block's width
+        /// from its left edge (0, a half or 1) and the vertical reference. A TEXT is a block of
+        /// one line, and an MTEXT's block is its rectangle, as wide as its reference width or its
+        /// widest line, whichever is more.
+        anchor: (f64, TextAnchorV),
+        /// For a TEXT that is aligned or fitted between two points, the distance between them and
+        /// whether the height scales with it (aligned) or stays (fit); `position` is then the start
+        /// of the run.
+        fit: Option<(f64, bool)>,
+        /// The MTEXT reference rectangle's width, 0.0 when the drawing leaves it open and for TEXT.
+        block_width: f64,
+        /// The MTEXT line spacing factor, 1.0 for TEXT.
+        line_spacing: f64,
     },
     /// A filled region: `HATCH` or `SOLID`.
     Fill {
@@ -796,6 +812,20 @@ pub enum Annotation {
         /// do not join). A fill with any is not a region the stream can describe whole.
         unread_loops: u32,
     },
+}
+
+/// Which edge of a block of text [`Annotation::Text::position`] sits on, vertically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum TextAnchorV {
+    /// The top of the first line's capitals.
+    Top,
+    /// Halfway between the top of the first line's capitals and the last line's descenders.
+    Middle,
+    /// The bottom of the last line's descenders.
+    Bottom,
+    /// The first line's baseline.
+    Baseline,
 }
 
 /// A colour as the drawing states it, after the BYLAYER rule has been applied.
@@ -1255,6 +1285,26 @@ pub trait DwgProvider {
     /// [`ProviderError::CannotReport`] with [`Facet::LayerState`] when the caps say so.
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError>;
 
+    /// The drawing's own identity as its header stores it, `(fingerprint GUID, version GUID)`:
+    /// the first is set once and kept across saves, the second changes on every save. `None` for
+    /// one the header does not carry (#1635).
+    ///
+    /// The default says the drawing carries neither.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError`] when the header cannot be read.
+    fn drawing_guids(&self) -> Result<(Option<String>, Option<String>), ProviderError> {
+        Ok((None, None))
+    }
+
+    /// The plot configuration (the PC3) the layout's page setup names, `None` when it names none
+    /// (#1635). The default says it names none.
+    fn layout_plot_config(&self, layout: LayoutId) -> Option<String> {
+        let _ = layout;
+        None
+    }
+
     /// The named layer states the drawing stores, in the drawing's order (#1626). Empty when it
     /// stores none.
     ///
@@ -1293,6 +1343,12 @@ pub trait DwgProvider {
     /// [`ProviderError::CannotReport`] with [`Facet::ViewportEntities`] when the caps say so.
     fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
         Err(ProviderError::CannotReport(Facet::ViewportEntities))
+    }
+
+    /// The unit the drawing declares for its coordinates, when it declares one. The default says
+    /// the provider does not know; an xref's unit is compared with its host's through this (#1631).
+    fn declared_unit(&self) -> Option<SourceUnit> {
+        None
     }
 
     /// The drawing's external-reference block records, in the block table's order.

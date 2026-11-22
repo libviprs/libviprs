@@ -29,7 +29,8 @@ use libviprs::pvec::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope,
     EntityStyle, Exclusion, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind,
     LayoutPlot, LayoutState, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry,
-    SourceFact, SourceTransform, SourceUnit, ViewProfile, ViewportClip, ViewportEntity,
+    SourceFact, SourceTransform, SourceUnit, TextAnchorV, ViewProfile, ViewportClip,
+    ViewportEntity,
 };
 use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput};
 use pvec_facade::components::TextStream;
@@ -226,6 +227,11 @@ fn drawn(handle: u64) -> Option<Annotation> {
         rotation: 0.0,
         content: s.into(),
         normal: [0.0, 0.0, 1.0],
+        width_factor: 1.0,
+        anchor: (0.0, TextAnchorV::Baseline),
+        fit: None,
+        block_width: 0.0,
+        line_spacing: 1.0,
     })
 }
 
