@@ -1251,6 +1251,26 @@ pub trait DwgProvider {
     /// [`ProviderError::CannotReport`] with [`Facet::LayerState`] when the caps say so.
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError>;
 
+    /// The drawing's own identity as its header stores it, `(fingerprint GUID, version GUID)`:
+    /// the first is set once and kept across saves, the second changes on every save. `None` for
+    /// one the header does not carry (#1635).
+    ///
+    /// The default says the drawing carries neither.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError`] when the header cannot be read.
+    fn drawing_guids(&self) -> Result<(Option<String>, Option<String>), ProviderError> {
+        Ok((None, None))
+    }
+
+    /// The plot configuration (the PC3) the layout's page setup names, `None` when it names none
+    /// (#1635). The default says it names none.
+    fn layout_plot_config(&self, layout: LayoutId) -> Option<String> {
+        let _ = layout;
+        None
+    }
+
     /// The named layer states the drawing stores, in the drawing's order (#1626). Empty when it
     /// stores none.
     ///

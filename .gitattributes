@@ -1,0 +1,7 @@
+# These are binary containers. A PC3 has a CRLF first line and LF everywhere
+# else, a CTB is a header plus a zlib stream; text normalisation breaks the
+# byte-for-byte round trip on a checkout that converts line endings.
+*.pc3 binary
+*.ctb binary
+*.stb binary
+*.dwg binary
