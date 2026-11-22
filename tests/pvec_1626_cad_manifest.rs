@@ -2,7 +2,7 @@
 //! `cad_manifest` lists a drawing without converting it, `resolve_visibility` applies the truth
 //! table of spec section 1 (tests 9.1 to 9.6). Needs `--features pvec-convert`.
 //!
-//! The big-file test reads the drawing named by `IASBUILT_DWG_LAYOUTS_FIXTURE` and says so when
+//! The big-file test reads the drawing named by `LIBVIPRS_DWG_LAYOUTS_FIXTURE` and says so when
 //! the variable is unset.
 
 #![cfg(feature = "pvec-convert")]
@@ -11,7 +11,13 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use libviprs::cad::CadSource;
+use libviprs::cad::ItemHandle;
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
+use libviprs::pvec::{
+    Availability, DwgProvider, EntityCursor, EntityScope, Facet, FacetSource, LayerState,
+    LayerStateMask, LayoutId, LayoutKind, LayoutState, NamedLayerState, ProviderCaps,
+    ProviderError, RawEntity,
+};
 use libviprs::pvec_convert::{
     CadChoices, CadManifest, CadMode, LayerOverride, ManifestLayer, ManifestLayerState,
     ManifestLayout, ManifestMask, ManifestViewport, PlotsVisibility, StateLayer, Visibility, VpRef,
@@ -301,8 +307,8 @@ fn cad_manifest_lists_a_dxf_without_converting() {
 // 9.6 cad-manifest-lists-without-converting
 #[test]
 fn cad_manifest_lists_without_converting() {
-    let Some(path) = std::env::var_os("IASBUILT_DWG_LAYOUTS_FIXTURE") else {
-        eprintln!("skipped: IASBUILT_DWG_LAYOUTS_FIXTURE is not set (the 66-layout drawing)");
+    let Some(path) = std::env::var_os("LIBVIPRS_DWG_LAYOUTS_FIXTURE") else {
+        eprintln!("skipped: LIBVIPRS_DWG_LAYOUTS_FIXTURE is not set (the 66-layout drawing)");
         return;
     };
     let m = cad_manifest::<AcadrustProvider>(CadSource::Path(Path::new(&path)))
@@ -405,4 +411,107 @@ fn cad_import_plot_fixture_resolves_a_viewport_freeze() {
     assert_eq!(of("A-VPFROZEN").plots_count.frozen_in, 1);
     assert_eq!(of("A-PLOTTED").plots, PlotsVisibility::Visible);
     assert_eq!(of("A-NOPLOT").plots, PlotsVisibility::Hidden);
+}
+
+// ---- a mock drawing whose one layer state names layers the drawing no longer has ----
+
+struct Mock {
+    caps: ProviderCaps,
+}
+
+struct Empty;
+
+impl EntityCursor for Empty {
+    fn next_entity(&mut self) -> Result<Option<RawEntity>, ProviderError> {
+        Ok(None)
+    }
+}
+
+fn state_layer(name: &str, handle: u64) -> LayerState {
+    LayerState {
+        name: name.into(),
+        handle: Some(ItemHandle::new(handle)),
+        ..LayerState::default()
+    }
+}
+
+impl DwgProvider for Mock {
+    fn probe(_: CadSource<'_>) -> Result<bool, ProviderError> {
+        Ok(true)
+    }
+
+    fn open(_: CadSource<'_>) -> Result<Self, ProviderError> {
+        let caps = Facet::ALL.iter().fold(ProviderCaps::new(), |c, f| {
+            c.with(*f, Availability::Reported, FacetSource::DecoderAdapter)
+        });
+        Ok(Mock { caps })
+    }
+
+    fn name(&self) -> &'static str {
+        "mock"
+    }
+
+    fn caps(&self) -> &ProviderCaps {
+        &self.caps
+    }
+
+    fn layouts(&self) -> Result<Vec<LayoutState>, ProviderError> {
+        Ok(vec![LayoutState {
+            id: LayoutId(0),
+            name: "Model".into(),
+            kind: LayoutKind::Model,
+            block_name: "*Model_Space".into(),
+        }])
+    }
+
+    fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
+        Ok(vec![state_layer("0", 0x10), state_layer("A-WALL", 0x11)])
+    }
+
+    fn layer_states(&self) -> Result<Vec<NamedLayerState>, ProviderError> {
+        Ok(vec![NamedLayerState {
+            name: "Floor Plan".into(),
+            description: String::new(),
+            mask: LayerStateMask::default(),
+            hidden: false,
+            // A-WALL is in the drawing; OLD-DEMO is named but gone; the two with no name are layers
+            // deleted from the table, which the reader reports with an empty name and their handle.
+            layers: vec![
+                state_layer("A-WALL", 0x11),
+                state_layer("OLD-DEMO", 0x20),
+                state_layer("", 0x99),
+                state_layer("", 0x9A),
+            ],
+        }])
+    }
+
+    fn entities<'a>(
+        &'a self,
+        _: &EntityScope,
+    ) -> Result<Box<dyn EntityCursor + 'a>, ProviderError> {
+        Ok(Box::new(Empty))
+    }
+}
+
+// Panel call C3: missingLayers lists names only, and a layer with no name is a handle in its own list.
+#[test]
+fn a_state_naming_a_deleted_layer_lists_its_handle_not_a_blank() {
+    let m = cad_manifest::<Mock>(CadSource::Bytes(b"mock")).expect("the mock lists");
+    let s = &m.layer_states[0];
+    assert_eq!(
+        s.missing_layers,
+        vec!["OLD-DEMO".to_string()],
+        "no blank names"
+    );
+    let json = serde_json::to_value(s).expect("serialises");
+    assert_eq!(json["missingLayerHandles"], serde_json::json!(["99", "9A"]));
+    assert!(
+        s.layers.iter().all(|l| !l.name.is_empty()),
+        "a nameless row matches nothing"
+    );
+    assert!(
+        s.unlisted_layers == vec!["0".to_string()],
+        "unlisted: {:?}",
+        s.unlisted_layers
+    );
 }

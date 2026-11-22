@@ -65,6 +65,7 @@ mod layouts;
 mod manifest;
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+pub use crate::pvec::LayerOverride;
 pub use crate::pvec::writer::recalibrate;
 pub use calibration::{
     Calibration, CalibrationError, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat,
@@ -81,10 +82,10 @@ pub use layouts::{
     paper_sheets,
 };
 pub use manifest::{
-    CadChoices, CadManifest, CadMode, CadText, LayerCounts, LayerOverride, ManifestColour,
-    ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace,
-    ManifestPaper, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility,
-    ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, cad_manifest, resolve_visibility,
+    CadChoices, CadManifest, CadMode, CadText, LayerCounts, ManifestColour, ManifestLayer,
+    ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace, ManifestPaper,
+    ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility, ResolvedLayer,
+    StateLayer, TextSwitch, Visibility, VpRef, cad_manifest, resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
