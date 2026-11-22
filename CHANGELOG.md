@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A DWG conversion writes the stroke paint stream** (issue #1638). Each stroke gets a colour instead of the converter just counting the colours it ignored. `LeafPaint` carries it through the view pass, BYLAYER and BYBLOCK resolve through nested inserts on the effective layer (the layer colour is `LayerState::color`), and true colour is written as is. A colourless drawing stays byte-identical, and `colours_ignored` counts only colours that could not be resolved while the paint stream is on (with it off it counts every explicit colour index, as before).
+
 - **A hidden entity is not drawn, and the view pass says so** (issue #1633). The entity invisible flag (DXF group 60) is now a view-profile knob, `entities.invisible`, `exclude` by default and in the print profile (row `entity-invisible`). An entity with the flag set is left out, a hidden INSERT takes its whole block, and each one is reported as `Exclusion::EntityInvisible` under that field (`ENTITY_INVISIBLE`). `ignore` draws them. A provider that cannot report the flag draws everything, as before. The layer stream also names the effective layer of a leaf now (a layer 0 leaf inside an INSERT is on the INSERT's layer), not the leaf's own.
 
 - **List a drawing's printable paper layouts without converting them** (issue #1622). `pvec_convert::paper_sheets::<P>(source)` gives every paper layout in tab order as a `PaperSheet { layout, tab_order, skip }`, where `skip` is `Empty` or `EmptyAfterView` by the rule `PvecLayoutSet` skips layouts by (now one function both use), and writes nothing. iasbuilt/server uses it to make one plan per print layout when a DWG is uploaded, before any sheet is converted.
