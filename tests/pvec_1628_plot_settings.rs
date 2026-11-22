@@ -533,9 +533,16 @@ fn issue_1628_fit_to_paper_scales_the_extents_into_the_printable_area() {
         Some(["0".into(), "0".into(), "200".into(), "100".into()])
     );
     assert_eq!(s.calibration, "plot-scale");
-    assert_eq!(s.scale.as_deref(), Some("1:2"));
+    // Fit changes how big the print is, not how big the drawing is: the layout's own scale is
+    // still the calibration, and the fit ratio is a note.
+    assert_eq!(s.scale.as_deref(), Some("1:1"));
     assert!(
         s.notes.contains(&"plot-fit-to-paper".to_string()),
+        "{:?}",
+        s.notes
+    );
+    assert!(
+        s.notes.contains(&"plot-fit-ratio 1:2".to_string()),
         "{:?}",
         s.notes
     );
