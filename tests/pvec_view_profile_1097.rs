@@ -247,20 +247,20 @@ fn n3_3_1097_default_profile_prints_every_knob_with_its_n1_4_row() {
 #[cfg_attr(miri, ignore)]
 fn n3_3_1097_every_knob_names_a_row_of_the_n1_4_decision_table() {
     // N1.4's table is in the spike; the rows the print profile added (`layer-no-plot`, #1559, and
-    // the two text rows, #1621) are in its ADR.
+    // the two text rows, #1621, and `layer-overrides`, #1627) are in its ADR.
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let doc = std::fs::read_to_string(root.join("docs/spikes/view-context.md")).expect("spike doc")
         + &std::fs::read_to_string(root.join("docs/adr/pvec-print-profile.md")).expect("print ADR");
     let knobs = ViewProfile::default_profile().knobs();
     assert_eq!(
         knobs.len(),
-        11,
+        12,
         "a knob was added or removed: justify it against N1.4 or the print profile ADR"
     );
     let mut fields: Vec<_> = knobs.iter().map(|k| k.field).collect();
     fields.sort_unstable();
     fields.dedup();
-    assert_eq!(fields.len(), 11, "duplicate field path");
+    assert_eq!(fields.len(), 12, "duplicate field path");
     for k in knobs {
         assert!(
             doc.contains(&format!("| `{}` |", k.row)),

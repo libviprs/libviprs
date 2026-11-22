@@ -1398,7 +1398,9 @@ impl<'a> PvecConversion<'a> {
                             .any(|l| l.eq_ignore_ascii_case(layer))
                     };
                     let by_override = |layer: &str| {
-                        window_hidden[k].iter().any(|l| l.eq_ignore_ascii_case(layer))
+                        window_hidden[k]
+                            .iter()
+                            .any(|l| l.eq_ignore_ascii_case(layer))
                     };
                     let mut overridden = false;
                     // The leaf's own effective layer, or that of any INSERT it is reached

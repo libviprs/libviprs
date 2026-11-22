@@ -522,7 +522,11 @@ impl ViewProfile {
         let hidden = |o: &LayerOverride| *o == LayerOverride::Hidden;
         if self.layers.overrides.iter().any(|(_, o)| hidden(o))
             || self.layers.state_overrides.iter().any(|(_, o)| hidden(o))
-            || self.layers.viewport_overrides.iter().any(|(.., o)| hidden(o))
+            || self
+                .layers
+                .viewport_overrides
+                .iter()
+                .any(|(.., o)| hidden(o))
         {
             out.push(Exclusion::LayerOverridden.field());
         }

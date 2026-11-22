@@ -793,6 +793,33 @@ pub fn apply_choices(
         .iter()
         .map(|(n, o)| (n.clone(), *o))
         .collect();
+    if choices.layer_state.is_some() {
+        let mut file = choices.clone();
+        file.layer_state = None;
+        file.turn_off_layers_not_in_state = false;
+        file.layers.clear();
+        let seen = |r: &ResolvedLayer| match choices.mode {
+            CadMode::Model => r.model == Visibility::Visible,
+            CadMode::Layouts => r.plots != PlotsVisibility::Hidden,
+        };
+        let mut with_state = file.clone();
+        with_state.layer_state = choices.layer_state.clone();
+        with_state.turn_off_layers_not_in_state = choices.turn_off_layers_not_in_state;
+        profile.layers.state_overrides = resolve_visibility(manifest, &with_state)
+            .iter()
+            .zip(resolve_visibility(manifest, &file))
+            .filter(|(s, f)| seen(s) != seen(f))
+            .filter(|(s, _)| !choices.layers.keys().any(|k| same(k, &s.name)))
+            .map(|(s, _)| {
+                let o = if seen(s) {
+                    LayerOverride::Visible
+                } else {
+                    LayerOverride::Hidden
+                };
+                (s.name.clone(), o)
+            })
+            .collect();
+    }
     profile.layers.viewport_overrides = choices
         .viewports
         .iter()

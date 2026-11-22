@@ -782,6 +782,12 @@ annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_a_visibl
 annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_a_visible_override_draws_a_viewport_frozen_layer_through_every_viewport
 annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_an_override_on_an_inserts_layer_carries_its_expansion
 annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_override_names_match_ascii_case_insensitively
+annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_a_hidden_override_is_reported_under_layers_overrides
+annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_a_per_viewport_hidden_reports_the_same_reason
+annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_a_state_that_freezes_a_layer_hides_it_in_model_mode
+annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_a_state_visible_never_thaws_a_viewport
+annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_a_viewport_hidden_beats_a_global_visible_for_that_viewport_only
+annotated   fs-detected  tests/pvec_1627_layer_overrides.rs::issue_1627_a_viewport_visible_beats_a_global_hidden_for_that_viewport_only
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
