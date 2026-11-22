@@ -240,6 +240,9 @@ pub struct PvecConversion<'a> {
     annotations: bool,
     element_rules: Option<ElementRules>,
     plot_settings: PlotSettings,
+    /// A paper sheet with nothing to stroke is a success with `written == 0` and no artifact,
+    /// for a caller (the PDF plot, #1636) that still wants the empty page.
+    empty_sheet_ok: bool,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -335,6 +338,7 @@ impl<'a> PvecConversion<'a> {
             annotations: false,
             element_rules: None,
             plot_settings: PlotSettings::default(),
+            empty_sheet_ok: false,
         }
     }
 
@@ -2432,8 +2436,12 @@ impl<'a> PvecConversion<'a> {
             StreamedPublishError::Publish(PublishError::Cancelled) => PvecConvertError::Cancelled,
             StreamedPublishError::Publish(other) => PvecConvertError::Publish(other),
         };
+        let blank_paper = self.empty_sheet_ok && area.is_some();
         let published = match &spill {
             None => match open(geometries, None, &mut on_chunk) {
+                Err(PvecConvertError::Write(WriteError::NoGeometry)) if blank_paper => {
+                    seal(None, &[], None, None).map(|(report, fidelity)| (report, fidelity, 0))
+                }
                 Err(PvecConvertError::Write(WriteError::AllRefused(refused))) => {
                     seal(None, &refused, None, None).and_then(|(report, fidelity)| {
                         Err(PvecConvertError::NothingStorable {
@@ -2503,7 +2511,9 @@ impl<'a> PvecConversion<'a> {
             .map_err(publish_error),
         };
         let (report, fidelity, written) = published?;
-        tell(EngineEvent::ConversionPublished);
+        if written > 0 || !blank_paper {
+            tell(EngineEvent::ConversionPublished);
+        }
         Ok(PvecConversionOutput {
             artifact: dest.to_path_buf(),
             report,

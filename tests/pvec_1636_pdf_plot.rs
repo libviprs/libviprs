@@ -12,7 +12,6 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use acadrust::plot_style::PlotStyleTable;
 use libviprs::cad::{CadSource, ItemHandle};
 use libviprs::pvec::{
     Availability, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet, FacetSource,
@@ -336,6 +335,7 @@ fn issue_1636_no_text_is_written() {
 #[cfg(feature = "pdfium")]
 mod rendered {
     use super::*;
+    use acadrust::plot_style::PlotStyleTable;
     use libviprs::pvec_convert::PlotArea;
 
     const DPI: u32 = 144;
