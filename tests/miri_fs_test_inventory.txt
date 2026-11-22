@@ -821,6 +821,17 @@ annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_orientatio
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_plot_lineweights_overrides_what_the_layout_prints
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_the_offset_replaces_the_layouts_own_origin
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_without_plot_settings_nothing_is_applied_and_it_says_so
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_a_window_cuts_what_it_does_not_hold
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_a_window_is_in_the_layouts_paper_units_and_ignores_its_margins_and_origin
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_a_window_that_is_not_a_box_is_refused_not_framed
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_a_window_the_caller_gives_wins_over_the_layouts_plot_type
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_plot_area_window_frames_the_box
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_180_flips_about_the_frame_centre_not_the_origin
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_180_flips_about_the_paper_centre
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_180_turns_a_window_about_the_windows_centre
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_270_swaps_the_sides_and_flips
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_rotation_90_is_reported_and_measured
+annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1632_the_layouts_own_window_is_used_when_its_plot_type_says_window
 annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::an_stb_applies_nothing_and_the_report_says_so
 annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::print_profile_applies_ctb_colour_screening_lineweight_linetype
 annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::the_recorded_properties_do_not_change_what_is_drawn

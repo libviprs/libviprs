@@ -275,6 +275,11 @@ pub struct PvecConversion<'a> {
 ///
 /// It only reaches a paper layout whose plot settings the drawing reports. Without them the frame
 /// is the extents whatever is asked, and the report notes `plot-settings-not-applied`.
+///
+/// The layout's own rotation (DXF `PLOTROTATION`) is always honoured, it is not a choice made here:
+/// 0 is portrait, 1 is landscape (the paper's sides swap), 2 is portrait upside-down (the content
+/// turns 180 degrees about the frame's centre) and 3 is landscape upside-down (both). `orientation`
+/// is applied after it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PlotSettings {
     /// What to plot.
@@ -330,7 +335,7 @@ pub enum Orientation {
 }
 
 /// The part of a layout a plot covers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[non_exhaustive]
 pub enum PlotArea {
     /// The layout's own frame, the paper placed from its margins and origin.
@@ -339,6 +344,10 @@ pub enum PlotArea {
     /// The extents of what the sheet draws: its own kept geometry and the rectangles of its drawn
     /// viewports. The paper is placed from the extents' lower left corner.
     Extents,
+    /// The box `[x0, y0, x1, y1]` in paper-space units (the layout's paper units): the frame is
+    /// that box, and nothing else moves. A layout whose own plot type says window is framed the
+    /// same way when this is not asked for.
+    Window([f64; 4]),
 }
 
 impl<'a> PvecConversion<'a> {
@@ -891,6 +900,8 @@ impl<'a> PvecConversion<'a> {
             let mut drop_widths = false;
             let mut written = None;
             let mut place = None;
+            let mut windowed = false;
+            let mut flip = false;
             match &fact {
                 SourceFact::Absent => summary.frame_reason = Some("plot-settings-absent".into()),
                 SourceFact::Present(p) => {
@@ -976,49 +987,71 @@ impl<'a> PvecConversion<'a> {
                         // No fixture with non-zero margins and origin has measured it, so the
                         // report says `position: unmeasured`.
                         let su = |v: [f64; 2]| to_unit(v[0]).zip(to_unit(v[1]));
+                        // The window is paper-space units already, the unit of the frame.
+                        let window_box = match plot_settings.area {
+                            PlotArea::Window(w) => Some(w),
+                            PlotArea::Layout if p.plot_type == 4 => Some(p.window),
+                            _ => None,
+                        };
                         let converted = su([margins[0], margins[1]])
                             .zip(su([margins[2], margins[3]]))
                             .zip(su([w, h]))
                             .zip(su(own))
                             // The margin and the shift added in millimetres, then converted once.
                             .zip(su([margins[0] + shift[0], margins[1] + shift[1]]));
-                        match converted {
-                            Some((((((l, b), (r, t)), size), own), corner)) => {
-                                let at = Place {
-                                    margin: [l, b, r, t],
-                                    size: [size.0, size.1],
-                                    corner: [corner.0, corner.1],
-                                };
-                                // Drawing units to a paper unit. Under the Layout area a fit
-                                // fits the layout's own printable area to the new paper's.
-                                let mut k = 1.0;
-                                if fit && plot_settings.area == PlotArea::Layout {
-                                    let printable =
-                                        [(at.size[0] - l - r, own.0), (at.size[1] - b - t, own.1)];
-                                    let tight = printable
-                                        .into_iter()
-                                        .filter(|(n, d)| sized(*n) && sized(*d))
-                                        .min_by(|x, y| (x.0 / x.1).total_cmp(&(y.0 / y.1)));
-                                    match tight {
-                                        Some((n, d)) if n != d => {
-                                            k = d / n;
-                                            summary.notes.push("plot-fit-to-paper".into());
-                                            summary.notes.push(format!("plot-fit-ratio 1:{k}"));
-                                        }
-                                        Some(_) => summary.notes.push("plot-fit-no-change".into()),
-                                        None => summary.notes.push("plot-fit-skipped".into()),
-                                    }
-                                }
-                                if plot_settings.center && plot_settings.area == PlotArea::Layout {
-                                    summary.notes.push("plot-centre-not-applicable".into());
-                                }
-                                let (x0, y0) = (-at.corner[0] * k, -at.corner[1] * k);
-                                frame_box =
-                                    Some([x0, y0, x0 + at.size[0] * k, y0 + at.size[1] * k]);
+                        if let Some(w) = window_box {
+                            if w.iter().all(|v| v.is_finite()) && w[2] > w[0] && w[3] > w[1] {
+                                frame_box = Some(w);
                                 plot_unit = sheet_unit;
-                                place = Some(at);
+                                windowed = true;
+                            } else {
+                                summary.frame_reason = Some("plot-window-empty".into());
                             }
-                            None => summary.frame_reason = Some("unit-not-declarable".into()),
+                        } else {
+                            match converted {
+                                Some((((((l, b), (r, t)), size), own), corner)) => {
+                                    let at = Place {
+                                        margin: [l, b, r, t],
+                                        size: [size.0, size.1],
+                                        corner: [corner.0, corner.1],
+                                    };
+                                    // Drawing units to a paper unit. Under the Layout area a fit
+                                    // fits the layout's own printable area to the new paper's.
+                                    let mut k = 1.0;
+                                    if fit && plot_settings.area == PlotArea::Layout {
+                                        let printable = [
+                                            (at.size[0] - l - r, own.0),
+                                            (at.size[1] - b - t, own.1),
+                                        ];
+                                        let tight = printable
+                                            .into_iter()
+                                            .filter(|(n, d)| sized(*n) && sized(*d))
+                                            .min_by(|x, y| (x.0 / x.1).total_cmp(&(y.0 / y.1)));
+                                        match tight {
+                                            Some((n, d)) if n != d => {
+                                                k = d / n;
+                                                summary.notes.push("plot-fit-to-paper".into());
+                                                summary.notes.push(format!("plot-fit-ratio 1:{k}"));
+                                            }
+                                            Some(_) => {
+                                                summary.notes.push("plot-fit-no-change".into())
+                                            }
+                                            None => summary.notes.push("plot-fit-skipped".into()),
+                                        }
+                                    }
+                                    if plot_settings.center
+                                        && plot_settings.area == PlotArea::Layout
+                                    {
+                                        summary.notes.push("plot-centre-not-applicable".into());
+                                    }
+                                    let (x0, y0) = (-at.corner[0] * k, -at.corner[1] * k);
+                                    frame_box =
+                                        Some([x0, y0, x0 + at.size[0] * k, y0 + at.size[1] * k]);
+                                    plot_unit = sheet_unit;
+                                    place = Some(at);
+                                }
+                                None => summary.frame_reason = Some("unit-not-declarable".into()),
+                            }
                         }
                     }
                     if let (Some(b), Some(sheet_unit)) = (frame_box, plot_unit) {
@@ -1043,12 +1076,14 @@ impl<'a> PvecConversion<'a> {
                         {
                             summary.notes.push("plot-offset".into());
                         }
-                        if p.plot_type != 5 {
+                        if windowed {
+                            summary.notes.push("plot-area-window".into());
+                        } else if p.plot_type != 5 {
                             summary.notes.push("plot-type-not-applied".into());
                         }
-                        if p.rotation != 0 {
-                            summary.notes.push("rotation-not-applied".into());
-                        }
+                        // Rotation 1 is the swap of the sides already made; 2 and 3 turn the
+                        // sheet's content about the frame's centre once the frame is known.
+                        flip = matches!(p.rotation, 2 | 3);
                         let [n, d] = plot_settings
                             .scale
                             .map_or([p.scale_numerator, p.scale_denominator], |s| {
@@ -1084,6 +1119,7 @@ impl<'a> PvecConversion<'a> {
                 calibration: written,
                 drop_widths,
                 place,
+                flip,
             });
         }
         let source_name = match *source {
@@ -1574,6 +1610,41 @@ impl<'a> PvecConversion<'a> {
             }
         }
         let frame = sheet.as_ref().and_then(|s| s.frame);
+        // Plotting upside-down turns everything 180 degrees about the frame's centre, which
+        // leaves the frame where it is. The windows turn with it, so what is drawn through them
+        // and the rectangle it is cut to stay together.
+        let flip_map = sheet
+            .as_ref()
+            .filter(|s| s.flip)
+            .and_then(|s| s.frame)
+            .map(|b| [-1.0, 0.0, 0.0, -1.0, b[0] + b[2], b[1] + b[3]]);
+        if let Some(m) = flip_map {
+            for (_, w) in &mut windows {
+                if let Window::Drawn { map, rect, ring } = w {
+                    let [p, q, r, s, u, v] = m;
+                    let [a, b, c, d, tx, ty] = *map;
+                    *map = [
+                        p * a + q * c,
+                        p * b + q * d,
+                        r * a + s * c,
+                        r * b + s * d,
+                        p * tx + q * ty + u,
+                        r * tx + s * ty + v,
+                    ];
+                    *rect = [
+                        m[4] - rect[2],
+                        m[5] - rect[3],
+                        m[4] - rect[0],
+                        m[5] - rect[1],
+                    ];
+                    if let Some(points) = ring {
+                        for pt in points.iter_mut() {
+                            *pt = [m[4] - pt[0], m[5] - pt[1]];
+                        }
+                    }
+                }
+            }
+        }
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
         // The plot style table a CTB gives, applied per ACI (#1630); an STB applies nothing.
         let table = plot_style.as_ref().filter(|t| !t.is_stb);
@@ -1600,6 +1671,11 @@ impl<'a> PvecConversion<'a> {
                 let item: &Item<'_> = match (window.map(|k| &windows[k].1), &items[at]) {
                     (Some(Window::Drawn { map, .. }), Item::Leaf(f)) => {
                         lifted_leaf = f.through(*map);
+                        lifted = Item::Leaf(&lifted_leaf);
+                        &lifted
+                    }
+                    (None, Item::Leaf(f)) if flip_map.is_some() => {
+                        lifted_leaf = f.through(flip_map.expect("checked in the guard"));
                         lifted = Item::Leaf(&lifted_leaf);
                         &lifted
                     }
@@ -3003,6 +3079,9 @@ struct Sheet {
     drop_widths: bool,
     /// What the frame is placed from, for the extents pass (#1628). `None` when it is the extents.
     place: Option<Place>,
+    /// The layout plots upside-down (rotation 2 or 3): the content turns 180 degrees about the
+    /// frame's centre (#1632).
+    flip: bool,
 }
 
 /// A paper sheet's placement in the sheet unit: what the frame is worked out from once the
@@ -3388,7 +3467,8 @@ fn classify_leaf(
 }
 
 /// Pushes `record` through the map flattening composed for its leaf, and checks it against the
-/// gate. A leaf a layout owns directly has the identity map, unless it is drawn through a viewport.
+/// gate. A leaf a layout owns directly has the identity map, unless it is drawn through a viewport
+/// or the sheet plots upside-down.
 fn promote_leaf(
     f: &FlatEntity,
     record: Normalized2DGeometry,
@@ -3407,7 +3487,16 @@ fn promote_leaf(
             block_name: "*VIEWPORT".into(),
             insert_handle: v,
         },
-        (None, None) => return gated(record, prov, gate),
+        (None, None) if f.matrix() == [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] => {
+            return gated(record, prov, gate);
+        }
+        // A sheet's own leaf turned about the frame's centre by a plot upside-down (#1632).
+        (None, None) => crate::pvec::InstanceStep {
+            block_name: "*PLOT_ROTATION".into(),
+            insert_handle: prov
+                .handle
+                .unwrap_or_else(|| crate::cad::ItemHandle::new(1)),
+        },
     };
     let composed = match ComposedTransform::identity().push_inner_coefficients(step, f.matrix()) {
         Ok(c) => c,
