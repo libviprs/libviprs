@@ -418,9 +418,10 @@ fn issue_1629_every_print_layout_and_model_space_get_a_thumbnail_of_their_own_sh
         .convert_with::<Mock>();
     let (w, h, px) = decode(&png_of(model));
     assert_eq!(w, 200);
+    // The extents are 100 by 300, with 2 percent of the longer side (6) added on every side.
     assert!(
-        (ratio(w, h) - 3.0).abs() < 0.15,
-        "model space is the shape of its extents, 1 by 3: {w} x {h}"
+        (ratio(w, h) - 312.0 / 112.0).abs() < 0.05,
+        "model space is the shape of its extents plus the margin, 112 by 312: {w} x {h}"
     );
     assert!(dark(&px) > 0);
 }
@@ -451,4 +452,72 @@ fn issue_1629_thumbnail_of_an_artifact_refuses_a_zero_width() {
         .convert_with::<Mock>()
         .expect("the conversion works");
     assert!(thumbnail(&out.artifact, 0).is_err());
+}
+
+/// The model-space drawing's thumbnail, 200 px wide.
+fn model_png(tag: &str) -> Vec<u8> {
+    let key = drawing(tag, diagonal());
+    let dir = scratch(tag);
+    let out = PvecConversion::new(CadSource::Bytes(&key), &dir.join("model.pvec"))
+        .unit(SourceUnit::Millimeters)
+        .thumbnail(200)
+        .convert_with::<Mock>();
+    png_of(out)
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1629_the_png_is_8_bit_rgb_on_an_opaque_white_background() {
+    let (out, _) = sheet_a("t-rgb", vec![text(1)], 200, PlotSettings::default());
+    let png = png_of(out);
+    let img = image::load_from_memory(&png).expect("it decodes");
+    assert_eq!(img.color(), image::ColorType::Rgb8, "no alpha channel");
+    assert!(
+        img.to_rgb8().as_raw().iter().all(|&c| c == 255),
+        "a sheet with nothing to stroke is white all over"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1629_model_space_keeps_a_white_margin_all_round() {
+    let (w, h, px) = decode(&model_png("t-margin"));
+    assert!(dark(&px) > 0);
+    assert_eq!(dark_in(&px, w, (0, 1), (0, h)), 0, "left column is white");
+    assert_eq!(
+        dark_in(&px, w, (w - 1, w), (0, h)),
+        0,
+        "right column is white"
+    );
+    assert_eq!(dark_in(&px, w, (0, w), (0, 1)), 0, "top row is white");
+    assert_eq!(
+        dark_in(&px, w, (0, w), (h - 1, h)),
+        0,
+        "bottom row is white"
+    );
+    // The line runs from the drawing's corner, which sits 2 percent of 300 mm in from the edge.
+    assert!(
+        dark_in(&px, w, (0, 20), (h - 20, h)) > 0,
+        "and it still starts near the bottom left"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1629_a_paper_layout_has_no_margin_so_its_corner_is_the_paper_edge() {
+    let (out, _) = sheet_a(
+        "t-edge",
+        vec![line(1, [0.0, 0.0], [100.0, 50.0])],
+        200,
+        PlotSettings::default(),
+    );
+    let (w, h, px) = decode(&png_of(out));
+    assert!(
+        dark_in(&px, w, (0, 3), (h - 3, h)) > 0,
+        "the paper's bottom left corner is drawn"
+    );
+    assert!(
+        dark_in(&px, w, (w - 3, w), (0, 3)) > 0,
+        "the paper's top right corner is drawn"
+    );
 }
