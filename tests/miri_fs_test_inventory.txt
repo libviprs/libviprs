@@ -741,6 +741,11 @@ annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_text_mtext_a
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_the_report_counts_each_kind
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_without_the_line_style_stream_nothing_is_mapped
 annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1609_without_the_option_nothing_is_carried
+annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1624_annotations_is_shorthand_for_both
+annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1624_fills_alone_carry_hatches_and_solids_and_leave_text_unmapped
+annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1624_neither_choice_carries_nothing
+annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1624_texts_alone_carry_text_and_leave_hatches_and_solids_unmapped
+annotated   fs-detected  tests/pvec_1609_annotations.rs::issue_1624_the_last_call_wins_between_annotations_and_the_split_options
 annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_a_block_in_a_tilted_plane_maps_exactly
 annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_a_block_in_a_vertical_plane_is_drawn_edge_on
 annotated   fs-detected  tests/pvec_1609_edge_on.rs::issue_1609_a_block_turned_back_into_the_plan_by_a_nested_insert_maps_exactly
