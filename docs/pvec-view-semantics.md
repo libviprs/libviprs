@@ -12,6 +12,8 @@ explicitly so a caller can see what they accepted, and a test pins every value
 | `layers.off` | exclude | layer-off |
 | `layers.frozen` | exclude | layer-frozen |
 | `layers.no_plot` | ignore | layer-no-plot |
+| `layers.frozen_text` | ignore | layer-frozen-text |
+| `layers.no_plot_text` | ignore | layer-no-plot-text |
 | `layers.frozen_in_viewport` | ignore-and-report | layer-frozen-in-viewport |
 | `layers.insert_override` | inherit-on-layer-zero | insert-layer-override |
 | `nested_inserts.max_depth` | 64 | nested-insert |
@@ -23,6 +25,11 @@ explicitly so a caller can see what they accepted, and a test pins every value
 - **Layers.** A leaf on an off or a frozen layer is excluded, with the layer and the profile field named in the report.
   A layer frozen only in a viewport is ignored and reported, because v1 has no viewport.
   A no-plot layer (Defpoints) is drawn, as V1-3 says; only the print profile excludes it.
+  Text is the exception both ways (#1621, Rom's call of 2026-11-19): a TEXT, MTEXT or visible attribute on a frozen
+  layer is drawn (`layers.frozen_text = ignore`) in this profile and the print profile alike, and one on a no-plot
+  layer is drawn here (`layers.no_plot_text = ignore`, #1639) and left out of a sheet (`exclude` in the print profile).
+  An off layer still hides text, and an INSERT on a frozen layer still
+  takes its attributes with it. DIMENSION and MULTILEADER are not text here: they follow their layer whole.
 - **Layer zero in a block.** A leaf or INSERT on layer `0` inside an INSERT takes that INSERT's layer.
 - **Nesting.** INSERTs are expanded up to `nested_inserts.max_depth`. An INSERT past it is excluded with the reason
   `nested_inserts.max_depth`, and a block that refers to itself is refused by the flattener's source limits
