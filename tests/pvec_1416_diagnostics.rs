@@ -257,6 +257,14 @@ fn fixtures() -> Vec<(&'static str, Vec<Diagnostic>)> {
         report_of(b"", mock(b"MOCK-insert", &dest)),
     ));
 
+    out.push((
+        "a_supplied_xref_nothing_attaches",
+        report_of(
+            b"",
+            mock(b"MOCK-plain", &dest).xref("NOPE", CadSource::Bytes(b"MOCK-plain")),
+        ),
+    ));
+
     let fail = |e: PvecConvertError| vec![e.diagnostic()];
     let missing = dir.join("missing.dwg");
     out.push((

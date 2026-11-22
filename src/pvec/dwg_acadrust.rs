@@ -1039,6 +1039,10 @@ impl DwgProvider for AcadrustProvider {
         Ok(out)
     }
 
+    fn declared_unit(&self) -> Option<SourceUnit> {
+        Some(self.source_unit()).filter(|u| *u != SourceUnit::Unknown)
+    }
+
     fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
         Ok(self
             .doc

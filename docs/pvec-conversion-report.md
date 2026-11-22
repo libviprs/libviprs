@@ -30,7 +30,9 @@ bytes, whatever order the rows were pushed in and however many workers produced 
 | `excluded_by_layer` | Leaves excluded, by layer name. |
 | `xrefs` | External references (N4.5). |
 | `unresolved` | Xrefs that were left out, in the order they were met. |
-| `resolved` | Names of the xrefs that were resolved, sorted. |
+| `resolved` | Names of the xrefs that were resolved, sorted. A nested xref is spelled `OUTER\|INNER`. |
+| `unattached` | Names a drawing was supplied for that no xref block names (absent when there are none). |
+| `notes` | Note ids on how the xrefs were drawn, `xref-units-differ` when a supplied drawing declares another unit than its host (absent when there are none). |
 | `name` | An unresolved xref's name. |
 | `path` | The path as the drawing attached it. |
 | `resolved_path` | The path under the root, when the attachment was acceptable, else null. |
