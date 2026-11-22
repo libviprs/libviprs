@@ -82,6 +82,7 @@ in both profiles, and `layer-no-plot-text` is `ignore` on screen and `exclude` o
 | `layers.no_plot` | ignore | exclude | `layer-no-plot` |
 | `layers.frozen_text` | ignore | ignore | `layer-frozen-text` |
 | `layers.no_plot_text` | ignore | exclude | `layer-no-plot-text` |
+| `layers.overrides` | none | none | `layer-overrides` |
 | `layers.frozen_in_viewport` | ignore-and-report | apply | `layer-frozen-in-viewport` |
 | `layers.insert_override` | inherit-on-layer-zero | inherit-on-layer-zero | `insert-layer-override` |
 | `nested_inserts.max_depth` | 64 | 64 | `nested-insert` |

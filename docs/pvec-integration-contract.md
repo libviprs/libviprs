@@ -29,6 +29,7 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 | `layers.no_plot` | ignore |
 | `layers.no_plot_text` | ignore |
 | `layers.off` | exclude |
+| `layers.overrides` | none |
 | `nested_inserts.max_depth` | 64 |
 | `space` | model |
 | `viewport_clipping` | unsupported |
