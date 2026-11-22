@@ -949,8 +949,8 @@ impl<'a> PvecConversion<'a> {
                             summary.notes.push("plot-scale-overridden".into());
                         }
                         written = plot_scale_record(
-                            n,
-                            d,
+                            [n, d],
+                            plot_settings.scale.map_or(sheet_unit, |s| s.paper_unit),
                             sheet_unit,
                             unit,
                             single_scale.as_deref(),
@@ -2542,8 +2542,8 @@ struct Classified {
 /// the paper unit being `sheet_unit`. It is never applied to a coordinate. A caller's calibration
 /// wins. The summary says what became of it.
 fn plot_scale_record(
-    n: f64,
-    d: f64,
+    [n, d]: [f64; 2],
+    paper_unit: SourceUnit,
     sheet_unit: SourceUnit,
     unit: Option<SourceUnit>,
     single_scale: Option<&str>,
@@ -2583,7 +2583,16 @@ fn plot_scale_record(
             }
             Some((u32::try_from(a / x).ok()?, u32::try_from(b / x).ok()?))
         });
-        let paper = metres_per_unit(sheet_unit).ok();
+        let paper = metres_per_unit(paper_unit).ok();
+        // The coordinates are in the sheet's unit and the scale's paper side in `paper_unit`, so
+        // a coordinate unit is this many paper units.
+        let along = if paper_unit == sheet_unit {
+            Some(1.0)
+        } else {
+            paper
+                .zip(metres_per_unit(sheet_unit).ok())
+                .map(|(p, s)| s / p)
+        };
         // The scale is paper units to drawing units, so a paper unit is
         // `den / num` drawing units, each the size of the drawing's own unit.
         // Inches of model space on a millimetre sheet are not millimetres
@@ -2591,32 +2600,38 @@ fn plot_scale_record(
         let drawing = unit
             .filter(|u| u.is_physical())
             .and_then(|u| metres_per_unit(u).ok())
-            .or(paper);
-        let claim = reduced.zip(paper).map(|((num, den), paper)| {
-            let raw = n / d;
-            let mut note = if uncertain {
-                format!("plot scale {n}:{d} as stored, written as {num}:{den}")
-            } else {
-                format!("plot scale {num}:{den}")
-            };
-            if let Some(one) = &single_scale {
-                note.push_str(&format!("; viewport {one}"));
-            }
-            ScaleClaim {
-                metres_per_source_unit: drawing.unwrap_or(paper) * f64::from(den) / f64::from(num),
-                provenance: ScaleProvenance::PlanScale {
-                    numerator: num,
-                    denominator: den,
-                    paper_metres_per_unit: paper,
-                },
-                uncertainty: uncertain.then(|| (f64::from(num) / f64::from(den) - raw).abs() / raw),
-                note: if note.len() <= 255 {
-                    note
+            .or(metres_per_unit(sheet_unit).ok());
+        let claim = reduced
+            .zip(paper)
+            .zip(along)
+            .map(|(((num, den), paper), along)| {
+                let raw = n / d;
+                let mut note = if uncertain {
+                    format!("plot scale {n}:{d} as stored, written as {num}:{den}")
                 } else {
-                    format!("plot scale written as {num}:{den}")
-                },
-            }
-        });
+                    format!("plot scale {num}:{den}")
+                };
+                if let Some(one) = &single_scale {
+                    note.push_str(&format!("; viewport {one}"));
+                }
+                ScaleClaim {
+                    metres_per_source_unit: drawing.unwrap_or(paper * along) * f64::from(den)
+                        / f64::from(num)
+                        * along,
+                    provenance: ScaleProvenance::PlanScale {
+                        numerator: num,
+                        denominator: den,
+                        paper_metres_per_unit: paper,
+                    },
+                    uncertainty: uncertain
+                        .then(|| (f64::from(num) / f64::from(den) - raw).abs() / raw),
+                    note: if note.len() <= 255 {
+                        note
+                    } else {
+                        format!("plot scale written as {num}:{den}")
+                    },
+                }
+            });
         match claim.map(|c| Calibration::new(Some(c), None, None)) {
             Some(Ok(c)) => {
                 if uncertain {
