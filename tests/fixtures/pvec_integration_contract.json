@@ -25,6 +25,7 @@
   },
   "view_profile": {
    "knobs": {
+    "entities.invisible": "exclude",
     "layers.frozen": "exclude",
     "layers.frozen_in_viewport": "ignore-and-report",
     "layers.frozen_text": "ignore",
