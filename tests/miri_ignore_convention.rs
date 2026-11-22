@@ -904,7 +904,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1633 adds 4: the two `tests/pvec_1633_effective_layer.rs` cells and the two `tests/pvec_1633_invisible_flag.rs` cells, each of which converts a mock drawing into a temp dir. It said 1211 before this line moved.
 /// #1637 adds 1: `tests/pvec_1637_pdf_layers.rs::pdfium_draws_what_the_rewritten_layers_say`, which writes a PDF into a temp dir and renders it. It said 1215 before this line moved.
 /// #1621 (the text layout) adds 11: the `tests/pvec_1621_dwg_text.rs` cells that convert a drawing and read the artifact back. It said 1216 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1250;
+/// #1631 adds 11: the `tests/pvec_1631_xref.rs` cells that convert a drawing served from memory into a temp dir. It said 1227 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1261;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
