@@ -66,6 +66,35 @@ cancel token is polled once per batch of 256 entities and during the write. A ca
 The artifact (with its calibration block when there is a calibration, `docs/pvec-georeference.md`) and `<dest>.report.json`
 (`docs/pvec-conversion-report.md`), published together or not at all. No georeference sidecar is written since #1554. Diagnostics have stable codes (`docs/pvec-diagnostics.md`).
 
+## Listing a drawing before converting it
+
+`pvec_convert::cad_manifest::<P>(source)` (#1626) opens the drawing once and returns a `CadManifest` (`camelCase` serde, `schema` 1). It converts and
+writes nothing, so an import wizard can show the drawing first and ask second.
+
+```rust
+let manifest = cad_manifest::<AcadrustProvider>(CadSource::Path(&dwg))?;
+let choices: CadChoices = serde_json::from_str(r#"{"schema":1,"mode":"layouts","layerState":"Plot"}"#)?;
+let layers = resolve_visibility(&manifest, &choices);   // one ResolvedLayer per manifest layer
+```
+
+The manifest has `layers` (every flag, the layer's colour, linetype, lineweight, transparency, plot style and description, and counts per
+layer), `layouts` in tab order with the skipped ones included (`ManifestPaper`, `ManifestPlot`, the layout's handle, and one `ManifestViewport`
+per viewport with its frozen layers and whether the print draws, drops or refuses it), `layer_states` (`ManifestLayerState`, with the layers
+a state names that the drawing no longer has under `missingLayers`/`missingLayerHandles`, and the ones it does not mention as unlisted) and
+`warnings` (`XREF_LAYERS` is the only code). A layer is counted by the entity's own layer, not the effective one inside an INSERT.
+
+`CadChoices` holds only the differences from the file: `mode` (`model` or `layouts`), `layer_state`, `turn_off_layers_not_in_state`, `text`,
+`layers` (a `LayerOverride` per layer name, ASCII case-insensitive), and `unit`. It refuses unknown fields; the manifest does not.
+`resolve_visibility` is the one place the truth table is applied: the file's flags, then the chosen state under its mask, then the overrides,
+with Defpoints and "turn off layers not in the state" handled there. It needs `DwgProvider::layer_states()` and `layout_handle()`, which
+default to "cannot report" (an empty list and `None`), so a provider that does not read them gets an empty `layer_states`.
+
+`apply_choices(profile, &manifest, &choices)` (#1627) is how those choices reach a conversion: it returns the `ViewProfile` with the text
+switches from `choices.text`, the layer overrides (`LayerVisibility::overrides`) and the per-viewport overrides applied, and the chosen
+layer state folded in where it changes the answer. A user's entry for a layer wins over the state's, and a state's `visible` never thaws a viewport.
+A layer a state only freezes goes in `state_frozen`, a frozen flag like the file's own, so it answers to `frozen` and `frozen_text` and its notes
+follow `frozenLayers`. An entity a layer override hides is counted as `layers.overrides` (`Exclusion::LayerOverridden`, code `LAYER_HIDDEN`).
+
 ## Every sheet of a drawing
 
 `PvecLayoutSet` (#1564) converts each paper layout to its own artifact, one call for the drawing. It opens the drawing once, walks the paper

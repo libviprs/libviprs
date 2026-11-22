@@ -6,7 +6,7 @@ acadrust, I run it over the AutoCAD-authored saves and the upstream MIT samples 
 provider back to the existing decoder with the traits unchanged, and I stop and report instead of
 shipping. This is that run.
 
-Gate 0: PASS, rerun at the 0.6.8 pin (libviprs#1487) with every Tier A count unchanged. All 22 AutoCAD-authored files open through `AcadrustProvider`, no `OPEN_FAILED` in Tier A.
+Gate 0: PASS, rerun at acadrust `5bf63c7b` (the CTB round trip, libviprs#1634) on the UGREEN NAS, native x86_64, with every Tier A count unchanged (it passed at the 0.6.8 pin before, libviprs#1487). All 22 AutoCAD-authored files open through `AcadrustProvider`, no `OPEN_FAILED` in Tier A.
 
 `OPEN_FAILED` means `AcadrustProvider::open` returned an error, or the process running it died,
 for that file. A reader panic counts, because the provider catches it and reports it as an open
@@ -15,9 +15,9 @@ fails if the two disagree, if a Tier A row is `OPEN_FAILED`, or if a corpus file
 
 ## What I ran
 
-- acadrust: libviprs/acadrust at `f1e00c11f6371c8cfcff2c726620a51a45a2ad1b` (fork `main`, version 0.6.8, after the upstream sync), the same
+- acadrust: libviprs/acadrust at `5bf63c7b1653fbb5a51f2f8a5a5a3f01a567c094` (acadrust PR #71: `f1e00c11` plus the CTB writer that keeps a file's own text, version 0.6.8), the same
   full rev `Cargo.toml` pins for the `dwg-acadrust` feature. A test checks the two stay equal.
-- Provider: `AcadrustProvider` at libviprs `45868476` plus the pin bump (libviprs#1487), release build,
+- Provider: `AcadrustProvider` at libviprs `c3c3d62d` plus the pin bump (libviprs#1634), release build,
   through `examples/dwg_gate0.rs`, one process per file so a crash is one row.
 - Host: the UGREEN NAS (HIGARA, MARS was out of disk), native x86_64, `rust:1.99.1-bookworm`, in a container, by `acadrust-gate0/run.sh`.
 - Corpus: ACadSharp `samples/` at `d7dc111023477d8a9fffc2153139459c95b4f345` (MIT). Tier A is the
@@ -85,7 +85,7 @@ model-space entities, and says nothing about whether the geometry of any of them
 
 ## Tier B and S, for the record
 
-Tier B: 49 of 50 open. `g13_ac1009.dwg` is `OPEN_FAILED` (acadrust: not a drawing this provider reads: version stamp "AC1009"). That one is
+Tier B: 49 of 50 open. `g13_ac1009.dwg` is `OPEN_FAILED` (acadrust: not a drawing this provider reads: neither a supported DWG version stamp nor a DXF header: "AC1009"). That one is
 a version-stamp refusal by `probe`, AC1009 being R12, which the existing decoder's supported list
 (AC1014 to AC1032) also leaves out, so it is not a regression against what the tile path takes.
 Tier S: 2 of 2 open. Rows are in the TSV.

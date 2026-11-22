@@ -59,10 +59,11 @@ use acr::{DwgReader, DxfReader, EntityType};
 use crate::cad::{CadSource, Fill, ItemHandle, decode_escapes, display_text};
 use crate::pvec::provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
-    EntityScope, EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind,
-    LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
-    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
-    SourceTransform, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    EntityScope, EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayerStateMask,
+    LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, Point3, ProvenanceStub,
+    ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact,
+    SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef, ViewportClip,
+    ViewportEntity, XrefAttachment,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -439,6 +440,8 @@ pub struct AcadrustProvider {
     /// The plot settings of each of `layouts`, by position; `None` for a layout named after its
     /// block record, which has no Layout object to hold them.
     plots: Vec<Option<LayoutPlot>>,
+    /// The Layout object's own handle for each of `layouts`, by position.
+    layout_handles: Vec<Option<ItemHandle>>,
 }
 
 impl AcadrustProvider {
@@ -673,14 +676,25 @@ impl AcadrustProvider {
         })
     }
 
-    fn collect_layouts(doc: &acr::CadDocument) -> Vec<(LayoutState, Option<LayoutPlot>)> {
+    fn collect_layouts(
+        doc: &acr::CadDocument,
+    ) -> Vec<(LayoutState, Option<LayoutPlot>, Option<ItemHandle>)> {
         let block_of = |handle: acr::Handle| {
             doc.block_records
                 .iter()
                 .find(|b| b.handle == handle)
                 .map(|b| b.name.clone())
         };
-        let mut found: Vec<(i16, u64, String, String, Option<LayoutPlot>)> = Vec::new();
+        // Tab order, handle, name, block name, plot settings, the Layout object's handle.
+        type Found = (
+            i16,
+            u64,
+            String,
+            String,
+            Option<LayoutPlot>,
+            Option<ItemHandle>,
+        );
+        let mut found: Vec<Found> = Vec::new();
         for o in doc.objects.values() {
             if let ObjectType::Layout(l) = o
                 && let Some(block) = block_of(l.block_record)
@@ -720,6 +734,7 @@ impl AcadrustProvider {
                     l.name.clone(),
                     block,
                     Some(plot),
+                    item_handle(l.handle),
                 ));
             }
         }
@@ -734,7 +749,7 @@ impl AcadrustProvider {
                     } else {
                         b.name.clone()
                     };
-                    found.push((0, b.handle.value(), name, b.name.clone(), None));
+                    found.push((0, b.handle.value(), name, b.name.clone(), None, None));
                 }
             }
         }
@@ -744,7 +759,7 @@ impl AcadrustProvider {
         found
             .into_iter()
             .enumerate()
-            .map(|(i, (_, _, name, block, plot))| {
+            .map(|(i, (_, _, name, block, plot, handle))| {
                 let state = LayoutState {
                     id: LayoutId(u32::try_from(i).unwrap_or(u32::MAX)),
                     name,
@@ -755,7 +770,7 @@ impl AcadrustProvider {
                     },
                     block_name: block,
                 };
-                (state, plot)
+                (state, plot, handle)
             })
             .collect()
     }
@@ -803,12 +818,20 @@ impl DwgProvider for AcadrustProvider {
                 });
             }
         };
-        let (layouts, plots) = Self::collect_layouts(&doc).into_iter().unzip();
+        let mut layouts = Vec::new();
+        let mut plots = Vec::new();
+        let mut layout_handles = Vec::new();
+        for (state, plot, handle) in Self::collect_layouts(&doc) {
+            layouts.push(state);
+            plots.push(plot);
+            layout_handles.push(handle);
+        }
         Ok(Self {
             doc,
             caps: Self::capabilities(),
             layouts,
             plots,
+            layout_handles,
         })
     }
 
@@ -832,6 +855,13 @@ impl DwgProvider for AcadrustProvider {
         Ok(plot.clone().map_or(SourceFact::Absent, SourceFact::Present))
     }
 
+    fn layout_handle(&self, layout: LayoutId) -> Option<ItemHandle> {
+        self.layout_handles
+            .get(layout.0 as usize)
+            .copied()
+            .flatten()
+    }
+
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
         Ok(self
             .doc
@@ -844,6 +874,84 @@ impl DwgProvider for AcadrustProvider {
                 frozen: l.is_frozen(),
                 locked: l.is_locked(),
                 plottable: l.is_plottable,
+                color: layer_colour(l.color),
+                linetype: l.line_type.clone(),
+                lineweight: layer_lineweight(l.line_weight),
+                transparency: l.transparency.explicit_alpha(),
+                plot_style: Some(l.plot_style.clone()).filter(|p| !p.is_empty()),
+                description: l.description.clone(),
+                frozen_in_new_viewports: l.flags.frozen_in_new_viewport,
+                xref_dependent: l.flags.xref_dependent,
+            })
+            .collect())
+    }
+
+    fn drawing_guids(&self) -> Result<(Option<String>, Option<String>), ProviderError> {
+        let h = &self.doc.header;
+        let some = |s: &String| Some(s.trim().to_owned()).filter(|s| !s.is_empty());
+        Ok((some(&h.fingerprint_guid), some(&h.version_guid)))
+    }
+
+    fn layout_plot_config(&self, layout: LayoutId) -> Option<String> {
+        let name = &self.layouts.iter().find(|l| l.id == layout)?.name;
+        self.doc
+            .objects
+            .values()
+            .find_map(|o| match o {
+                ObjectType::Layout(l) if l.name == *name => {
+                    Some(l.plot_printer_name.trim().to_owned())
+                }
+                _ => None,
+            })
+            .filter(|c| {
+                !c.is_empty()
+                    && !c.eq_ignore_ascii_case("none")
+                    && !c.eq_ignore_ascii_case("none_device")
+            })
+    }
+
+    fn layer_states(&self) -> Result<Vec<NamedLayerState>, ProviderError> {
+        use acr::layer_state::LayerStateMask as M;
+        Ok(self
+            .doc
+            .layer_states()
+            .into_iter()
+            .map(|s| NamedLayerState {
+                name: s.name,
+                description: s.description,
+                mask: LayerStateMask {
+                    on: s.mask.contains(M::ON),
+                    frozen: s.mask.contains(M::FROZEN),
+                    locked: s.mask.contains(M::LOCKED),
+                    plot: s.mask.contains(M::PLOT),
+                    new_viewport_frozen: s.mask.contains(M::NEW_VIEWPORT),
+                    color: s.mask.contains(M::COLOR),
+                    linetype: s.mask.contains(M::LINE_TYPE),
+                    lineweight: s.mask.contains(M::LINE_WEIGHT),
+                    plot_style: s.mask.contains(M::PLOT_STYLE),
+                    transparency: s.mask.contains(M::TRANSPARENCY),
+                    viewport: s.mask.contains(M::CURRENT_VIEWPORT),
+                },
+                hidden: s.hidden,
+                layers: s
+                    .layers
+                    .into_iter()
+                    .map(|l| LayerState {
+                        name: l.layer_name,
+                        handle: item_handle(l.layer_handle),
+                        off: l.off,
+                        frozen: l.frozen,
+                        locked: l.locked,
+                        plottable: l.plottable,
+                        color: layer_colour(l.color),
+                        linetype: l.line_type,
+                        lineweight: layer_lineweight(l.line_weight),
+                        transparency: l.transparency.and_then(|t| t.explicit_alpha()),
+                        plot_style: Some(l.plot_style).filter(|p| !p.is_empty()),
+                        frozen_in_new_viewports: l.new_viewport_frozen,
+                        ..LayerState::default()
+                    })
+                    .collect(),
             })
             .collect())
     }
@@ -931,6 +1039,10 @@ impl DwgProvider for AcadrustProvider {
         Ok(out)
     }
 
+    fn declared_unit(&self) -> Option<SourceUnit> {
+        Some(self.source_unit()).filter(|u| *u != SourceUnit::Unknown)
+    }
+
     fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
         Ok(self
             .doc
@@ -972,45 +1084,72 @@ impl DwgProvider for AcadrustProvider {
                 .value
                 .clone()
         };
+        let (at, lay) = Layout::of_attdef(a);
         text(
-            a.insertion_point,
+            at,
             a.height,
             a.rotation,
             a.normal,
             decode_escapes(&content),
+            lay,
         )
     }
 
     fn annotation(&self, handle: ItemHandle) -> Option<Annotation> {
         let entity = self.doc.get_entity(acr::Handle::new(handle.get()))?;
         match entity {
-            EntityType::Text(t) => text(
-                t.insertion_point,
-                t.height,
-                t.rotation,
-                t.normal,
-                decode_escapes(&t.value),
-            ),
+            EntityType::Text(t) => {
+                use acr::entities::{TextHorizontalAlignment as H, TextVerticalAlignment as V};
+                let h = match t.horizontal_alignment {
+                    H::Left => 0,
+                    H::Center => 1,
+                    H::Right => 2,
+                    H::Aligned => 3,
+                    H::Middle => 4,
+                    H::Fit => 5,
+                };
+                let v = match t.vertical_alignment {
+                    V::Baseline => 0,
+                    V::Bottom => 1,
+                    V::Middle => 2,
+                    V::Top => 3,
+                };
+                let (at, lay) =
+                    Layout::justified(t.insertion_point, t.alignment_point, h, v, t.width_factor);
+                text(
+                    at,
+                    t.height,
+                    t.rotation,
+                    t.normal,
+                    decode_escapes(&t.value),
+                    lay,
+                )
+            }
             EntityType::MText(m) => text(
                 m.insertion_point,
                 m.height,
                 m.rotation,
                 m.normal,
                 decode_escapes(&display_text(&m.value).text),
+                Layout::of_mtext(m),
             ),
             // A definition outside any INSERT shows its tag, and an invisible one never. Inside an
             // INSERT it goes through `inserted_attribute`.
-            EntityType::AttributeDefinition(a) if !a.flags.invisible => text(
-                a.insertion_point,
-                a.height,
-                a.rotation,
-                a.normal,
-                decode_escapes(if a.tag.is_empty() {
-                    &a.default_value
-                } else {
-                    &a.tag
-                }),
-            ),
+            EntityType::AttributeDefinition(a) if !a.flags.invisible => {
+                let (at, lay) = Layout::of_attdef(a);
+                text(
+                    at,
+                    a.height,
+                    a.rotation,
+                    a.normal,
+                    decode_escapes(if a.tag.is_empty() {
+                        &a.default_value
+                    } else {
+                        &a.tag
+                    }),
+                    lay,
+                )
+            }
             EntityType::Hatch(h) => {
                 let mut drawn = DrawnFact::default();
                 hatch_rings(h, &mut drawn);
@@ -1114,12 +1253,15 @@ impl DwgProvider for AcadrustProvider {
 
 /// A run of text as an [`Annotation`], or `None` for one that draws nothing: with no height or no
 /// characters, which the stream refuses.
+/// A TEXT, MTEXT or attribute definition as an [`Annotation::Text`]. `lay` is what the entity says
+/// about where its position sits and how it spreads; [`Layout::plain`] is a left-justified run.
 fn text(
     position: acr::Vector3,
     height: f64,
     rotation: f64,
     normal: acr::Vector3,
     content: String,
+    lay: Layout,
 ) -> Option<Annotation> {
     (height > 0.0 && height.is_finite() && !content.trim().is_empty()).then(|| Annotation::Text {
         position: p3(position),
@@ -1127,7 +1269,120 @@ fn text(
         rotation,
         content,
         normal: p3(normal),
+        width_factor: if lay.width_factor > 0.0 && lay.width_factor.is_finite() {
+            lay.width_factor
+        } else {
+            1.0
+        },
+        anchor: lay.anchor,
+        fit: lay.fit,
+        block_width: if lay.block_width > 0.0 && lay.block_width.is_finite() {
+            lay.block_width
+        } else {
+            0.0
+        },
+        line_spacing: if lay.line_spacing > 0.0 && lay.line_spacing.is_finite() {
+            lay.line_spacing
+        } else {
+            1.0
+        },
     })
+}
+
+/// The part of a text's stored fields that places and spreads it.
+struct Layout {
+    width_factor: f64,
+    anchor: (f64, TextAnchorV),
+    fit: Option<(f64, bool)>,
+    block_width: f64,
+    line_spacing: f64,
+}
+
+impl Layout {
+    /// Left justified on the baseline, factor 1.
+    const fn plain() -> Self {
+        Self {
+            width_factor: 1.0,
+            anchor: (0.0, TextAnchorV::Baseline),
+            fit: None,
+            block_width: 0.0,
+            line_spacing: 1.0,
+        }
+    }
+
+    /// What a TEXT or an attribute definition says from its DXF justification codes (72 and 73),
+    /// and the point its run is placed from. The insertion point is the start of a left-justified
+    /// baseline run and of an aligned or fitted one; any other justification is placed by the
+    /// alignment point (11).
+    fn justified(
+        insertion: acr::Vector3,
+        alignment: Option<acr::Vector3>,
+        h: i16,
+        v: i16,
+        width_factor: f64,
+    ) -> (acr::Vector3, Self) {
+        let mut lay = Self::plain();
+        lay.width_factor = width_factor;
+        let second = alignment.unwrap_or(insertion);
+        if matches!(h, 3 | 5) {
+            let span = pvec_numeric::detmath::hypot(second.x - insertion.x, second.y - insertion.y);
+            if span > 0.0 && span.is_finite() {
+                lay.fit = Some((span, h == 3));
+            }
+            return (insertion, lay);
+        }
+        let across = match h {
+            1 | 4 => 0.5,
+            2 => 1.0,
+            _ => 0.0,
+        };
+        let down = match (h, v) {
+            (4, _) | (_, 2) => TextAnchorV::Middle,
+            (_, 3) => TextAnchorV::Top,
+            (_, 1) => TextAnchorV::Bottom,
+            _ => TextAnchorV::Baseline,
+        };
+        lay.anchor = (across, down);
+        let placed = if lay.anchor == (0.0, TextAnchorV::Baseline) {
+            insertion
+        } else {
+            second
+        };
+        (placed, lay)
+    }
+
+    /// What an attribute definition says, as [`Layout::justified`] reads a TEXT.
+    fn of_attdef(a: &acr::entities::AttributeDefinition) -> (acr::Vector3, Self) {
+        Self::justified(
+            a.insertion_point,
+            Some(a.alignment_point),
+            a.horizontal_alignment.to_value(),
+            a.vertical_alignment.to_value(),
+            a.width_factor,
+        )
+    }
+
+    /// What an MTEXT says: its attachment point (71), reference width and line spacing.
+    fn of_mtext(m: &acr::entities::MText) -> Self {
+        use acr::entities::AttachmentPoint as A;
+        let across = match m.attachment_point {
+            A::TopCenter | A::MiddleCenter | A::BottomCenter => 0.5,
+            A::TopRight | A::MiddleRight | A::BottomRight => 1.0,
+            _ => 0.0,
+        };
+        let down = match m.attachment_point {
+            A::TopLeft | A::TopCenter | A::TopRight => TextAnchorV::Top,
+            A::MiddleLeft | A::MiddleCenter | A::MiddleRight => TextAnchorV::Middle,
+            _ => TextAnchorV::Bottom,
+        };
+        Self {
+            width_factor: 1.0,
+            anchor: (across, down),
+            fit: None,
+            block_width: m.rectangle_width,
+            line_spacing: m.line_spacing_factor,
+        }
+    }
 }
 
 impl AcadrustProvider {
@@ -1241,6 +1496,24 @@ fn item_handle(h: acr::Handle) -> Option<ItemHandle> {
 }
 
 /// A stored colour as a fact. `ByLayer` and `None` carry no colour of their own.
+/// A layer's colour: an index or a true colour, and nothing for the by-layer, by-block and none
+/// markers a layer has no use for.
+fn layer_colour(c: acr::Color) -> Option<SourceColour> {
+    match c {
+        acr::Color::Index(i) => Some(SourceColour::Aci(i)),
+        acr::Color::Rgb { r, g, b } => Some(SourceColour::True { r, g, b }),
+        _ => None,
+    }
+}
+
+/// A layer's lineweight in hundredths of a millimetre, when it states one.
+fn layer_lineweight(w: acr::LineWeight) -> Option<i16> {
+    match w {
+        acr::LineWeight::Value(v) => Some(v),
+        _ => None,
+    }
+}
+
 fn fact_colour(c: acr::Color) -> SourceFact<SourceColour> {
     match c {
         acr::Color::Index(i) => SourceFact::Present(SourceColour::Aci(i)),
@@ -1283,7 +1556,8 @@ impl AcadrustCursor<'_> {
     ///
     /// BYBLOCK is handed on as it is: this cursor sees one block definition and does
     /// not know the INSERT that is drawing it, so a layer whose own value is BYBLOCK
-    /// gives `Present(ByBlock)` too. A BYLAYER entity on a layer the table does not
+    /// gives `Present(ByBlock)` too, and BYLAYER on layer "0" inside a block gives
+    /// `Present(ByLayer)`. A BYLAYER entity on a layer the table does not
     /// have, or on one whose own value is BYLAYER or no colour, has nothing to
     /// resolve to and reports [`SourceFact::Absent`].
     fn style_of(&self, common: &acr::entities::EntityCommon) -> EntityStyle {
@@ -1294,6 +1568,11 @@ impl AcadrustCursor<'_> {
                 .find(|l| l.name.eq_ignore_ascii_case(&common.layer))
         });
         let colour = match common.color {
+            // Layer "0" inside a block is drawn on the layer of the INSERT that places it, which
+            // this cursor cannot see, so BYLAYER there is handed on for the consumer to resolve (#1638).
+            acr::Color::ByLayer if common.layer == "0" && !self.path.is_root() => {
+                SourceFact::Present(SourceColour::ByLayer)
+            }
             acr::Color::ByLayer => layer.map_or(SourceFact::Absent, |l| fact_colour(l.color)),
             c => fact_colour(c),
         };

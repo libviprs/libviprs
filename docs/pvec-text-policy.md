@@ -7,10 +7,10 @@ The code is `src/pvec/text_policy.rs`, and the numbers below come from
 ## Update, issue #1609
 
 The decision below is the default. A DWG conversion can now carry `TEXT`, `MTEXT` and visible `ATTDEF` through PVec's text
-stream with `PvecConversion::annotations(true)`, the same record the PDF path writes: position, height, rotation and the characters
+stream with `PvecConversion::texts(true)` (or `annotations(true)`, which asks for texts and fills together; #1624), the same record the PDF path writes: position, height, rotation and the characters
 shown (MTEXT formatting codes read, `%%c` style escapes decoded), on a hidden two point anchor. No font, width factor or
 justification travels, and an INSERT's map is applied to position, height and rotation. The conversion report's
-`components.annotations` counts what was mapped per class.
+`components.annotations` counts what was mapped per class, and `components.texts` and `components.fills` say which of the two choices were on. With texts off, a TEXT, MTEXT or ATTDEF stays unmapped and its row warns `texts are off`.
 
 ## Decision
 

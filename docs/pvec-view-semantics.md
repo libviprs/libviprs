@@ -14,8 +14,10 @@ explicitly so a caller can see what they accepted, and a test pins every value
 | `layers.no_plot` | ignore | layer-no-plot |
 | `layers.frozen_text` | ignore | layer-frozen-text |
 | `layers.no_plot_text` | ignore | layer-no-plot-text |
+| `layers.overrides` | none | layer-overrides |
 | `layers.frozen_in_viewport` | ignore-and-report | layer-frozen-in-viewport |
 | `layers.insert_override` | inherit-on-layer-zero | insert-layer-override |
+| `entities.invisible` | exclude | entity-invisible |
 | `nested_inserts.max_depth` | 64 | nested-insert |
 | `xrefs` | report-external | xref |
 <!-- view:end -->
@@ -28,6 +30,7 @@ explicitly so a caller can see what they accepted, and a test pins every value
   Text is the exception both ways (#1621, Rom's call of 2026-11-19): a TEXT, MTEXT or visible attribute on a frozen
   layer is drawn (`layers.frozen_text = ignore`) in this profile and the print profile alike, and one on a no-plot
   layer is drawn here (`layers.no_plot_text = ignore`, #1639) and left out of a sheet (`exclude` in the print profile).
+  A layer the user sets to Hidden (`layers.overrides`, #1627) hides everything on it, text included, and one set to Visible beats off, frozen, no-plot and the viewport freezes; the most specific entry wins, so a viewport's own entry beats the row for what that viewport shows and paper space follows the row.
   An off layer still hides text, and an INSERT on a frozen layer still
   takes its attributes with it. DIMENSION and MULTILEADER are not text here: they follow their layer whole.
 - **Layer zero in a block.** A leaf or INSERT on layer `0` inside an INSERT takes that INSERT's layer.

@@ -1,6 +1,6 @@
-# acadrust f1e00c11f6371c8cfcff2c726620a51a45a2ad1b
-# libviprs 4586847649ffc8c6ee48fd68a7fee7d2cff249d1 (AcadrustProvider over acadrust, release build, example dwg_gate0)
-# host rom@192.168.0.10 (UGREEN NAS, HIGARA), native x86_64, rust:1.99.1-bookworm, one process per file
+# acadrust 5bf63c7b1653fbb5a51f2f8a5a5a3f01a567c094
+# libviprs c3c3d62d57ffc3286bd8602711cdadb446d8db7f (AcadrustProvider over acadrust, release build, example dwg_gate0)
+# host rom@192.168.0.10, native x86_64, rust:1.99.1-bookworm, one process per file
 # corpus ACadSharp samples at d7dc111023477d8a9fffc2153139459c95b4f345 (MIT); tier A AutoCAD-authored, B and S ACadSharp-writer
 file	tier	source	sha256	version	open	layers	layouts	blocks	model_entities	entities_all_scopes	unmapped	unmapped_classes	reread_identical	error
 AecObjects.dwg	A	autocad	dc196e99b8944d169493c9f3205d45f8a579c0c96e81dbc7fc2f90cd971f7a7e	AC1032	OPEN_OK	7	2	6	4	15	9	EXTENDED_ENTITY:4,VIEWPORT:3,ATTDEF:2	yes	-
@@ -27,7 +27,7 @@ sample_AC1032.dwg	A	autocad	0e8faaca949c9429c92240082d9ea4d3524aca5baf7c7815ec43
 sample_base.dwg	A	autocad	2fd52de87040d2b74922579e5e49b7f72943a436b8a11dc1d7f00244aed7da21	AC1032	OPEN_OK	19	4	27	163	341	188	POINT:40,MTEXT:36,TEXT:29,MULTILEADER:15,SOLID:14,HATCH:8,VIEWPORT:6,ATTDEF:5,DIMENSION_LINEAR:3,MLINE:3,TOLERANCE:3,3DSOLID:2,ACAD_TABLE:2,DIMENSION_ALIGNED:2,DIMENSION_ORDINATE:2,MESH:2,POLYLINE:2,3DFACE:1,DIMENSION_ANGULAR_2LINE:1,DIMENSION_ANGULAR_3POINT:1,DIMENSION_DIAMETER:1,DIMENSION_RADIUS:1,IMAGE:1,LEADER:1,PDFUNDERLAY:1,RAY:1,REGION:1,SHAPE:1,SPLINE:1,WIPEOUT:1,XLINE:1	yes	-
 g11_codepage.dwg	B	acadsharp-writer	04ae1bca9e384c9604aff632b838a3497236daf9d79be7b073148a696d12b089	AC1018	OPEN_OK	2	2	3	6	8	3	TEXT:2,VIEWPORT:1	yes	-
 g11_shapes.dwg	B	acadsharp-writer	e54abbe4b4b24499783edc1d5c7251db66fa1683fb0197f2f3704b3eeee45813	AC1032	OPEN_OK	2	2	3	5	7	2	TEXT:1,VIEWPORT:1	yes	-
-g13_ac1009.dwg	B	acadsharp-writer	0f7c1ae8358511b569895fd84f9d79cedccda520a8a9a762aeff7ae67223265d	AC1009	OPEN_FAILED	-	-	-	-	-	-	-	-	acadrust: not a drawing this provider reads: version stamp "AC1009"
+g13_ac1009.dwg	B	acadsharp-writer	0f7c1ae8358511b569895fd84f9d79cedccda520a8a9a762aeff7ae67223265d	AC1009	OPEN_FAILED	-	-	-	-	-	-	-	-	acadrust: not a drawing this provider reads: neither a supported DWG version stamp nor a DXF header: "AC1009"
 g13_arc.dwg	B	acadsharp-writer	c3b09b470908d35265ef50e2aa70db9551533286778dc9182018cd4f059785b1	AC1032	OPEN_OK	2	2	2	1	2	1	VIEWPORT:1	yes	-
 g13_bad_extents.dwg	B	acadsharp-writer	a5abb97b569dfde20a17676f330dc010a7279269d18bcc6dc2a263059d00f1f4	AC1032	OPEN_OK	2	2	2	1	2	1	VIEWPORT:1	yes	-
 g13_circle.dwg	B	acadsharp-writer	6122b77ff962a84e7b18a07c7a3b92da9934ec82044ca363032d53c45167a523	AC1032	OPEN_OK	2	2	2	1	2	1	VIEWPORT:1	yes	-
