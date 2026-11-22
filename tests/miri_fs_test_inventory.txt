@@ -725,6 +725,7 @@ annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_one_failing_s
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_the_number_is_as_wide_as_the_count_and_counts_every_paper_layout
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1564_the_stem_comes_from_the_file_name_and_bytes_need_one
 annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1583_a_blank_layout_is_empty_after_view_without_being_converted
+annotated   fs-detected  tests/pvec_1564_layout_set.rs::issue_1622_rom_s_floor_plan_lists_its_66_sheets_in_tab_order
 annotated   fs-detected  tests/pvec_1578_e_text_images.rs::every_text_anchor_is_an_entity_with_the_text_colour
 annotated   fs-detected  tests/pvec_1578_e_text_images.rs::every_text_record_of_the_title_block_is_named_once_in_the_paint_order
 annotated   fs-detected  tests/pvec_1578_e_text_images.rs::the_title_block_is_a_text_record_on_a_hidden_anchor
