@@ -1236,6 +1236,14 @@ pub trait DwgProvider {
         Err(ProviderError::CannotReport(Facet::LayoutPlot))
     }
 
+    /// The handle of the layout's own object (the Layout, not its block record), the key a
+    /// layout keeps across revisions of a drawing (#1626). [`None`] when the drawing gives none
+    /// or the provider cannot report it.
+    fn layout_handle(&self, layout: LayoutId) -> Option<ItemHandle> {
+        let _ = layout;
+        None
+    }
+
     /// The layer table, in the drawing's own order.
     ///
     /// # Errors
