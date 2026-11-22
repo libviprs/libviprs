@@ -210,6 +210,10 @@ pub enum PvecConvertError {
         /// The INSERT chain the entity was reached through, spelled `block@HANDLE/...`.
         block_path: String,
     },
+    /// The thumbnail could not be drawn (#1629). The artifact was published.
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    #[error("the thumbnail could not be drawn")]
+    Thumbnail(#[source] crate::pvec::thumbnail::ThumbnailError),
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
     Cancelled,
@@ -229,6 +233,9 @@ pub struct PvecConversionOutput {
     /// The most outcomes that were waiting for the consumer at once. Never above the capacity set
     /// with [`PvecConversion::queue_capacity`].
     pub peak_queue_depth: u32,
+    /// The sheet as a PNG, when [`PvecConversion::thumbnail`] asked for one (#1629).
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    pub thumbnail: Option<Vec<u8>>,
 }
 
 /// One conversion, configured the way `EngineBuilder` configures a pyramid run.
@@ -251,6 +258,8 @@ pub struct PvecConversion<'a> {
     element_rules: Option<ElementRules>,
     plot_style: Option<acadrust::plot_style::PlotStyleTable>,
     plot_settings: PlotSettings,
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    thumbnail_width: Option<u32>,
     xrefs: Vec<(String, CadSource<'a>)>,
     xref_note: Arc<Mutex<xref::XrefNote>>,
 }
@@ -350,6 +359,8 @@ impl<'a> PvecConversion<'a> {
             element_rules: None,
             plot_style: None,
             plot_settings: PlotSettings::default(),
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            thumbnail_width: None,
             xrefs: Vec::new(),
             xref_note: Arc::default(),
         }
@@ -444,6 +455,15 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn limits(mut self, limits: SourceLimits) -> Self {
         self.view_profile = self.view_profile.with_limits(limits);
+        self
+    }
+
+    /// Also draw the converted sheet as a PNG `width_px` wide, into
+    /// [`PvecConversionOutput::thumbnail`] (#1629). Strokes only, black on white.
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    #[must_use]
+    pub fn thumbnail(mut self, width_px: u32) -> Self {
+        self.thumbnail_width = Some(width_px);
         self
     }
 
@@ -595,6 +615,15 @@ impl<'a> PvecConversion<'a> {
     /// [`PvecConvertError`]. After any error the destination and its report are as they were.
     pub fn convert(self) -> Result<PvecConversionOutput, PvecConvertError> {
         let observer = self.observer.clone();
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        if self.thumbnail_width == Some(0) {
+            return report_failure(
+                observer.as_deref(),
+                Err(PvecConvertError::Thumbnail(
+                    crate::pvec::thumbnail::ThumbnailError::ZeroWidth,
+                )),
+            );
+        }
         let result = if self.cancel.is_cancelled() {
             Err(PvecConvertError::Cancelled)
         } else {
@@ -2467,6 +2496,8 @@ impl<'a> PvecConversion<'a> {
             annotation_counts,
             sheet,
         } = self.classify(provider, Some(unit))?;
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let thumbnail_width = self.thumbnail_width;
         let (ask_texts, ask_fills) = (self.texts, self.fills);
         let Self {
             dest,
@@ -2692,8 +2723,17 @@ impl<'a> PvecConversion<'a> {
             StreamedPublishError::Publish(PublishError::Cancelled) => PvecConvertError::Cancelled,
             StreamedPublishError::Publish(other) => PvecConvertError::Publish(other),
         };
+        // A paper sheet with nothing to stroke (only text, say) still has a paper to show, so a
+        // thumbnail of it is blank and no artifact is written (#1629).
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let blank_paper = thumbnail_width.is_some() && area.is_some();
+        #[cfg(not(feature = "pvec-raster-thumbnail"))]
+        let blank_paper = false;
         let published = match &spill {
             None => match open(geometries, None, &mut on_chunk) {
+                Err(PvecConvertError::Write(WriteError::NoGeometry)) if blank_paper => {
+                    seal(None, &[], None, None).map(|(report, fidelity)| (report, fidelity, 0))
+                }
                 Err(PvecConvertError::Write(WriteError::AllRefused(refused))) => {
                     seal(None, &refused, None, None).and_then(|(report, fidelity)| {
                         Err(PvecConvertError::NothingStorable {
@@ -2763,13 +2803,42 @@ impl<'a> PvecConversion<'a> {
             .map_err(publish_error),
         };
         let (report, fidelity, written) = published?;
-        tell(EngineEvent::ConversionPublished);
+        if written > 0 || !blank_paper {
+            tell(EngineEvent::ConversionPublished);
+        }
+        // A paper frame fills the picture; a frame that is only the kept geometry's extent (model
+        // space, or a layout without plot settings) gets 2 percent of its longer side all round.
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let thumbnail = thumbnail_width
+            .map(|width| {
+                use crate::pvec::thumbnail::{ThumbnailError, draw};
+                let paper = report.sheet.as_ref().is_some_and(|s| s.frame == "paper");
+                let margin = if paper { 0.0 } else { 0.02 };
+                match area.filter(|_| written == 0) {
+                    Some([x0, y0, x1, y1]) => {
+                        draw([x0, y0], [x1, y1], std::iter::empty(), width, 0.0)
+                    }
+                    None => {
+                        let reader = crate::pvec::publish::open_published(dest)
+                            .map_err(|e| ThumbnailError::Artifact(e.to_string()))?;
+                        let curves = reader
+                            .entities()
+                            .map_err(|e| ThumbnailError::Artifact(e.to_string()))?;
+                        let b = reader.manifest().bounds;
+                        draw(b.min, b.max, curves.iter().map(|(_, c)| c), width, margin)
+                    }
+                }
+            })
+            .transpose()
+            .map_err(PvecConvertError::Thumbnail)?;
         Ok(PvecConversionOutput {
             artifact: dest.to_path_buf(),
             report,
             fidelity,
             written,
             peak_queue_depth,
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            thumbnail,
         })
     }
 }
@@ -3562,6 +3631,8 @@ impl PvecConvertError {
                 out.block_path = Some(block_path.clone());
                 out
             }
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
         }
     }

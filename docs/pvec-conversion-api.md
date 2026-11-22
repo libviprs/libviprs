@@ -35,6 +35,12 @@ writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the tr
 
 Rotation 180 and the plot Window area are reported, not applied. The report's `sheet.notes` carry `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-centre-not-applicable`, `plot-paper-overridden`, `plot-orientation`, `plot-scale-overridden`, `plot-lineweights-overridden`, `plot-fit-to-paper`, `plot-fit-ratio 1:N`, `plot-fit-no-change` and `plot-fit-skipped`.
 
+## Thumbnail
+
+With `--features pvec-raster-thumbnail`, `PvecConversion::thumbnail(width_px)` also draws the converted sheet into `PvecConversionOutput::thumbnail` as an 8-bit RGB PNG. Strokes only, black and one pixel wide on opaque white; text is not drawn. The width is the caller's and the height follows the frame's aspect, so a long thin sheet gives a tall or a flat image. A paper layout is drawn edge to edge. Model space, and a layout without plot settings, leave 2 percent of the frame's longer side empty on every side. A paper sheet with nothing to stroke yields a blank picture and no artifact (`written == 0`). One call per layout: `PvecLayoutSet::sheets` passes it on to each sheet. A zero width is `PvecConvertError::Thumbnail`.
+
+`pvec::thumbnail::thumbnail(artifact, width_px)` draws an artifact that is already published, framed on its declared bounds with no margin.
+
 ## Profiles and the capability gate
 
 The caller says before the run which PVec capabilities it may use. An entity needing one outside the set is refused, never reshaped.
