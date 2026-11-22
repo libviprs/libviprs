@@ -414,3 +414,40 @@ fn without_a_table_the_conversion_is_what_it_was() {
     done(a);
     done(b);
 }
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn screening_is_written_opaque_and_blended_toward_white() {
+    // A plotter prints a screened colour as a lighter ink, not a see-through one, so the word is
+    // opaque and the colour is the blend `255 - (255 - c) * s`.
+    let mut t = identity();
+    t.aci_entries[5].screening = 50;
+    let (bytes, h) = drawing(&[case(5)]);
+    let w = words(&convert("opaque", &bytes, Some(t)));
+    assert_eq!(w[&h[0]] & 0xFF, 0xFF, "no alpha");
+    let blended = rgb(aci_word(5)).map(|c| (255.0 - (255.0 - c) * 0.5).round());
+    assert_eq!(rgb(w[&h[0]]), blended);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn an_stb_applies_nothing_and_the_report_says_so() {
+    // The provider reports no plot style name per entity yet, so a named style table has nothing
+    // to look up: it changes no stroke and the sheet notes the gap (said on #1630).
+    let mut t = identity();
+    t.is_stb = true;
+    t.aci_entries[1].color = Some([0, 0, 255]);
+    let (bytes, h) = drawing(&[case(1)]);
+    let run = convert("stb", &bytes, Some(t));
+    assert_eq!(words(&run)[&h[0]], aci_word(1), "ACI 1 stays red");
+    let notes = &run.out.report.sheet.as_ref().expect("a sheet").notes;
+    assert!(
+        notes.iter().any(|n| n == "plot-style-stb-unsupported"),
+        "{notes:?}"
+    );
+    let plain = convert("stb-plain", &bytes, None);
+    let notes = &plain.out.report.sheet.as_ref().expect("a sheet").notes;
+    assert!(!notes.iter().any(|n| n == "plot-style-stb-unsupported"));
+    done(plain);
+    done(run);
+}
