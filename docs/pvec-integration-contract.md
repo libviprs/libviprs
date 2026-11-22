@@ -22,6 +22,7 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 
 | field | value |
 |---|---|
+| `entities.invisible` | exclude |
 | `layers.frozen` | exclude |
 | `layers.frozen_in_viewport` | ignore-and-report |
 | `layers.frozen_text` | ignore |
