@@ -304,7 +304,9 @@ impl OcModel {
         }
         let mut order = BTreeMap::new();
         if let Some(Object::Array(items)) = d.get(b"Order").ok().and_then(|o| deref(doc, o)) {
-            walk_order(doc, items, &mut Vec::new(), &mut order, 0, &mut { MAX_NODES });
+            walk_order(doc, items, &mut Vec::new(), &mut order, 0, &mut {
+                MAX_NODES
+            });
         }
         let rb = match d.get(b"RBGroups").ok().and_then(|o| deref(doc, o)) {
             Some(Object::Array(a)) => a.iter().map(|g| refs(doc, Some(g))).collect(),
@@ -586,7 +588,13 @@ fn load(bytes: &[u8]) -> Result<Document, PdfLayersError> {
 ///
 /// See [`PdfLayersError`].
 pub fn pdf_manifest(bytes: &[u8]) -> Result<PdfManifest, PdfLayersError> {
-    fn mentioned(doc: &Document, o: &Object, out: &mut Vec<ObjectId>, depth: usize, budget: &mut usize) {
+    fn mentioned(
+        doc: &Document,
+        o: &Object,
+        out: &mut Vec<ObjectId>,
+        depth: usize,
+        budget: &mut usize,
+    ) {
         if depth > MAX_DEPTH || *budget == 0 {
             return;
         }
@@ -594,7 +602,8 @@ pub fn pdf_manifest(bytes: &[u8]) -> Result<PdfManifest, PdfLayersError> {
         match o {
             Object::Reference(id) => match deref(doc, o) {
                 Some(Object::Array(a)) => {
-                    a.iter().for_each(|x| mentioned(doc, x, out, depth + 1, budget));
+                    a.iter()
+                        .for_each(|x| mentioned(doc, x, out, depth + 1, budget));
                 }
                 _ => {
                     if !out.contains(id) {
@@ -602,7 +611,9 @@ pub fn pdf_manifest(bytes: &[u8]) -> Result<PdfManifest, PdfLayersError> {
                     }
                 }
             },
-            Object::Array(a) => a.iter().for_each(|x| mentioned(doc, x, out, depth + 1, budget)),
+            Object::Array(a) => a
+                .iter()
+                .for_each(|x| mentioned(doc, x, out, depth + 1, budget)),
             _ => {}
         }
     }

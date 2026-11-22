@@ -694,7 +694,10 @@ fn owner_password_only_pdf() -> Vec<u8> {
         },
     });
     doc.trailer.set("Root", catalog);
-    let id = Object::String(b"0123456789abcdef".to_vec(), lopdf::StringFormat::Hexadecimal);
+    let id = Object::String(
+        b"0123456789abcdef".to_vec(),
+        lopdf::StringFormat::Hexadecimal,
+    );
     doc.trailer.set("ID", Object::Array(vec![id.clone(), id]));
     let state = EncryptionState::try_from(EncryptionVersion::V2 {
         document: &doc,
@@ -715,8 +718,11 @@ fn issue_1637_an_owner_password_only_pdf_is_refused_not_rewritten() {
     let bytes = owner_password_only_pdf();
     // Reading it is fine: lopdf opens it with the empty password.
     assert_eq!(manifest(&bytes).layers.len(), 1);
-    let err = apply_pdf_layers(&bytes, &choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Hidden)]))
-        .expect_err("rewriting an encrypted file must be refused");
+    let err = apply_pdf_layers(
+        &bytes,
+        &choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Hidden)]),
+    )
+    .expect_err("rewriting an encrypted file must be refused");
     assert!(
         matches!(err, libviprs::pvec::pdf_layers::PdfLayersError::Encrypted),
         "got {err:?}"
@@ -770,7 +776,11 @@ fn fan_out_pdf() -> Vec<u8> {
 fn issue_1637_a_shared_array_fan_out_stays_bounded() {
     // The VE, the /Order tree and the OCMD member list all fan out 4^16 ways.
     let bytes = fan_out_pdf();
-    assert!(bytes.len() < 4096, "the hostile file is tiny: {}", bytes.len());
+    assert!(
+        bytes.len() < 4096,
+        "the hostile file is tiny: {}",
+        bytes.len()
+    );
     let started = std::time::Instant::now();
     let m = manifest(&bytes);
     let ocmd = m.ocmds.first().expect("the OCMD is listed");
