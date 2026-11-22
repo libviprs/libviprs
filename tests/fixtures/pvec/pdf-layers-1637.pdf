@@ -1,0 +1,98 @@
+%PDF-1.5
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R] /D << /Name (Default) /BaseState /ON /OFF [11 0 R 15 0 R] /AS [<< /Event /View /Category [/View] /OCGs [10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R] >> << /Event /Print /Category [/Print] /OCGs [10 0 R 11 0 R 12 0 R 13 0 R 14 0 R 15 0 R] >>] /Order [[(Plan) 10 0 R [(Details) 12 0 R]] 11 0 R [13 0 R] [(Options) 14 0 R]] /RBGroups [[14 0 R 15 0 R]] >> /Configs [<< /Name (Alternate A) /BaseState /OFF >>] >> >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 4 0 R] /Count 2 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Properties << /oc10 10 0 R /oc11 11 0 R /oc12 12 0 R /oc13 13 0 R /oc14 14 0 R /oc15 15 0 R /ocAny 16 0 R /ocAll 17 0 R /ocVe 18 0 R >> /XObject << /Fm1 6 0 R >> >> /Annots [7 0 R] >>
+endobj
+4 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 400] /Rotate 90 /Contents 8 0 R /Resources << >> >>
+endobj
+5 0 obj
+<< /Length 439 >>
+stream
+0 0 1 rg 10 10 20 20 re f
+/OC /oc10 BDC 1 0 0 rg 40 10 20 20 re f EMC
+/OC /oc11 BDC 1 0 0 rg 70 10 20 20 re f EMC
+/OC /oc12 BDC 1 0 0 rg 100 10 20 20 re f EMC
+/OC /oc13 BDC 1 0 0 rg 130 10 20 20 re f EMC
+/OC /oc14 BDC 1 0 0 rg 160 10 20 20 re f EMC
+/OC /oc15 BDC 1 0 0 rg 190 10 20 20 re f EMC
+/OC /ocAny BDC 1 0 0 rg 220 10 20 20 re f EMC
+/OC /ocAll BDC 1 0 0 rg 250 10 20 20 re f EMC
+/OC /ocVe BDC 1 0 0 rg 280 10 20 20 re f EMC
+/Fm1 Do
+
+endstream
+endobj
+6 0 obj
+<< /Type /XObject /Subtype /Form /BBox [0 0 612 792] /OC 10 0 R /Length 26 >>
+stream
+0 1 0 rg 310 10 20 20 re f
+endstream
+endobj
+7 0 obj
+<< /Type /Annot /Subtype /Square /Rect [400 10 420 30] /OC 13 0 R >>
+endobj
+8 0 obj
+<< /Length 0 >>
+stream
+
+endstream
+endobj
+10 0 obj
+<< /Type /OCG /Name (Walls) /Intent /View >>
+endobj
+11 0 obj
+<< /Type /OCG /Name (Hidden) >>
+endobj
+12 0 obj
+<< /Type /OCG /Name (View off) /Usage << /View << /ViewState /OFF >> >> >>
+endobj
+13 0 obj
+<< /Type /OCG /Name (Print off) /Usage << /Print << /PrintState /OFF >> >> >>
+endobj
+14 0 obj
+<< /Type /OCG /Name (Option A) >>
+endobj
+15 0 obj
+<< /Type /OCG /Name (Option B) >>
+endobj
+16 0 obj
+<< /Type /OCMD /OCGs [10 0 R 11 0 R] /P /AnyOn >>
+endobj
+17 0 obj
+<< /Type /OCMD /OCGs [10 0 R 11 0 R] /P /AllOn >>
+endobj
+18 0 obj
+<< /Type /OCMD /VE [/And 10 0 R [/Not 11 0 R]] >>
+endobj
+xref
+0 19
+0000000000 65535 f 
+0000000009 00000 n 
+0000000531 00000 n 
+0000000594 00000 n 
+0000000877 00000 n 
+0000000992 00000 n 
+0000001482 00000 n 
+0000001619 00000 n 
+0000001703 00000 n 
+0000000000 65535 f 
+0000001752 00000 n 
+0000001813 00000 n 
+0000001861 00000 n 
+0000001952 00000 n 
+0000002046 00000 n 
+0000002096 00000 n 
+0000002146 00000 n 
+0000002212 00000 n 
+0000002278 00000 n 
+trailer
+<< /Size 19 /Root 1 0 R >>
+startxref
+2344
+%%EOF

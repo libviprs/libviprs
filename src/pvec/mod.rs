@@ -74,6 +74,7 @@ mod pdf_clip_stream;
 mod pdf_filters;
 pub mod pdf_image;
 mod pdf_image_decode;
+pub mod pdf_layers;
 #[cfg(feature = "pvec-write")]
 mod pdf_paint;
 pub mod pdf_ring_cut;
