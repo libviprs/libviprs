@@ -359,7 +359,7 @@ pub struct ManifestLayerState {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ManifestWarning {
-    /// A stable code, `DUPLICATE_LAYER_NAME_CASE` for one.
+    /// A stable code, `XREF_LAYERS` for one.
     pub code: String,
     /// The detail.
     pub detail: String,
@@ -464,25 +464,6 @@ pub fn cad_manifest<P: DwgProvider>(source: CadSource<'_>) -> Result<CadManifest
         .collect();
 
     let mut warnings = Vec::new();
-    let mut seen: Vec<&str> = Vec::new();
-    let mut dup: Vec<String> = Vec::new();
-    for l in &layers {
-        if let Some(first) = seen.iter().find(|s| same(s, &l.name)) {
-            for n in [(*first).to_owned(), l.name.clone()] {
-                if !dup.contains(&n) {
-                    dup.push(n);
-                }
-            }
-        } else {
-            seen.push(&l.name);
-        }
-    }
-    if !dup.is_empty() {
-        warnings.push(ManifestWarning {
-            code: "DUPLICATE_LAYER_NAME_CASE".into(),
-            detail: dup.join(", "),
-        });
-    }
     let xrefs = layers.iter().filter(|l| l.xref.is_some()).count();
     if xrefs > 0 {
         warnings.push(ManifestWarning {
