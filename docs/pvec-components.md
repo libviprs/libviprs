@@ -24,6 +24,7 @@ provenance are separate streams a viewer may drop without changing a single coor
 - **Hatch and fill.** A DWG `HATCH` and `SOLID` are carried with `annotations(true)` (issue #1609): one hidden closed polyline
   per boundary loop and a hatch record over them, solid or by pattern name, angle and scale, with the fill colour. Arcs, elliptic arcs and splines in a loop are carried as short chords (the container
   stores straight polylines). A hatch with a loop that cannot be read is not carried. Otherwise geometry only; see `docs/pvec-hatch-policy.md`.
+- **Stroke paint.** A DWG conversion writes the paint stream (issue #1638): a colour per stroke (`LeafPaint`), with BYLAYER and BYBLOCK resolved through nested inserts on the effective layer and the layer colour taken from `LayerState::color`. True colour is written as is, and a drawing without colours stays byte-identical.
 - **Semantic class.** Walls and columns are classified from the DWG (`tests/pvec_classify_1233.rs`), the class stream itself is PVec's.
 
 ## Streams are optional

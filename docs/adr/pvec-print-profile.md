@@ -72,6 +72,9 @@ The profile as data, beside the N1.4 rows of the view-profile ADR. `layer-no-plo
 this ADR adds; the default profile carries it as `ignore`, which is what V1-3 already says. The
 two text rows were added by the #1621 amendment below. `layer-frozen-text` carries the same value
 in both profiles, and `layer-no-plot-text` is `ignore` on screen and `exclude` on a sheet (#1639).
+`entity-invisible` (#1633) is `exclude` in both: AutoCAD never draws an entity whose own invisible
+flag is set, and a hidden INSERT takes its whole block with it. `ignore` draws them, as a
+diagnostic aid. An entity dropped this way is counted under `ENTITY_INVISIBLE`.
 
 | field | default (V1) | print (P) | row |
 |---|---|---|---|
@@ -84,6 +87,7 @@ in both profiles, and `layer-no-plot-text` is `ignore` on screen and `exclude` o
 | `layers.no_plot_text` | ignore | exclude | `layer-no-plot-text` |
 | `layers.frozen_in_viewport` | ignore-and-report | apply | `layer-frozen-in-viewport` |
 | `layers.insert_override` | inherit-on-layer-zero | inherit-on-layer-zero | `insert-layer-override` |
+| `entities.invisible` | exclude | exclude | `entity-invisible` |
 | `nested_inserts.max_depth` | 64 | 64 | `nested-insert` |
 | `xrefs` | report-external | report-external | `xref` |
 
