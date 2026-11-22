@@ -63,6 +63,8 @@ mod capability;
 mod georef;
 mod layouts;
 mod manifest;
+mod pdf_plot;
+pub use pdf_plot::{PdfPlot, PdfPlotOutput};
 #[cfg(feature = "pvec-raster")]
 mod pdf;
 mod xref;
@@ -258,6 +260,9 @@ pub struct PvecConversion<'a> {
     element_rules: Option<ElementRules>,
     plot_style: Option<acadrust::plot_style::PlotStyleTable>,
     plot_settings: PlotSettings,
+    /// A paper sheet with nothing to stroke is a success with `written == 0` and no artifact,
+    /// for a caller (the PDF plot, #1636) that still wants the empty page.
+    empty_sheet_ok: bool,
     #[cfg(feature = "pvec-raster-thumbnail")]
     thumbnail_width: Option<u32>,
     xrefs: Vec<(String, CadSource<'a>)>,
@@ -368,6 +373,7 @@ impl<'a> PvecConversion<'a> {
             element_rules: None,
             plot_style: None,
             plot_settings: PlotSettings::default(),
+            empty_sheet_ok: false,
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail_width: None,
             xrefs: Vec::new(),
@@ -2799,12 +2805,14 @@ impl<'a> PvecConversion<'a> {
             StreamedPublishError::Publish(PublishError::Cancelled) => PvecConvertError::Cancelled,
             StreamedPublishError::Publish(other) => PvecConvertError::Publish(other),
         };
-        // A paper sheet with nothing to stroke (only text, say) still has a paper to show, so a
-        // thumbnail of it is blank and no artifact is written (#1629).
+        // A paper sheet with nothing to stroke (only text, say) still has a paper to show: a
+        // thumbnail of it is blank (#1629), and the PDF plot wants the empty page (#1636). Either way
+        // no artifact is written.
         #[cfg(feature = "pvec-raster-thumbnail")]
-        let blank_paper = thumbnail_width.is_some() && area.is_some();
+        let thumbnail_blank = thumbnail_width.is_some();
         #[cfg(not(feature = "pvec-raster-thumbnail"))]
-        let blank_paper = false;
+        let thumbnail_blank = false;
+        let blank_paper = (thumbnail_blank || self.empty_sheet_ok) && area.is_some();
         let published = match &spill {
             None => match open(geometries, None, &mut on_chunk) {
                 Err(PvecConvertError::Write(WriteError::NoGeometry)) if blank_paper => {
