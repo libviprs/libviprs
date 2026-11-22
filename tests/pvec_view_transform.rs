@@ -217,6 +217,19 @@ fn n2_6_1055_view_row_nested_inserts_are_followed_to_the_depth_limit() {
 }
 
 #[test]
+fn n2_6_1055_view_row_entity_invisible_is_excluded_by_default() {
+    let knob = ViewProfile::default_profile()
+        .knobs()
+        .into_iter()
+        .find(|k| k.row == "entity-invisible")
+        .expect("the entity-invisible row has a knob");
+    assert_eq!(
+        (knob.field, knob.value.as_str()),
+        ("entities.invisible", "exclude")
+    );
+}
+
+#[test]
 fn n2_6_1055_view_row_xref_contributes_nothing_and_is_reported_external() {
     assert_eq!(
         ViewProfile::default_profile().xrefs,
@@ -255,7 +268,8 @@ fn n2_6_1055_every_row_of_the_decision_table_has_a_knob_and_every_knob_a_test_ab
             "layer-frozen-in-viewport",
             "insert-layer-override",
             "nested-insert",
-            "xref"
+            "xref",
+            "entity-invisible"
         ]
     );
     // `layer-no-plot` is the print profile's row (#1559); its named tests are in
@@ -271,6 +285,7 @@ fn n2_6_1055_every_row_of_the_decision_table_has_a_knob_and_every_knob_a_test_ab
         "view_row_insert_layer_override",
         "view_row_nested_inserts",
         "view_row_xref",
+        "view_row_entity_invisible",
     ] {
         assert!(
             me.contains(&format!("fn n2_6_1055_{needle}")),

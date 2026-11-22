@@ -61,6 +61,7 @@ fn issue_1559_print_profile_prints_every_knob() {
         "layers.insert_override = inherit-on-layer-zero",
         "nested_inserts.max_depth = 64",
         "xrefs = report-external",
+        "entities.invisible = exclude",
     ] {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }

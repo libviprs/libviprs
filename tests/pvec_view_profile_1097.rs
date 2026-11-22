@@ -229,6 +229,7 @@ fn n3_3_1097_default_profile_prints_every_knob_with_its_n1_4_row() {
         "nested_inserts.max_depth = 64",
         "xrefs = report-external",
         "viewport_clipping = unsupported",
+        "entities.invisible = exclude",
     ] {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
@@ -245,13 +246,13 @@ fn n3_3_1097_every_knob_names_a_row_of_the_n1_4_decision_table() {
     let knobs = ViewProfile::default_profile().knobs();
     assert_eq!(
         knobs.len(),
-        9,
+        10,
         "a knob was added or removed: justify it against N1.4 or the print profile ADR"
     );
     let mut fields: Vec<_> = knobs.iter().map(|k| k.field).collect();
     fields.sort_unstable();
     fields.dedup();
-    assert_eq!(fields.len(), 9, "duplicate field path");
+    assert_eq!(fields.len(), 10, "duplicate field path");
     for k in knobs {
         assert!(
             doc.contains(&format!("| `{}` |", k.row)),
