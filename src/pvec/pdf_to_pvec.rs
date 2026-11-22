@@ -815,10 +815,10 @@ pub(super) fn subpaths(entity: &PdfPathEntity) -> Vec<(Vec<[f64; 2]>, bool)> {
                 }
             }
             PdfPathSegment::CurveTo { c1, c2, end } => {
-                if let Some((points, _)) = subpaths.last_mut() {
-                    if let Some(&start) = points.last() {
-                        points.extend(cubic_points(start, c1, c2, end).into_iter().skip(1));
-                    }
+                if let Some((points, _)) = subpaths.last_mut()
+                    && let Some(&start) = points.last()
+                {
+                    points.extend(cubic_points(start, c1, c2, end).into_iter().skip(1));
                 }
             }
             PdfPathSegment::Close => {
