@@ -17,6 +17,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use libviprs::cad::{CadSource, ItemHandle};
+use libviprs::pvec::diagnostics::DiagnosticCode;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::ConversionReport;
 use libviprs::pvec::{
@@ -33,6 +34,7 @@ struct Drawing {
     model: Vec<RawEntity>,
     layers: Vec<LayerState>,
     xrefs: Vec<XrefAttachment>,
+    unit: Option<SourceUnit>,
 }
 
 thread_local! {
@@ -90,6 +92,9 @@ impl DwgProvider for Mock {
     }
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
         Ok(self.0.layers.clone())
+    }
+    fn declared_unit(&self) -> Option<SourceUnit> {
+        self.0.unit
     }
     fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
         Ok(self.0.xrefs.clone())
@@ -177,6 +182,7 @@ fn host(block_spelling: &str, wing_layer_off: bool) -> Drawing {
         ],
         layers: vec![layer("0", false), layer("WING|A-WALL", wing_layer_off)],
         xrefs: vec![attach("WING")],
+        unit: Some(SourceUnit::Meters),
     }
 }
 
@@ -189,6 +195,7 @@ fn wing() -> Drawing {
         ],
         layers: vec![layer("0", false), layer("A-WALL", false)],
         xrefs: vec![],
+        unit: Some(SourceUnit::Meters),
     }
 }
 
@@ -406,14 +413,64 @@ fn issue_1631_a_supplied_xref_the_host_does_not_have_is_reported() {
         c.xref("NOPE", CadSource::Bytes(b"wing-file"))
     });
     let out = out.unwrap();
+    assert_eq!(out.report.xrefs.unattached, vec!["NOPE".to_string()]);
+    let d: Vec<_> = out
+        .report
+        .diagnostics
+        .iter()
+        .filter(|d| d.code == DiagnosticCode::XrefNotAttached)
+        .collect();
+    assert_eq!(d.len(), 1, "{:#?}", out.report.diagnostics);
+    assert!(d[0].message.contains("NOPE"), "{:#?}", d[0]);
+    // WING is still unresolved: a drawing for another name does not stand in for it.
+    assert_eq!(out.report.xrefs.unresolved.len(), 1);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1631_an_attached_xref_is_not_reported_unattached() {
+    assert_baseline("attached-base");
+    register(b"host", host("WING", false));
+    register(b"wing-file", wing());
+    let (out, _) = run("attached", |c| {
+        c.xref("WING", CadSource::Bytes(b"wing-file"))
+    });
+    let out = out.unwrap();
+    assert!(out.report.xrefs.unattached.is_empty());
     assert!(
         out.report
             .diagnostics
             .iter()
-            .any(|d| d.message.contains("NOPE")),
-        "a diagnostic names the supplied xref nothing attaches: {:#?}",
-        out.report.diagnostics
+            .all(|d| d.code != DiagnosticCode::XrefNotAttached)
     );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1631_an_xref_in_other_units_is_noted_and_scaled_by_the_insert() {
+    assert_baseline("units-base");
+    register(b"host", host("WING", false));
+    let mut mm = wing();
+    mm.unit = Some(SourceUnit::Millimeters);
+    register(b"wing-file", mm);
+    let (out, dest) = run("units", |c| c.xref("WING", CadSource::Bytes(b"wing-file")));
+    let out = out.unwrap();
+    assert_eq!(
+        out.report.xrefs.notes,
+        vec!["xref-units-differ".to_string()]
+    );
+    // The INSERT's 0.001 is the whole mapping: nothing else rescales the xref.
+    assert!(
+        segments(&dest)
+            .iter()
+            .any(|(_, d, len)| near(d[0], 1.0) && near(*len, 1.0))
+    );
+    // The same units say nothing.
+    register(b"wing-file", wing());
+    let (same, _) = run("units-same", |c| {
+        c.xref("WING", CadSource::Bytes(b"wing-file"))
+    });
+    assert!(same.unwrap().report.xrefs.notes.is_empty());
 }
 
 #[test]
@@ -450,6 +507,7 @@ fn nested() {
             model: vec![line(200, "A-DEEP", [0.0, 0.0], [10.0, 0.0])],
             layers: vec![layer("A-DEEP", false)],
             xrefs: vec![],
+            unit: None,
         },
     );
 }

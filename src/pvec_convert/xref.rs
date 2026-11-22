@@ -14,7 +14,7 @@ use crate::cad::{CadSource, ItemHandle};
 use crate::pvec::{
     Annotation, DwgProvider, EntityCursor, EntityFacts, EntityScope, InstancePath, LayerState,
     LayoutId, LayoutKind, LayoutPlot, LayoutState, ProviderCaps, ProviderError, RawEntity,
-    RawGeometry, SourceFact, TextStyleRef, ViewportEntity, XrefAttachment,
+    RawGeometry, SourceFact, SourceUnit, TextStyleRef, ViewportEntity, XrefAttachment,
 };
 
 /// What a conversion learned about its xrefs, for the report.
@@ -24,6 +24,8 @@ pub(super) struct XrefNote {
     pub resolved: BTreeSet<String>,
     /// Supplied names that no xref block record of any drawing carries.
     pub unattached: Vec<String>,
+    /// `xref-units-differ` when a supplied drawing declares another unit than its host.
+    pub notes: Vec<String>,
 }
 
 struct Node<P> {
@@ -112,7 +114,18 @@ pub(super) fn attach<P: DwgProvider>(
         })
         .map(|(name, _)| name.clone())
         .collect();
-    note.lock().expect("the note is not poisoned").unattached = unattached;
+    let mut notes = Vec::new();
+    if let Some(unit) = host.declared_unit()
+        && nodes
+            .iter()
+            .any(|n| n.provider.declared_unit().is_some_and(|u| u != unit))
+    {
+        notes.push("xref-units-differ".to_owned());
+    }
+    let mut shared = note.lock().expect("the note is not poisoned");
+    shared.unattached = unattached;
+    shared.notes = notes;
+    drop(shared);
     Ok(XrefProvider { host, nodes, note })
 }
 
@@ -234,6 +247,10 @@ impl<P: DwgProvider> DwgProvider for XrefProvider<P> {
 
     fn caps(&self) -> &ProviderCaps {
         self.host.caps()
+    }
+
+    fn declared_unit(&self) -> Option<SourceUnit> {
+        self.host.declared_unit()
     }
 
     fn layouts(&self) -> Result<Vec<LayoutState>, ProviderError> {

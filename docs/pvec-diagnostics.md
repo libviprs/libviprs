@@ -25,6 +25,7 @@ nothing emits and on one that is emitted and not written down.
 | `ENTITY_UNSUPPORTED` | An entity has no mapping into PVec, or PVec refused its geometry. | warning | the reason code, `unmapped-source-class` | `an_entity_the_provider_does_not_map` |
 | `ENTITY_IGNORED_BY_POLICY` | The view profile left an entity out. | info | the profile field, `layers.off` | `a_leaf_on_a_hidden_layer` |
 | `INSERT_NOT_EXPANDED` | An INSERT was not expanded: it has no handle, is an xref, or has a normal other than Z. | warning | the reason code, `unresolved-block` | `an_insert_without_a_handle` |
+| `XREF_NOT_ATTACHED` | A drawing was supplied for an xref that no xref block of the host, or of a supplied drawing, names. | warning | `xref-not-attached` | `a_supplied_xref_nothing_attaches` |
 | `SOURCE_OPEN_FAILED` | The source could not be opened. | error | `open` | `a_missing_source` |
 | `VIEW_FAILED` | The view profile could not be applied. | error | `view` | `a_paper_layout_in_v1` |
 | `BLOCKS_FAILED` | Block expansion failed or a limit was exceeded. | error | `limit`, `block-recursion`, `entities-per-block`, `compose`, `provider` | `a_block_depth_limit` |

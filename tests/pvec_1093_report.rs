@@ -228,6 +228,7 @@ fn issue_1093_an_unresolved_xref_appears_with_its_name_and_path() {
             path_refusal: Some("EscapesRoot".into()),
         }],
         resolved: vec!["floor1".into()],
+        ..XrefSummary::default()
     };
     let mut b = ReportBuilder::new();
     for r in rows(6) {
@@ -324,6 +325,7 @@ fn issue_1093_the_schema_cannot_change_without_the_version_changing() {
             path_refusal: None,
         }],
         resolved: vec!["r".into()],
+        ..XrefSummary::default()
     };
     let r = b
         .finish(6, ViewSummary::default(), xrefs, BoundsSplit::default())

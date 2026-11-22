@@ -2017,11 +2017,13 @@ impl<'a> PvecConversion<'a> {
                 })
                 .collect(),
             resolved: xref_note.resolved.iter().cloned().collect(),
+            unattached: xref_note.unattached.clone(),
+            notes: xref_note.notes.clone(),
         };
         let mut diagnostics = consumed.diagnostics;
         for name in &xref_note.unattached {
             diagnostics.push(Diagnostic::new(
-                DiagnosticCode::InsertNotExpanded,
+                DiagnosticCode::XrefNotAttached,
                 "xref-not-attached",
                 format!(
                     "a drawing was supplied for xref {name}, and no xref block of that name exists"
