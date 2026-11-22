@@ -15,7 +15,7 @@ use libviprs::pvec::publish::open_published;
 use libviprs::pvec::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope,
     EntityStyle, Facet, FacetSource, LayerState, LayoutId, LayoutKind, LayoutState, ProviderCaps,
-    ProviderError, RawEntity, RawGeometry, RawVertex, SourceTransform, SourceUnit,
+    ProviderError, RawEntity, RawGeometry, RawVertex, SourceTransform, SourceUnit, TextAnchorV,
 };
 use libviprs::pvec_convert::PvecConversion;
 use plan::{scratch, stub};
@@ -57,6 +57,11 @@ fn text(position: [f64; 3], height: f64, rotation: f64, content: &str) -> Annota
         rotation,
         content: content.into(),
         normal: [0.0, 0.0, 1.0],
+        width_factor: 1.0,
+        anchor: (0.0, TextAnchorV::Baseline),
+        fit: None,
+        block_width: 0.0,
+        line_spacing: 1.0,
     }
 }
 
@@ -505,4 +510,150 @@ fn issue_1609_an_attdef_in_an_insert_draws_the_inserts_value_or_its_constant_nev
     let counts = out.report.components.unwrap().annotations;
     let n = |k: &str| counts.get(k).copied().unwrap_or(0);
     assert_eq!((n("ATTDEF.mapped"), n("ATTDEF.unmapped")), (3, 1));
+}
+
+// ---- #1624: texts and fills are two choices ------------------------------------------------
+
+fn convert_with(tag: &str, texts: bool, fills: bool) -> Run {
+    let dir = scratch(tag);
+    let dest = dir.join("o.pvec");
+    let out = PvecConversion::new(CadSource::Bytes(b"notes"), &dest)
+        .unit(SourceUnit::Meters)
+        .components(StreamSelection::ALL)
+        .texts(texts)
+        .fills(fills)
+        .convert_with::<Notes>()
+        .unwrap();
+    let (streams, skipped) = open_published(&dest).unwrap().streams().unwrap();
+    assert!(skipped.is_empty(), "{skipped:?}");
+    let _ = fs::remove_dir_all(dir);
+    Run {
+        streams,
+        written: out.written,
+        report: out.report,
+    }
+}
+
+fn count(run: &Run, key: &str) -> u64 {
+    run.report
+        .components
+        .as_ref()
+        .and_then(|c| c.annotations.get(key).copied())
+        .unwrap_or(0)
+}
+
+fn warned(run: &Run, class: &str, needle: &str) -> bool {
+    run.report
+        .entities
+        .iter()
+        .filter(|r| r.source_class == class)
+        .all(|r| r.warnings.iter().any(|w| w.contains(needle)))
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1624_texts_alone_carry_text_and_leave_hatches_and_solids_unmapped() {
+    let run = convert_with("1624-texts", true, false);
+    let t = texts(&run).expect("a text stream");
+    let mut got: Vec<_> = t.records.iter().map(|r| r.text.as_str()).collect();
+    got.sort_unstable();
+    assert_eq!(got, ["Hall", "In block", "Room", "TAG"]);
+    assert!(hatches(&run).is_none(), "no hatch stream without fills");
+    assert_eq!(count(&run, "TEXT.mapped"), 2);
+    assert_eq!(count(&run, "MTEXT.mapped"), 1);
+    assert_eq!(count(&run, "ATTDEF.mapped"), 1);
+    for key in ["HATCH.mapped", "SOLID.mapped"] {
+        assert_eq!(count(&run, key), 0, "{key}");
+    }
+    assert!(
+        warned(&run, "HATCH", "fills are off"),
+        "HATCH has its own warning"
+    );
+    assert!(
+        warned(&run, "SOLID", "fills are off"),
+        "SOLID has its own warning"
+    );
+    let c = run.report.components.as_ref().unwrap();
+    assert!((c.texts, c.fills) == (true, false), "{c:?}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1624_fills_alone_carry_hatches_and_solids_and_leave_text_unmapped() {
+    let run = convert_with("1624-fills", false, true);
+    let h = hatches(&run).expect("a hatch stream");
+    assert_eq!(h.records.len(), 5);
+    assert!(texts(&run).is_none(), "no text stream without texts");
+    assert_eq!(count(&run, "HATCH.mapped"), 3);
+    assert_eq!(count(&run, "SOLID.mapped"), 2);
+    for key in ["TEXT.mapped", "MTEXT.mapped", "ATTDEF.mapped"] {
+        assert_eq!(count(&run, key), 0, "{key}");
+    }
+    for class in ["TEXT", "MTEXT"] {
+        assert!(
+            warned(&run, class, "texts are off"),
+            "{class} has its own warning"
+        );
+    }
+    let c = run.report.components.as_ref().unwrap();
+    assert!((c.texts, c.fills) == (false, true), "{c:?}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1624_annotations_is_shorthand_for_both() {
+    let both = convert("1624-both", true, StreamSelection::ALL);
+    let split = convert_with("1624-split", true, true);
+    assert_eq!(both.written, split.written);
+    assert_eq!(texts(&both).unwrap().records.len(), 4);
+    assert_eq!(hatches(&both).unwrap().records.len(), 5);
+    assert_eq!(texts(&both), texts(&split));
+    assert_eq!(hatches(&both), hatches(&split));
+    let c = both.report.components.as_ref().unwrap();
+    assert!((c.texts, c.fills) == (true, true), "{c:?}");
+    // One carrier line for the drawing, then each choice's own entities.
+    let t = convert_with("1624-t", true, false);
+    let f = convert_with("1624-f", false, true);
+    assert_eq!(t.written + f.written, both.written + 1);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1624_neither_choice_carries_nothing() {
+    let run = convert_with("1624-none", false, false);
+    assert_eq!(run.written, 1);
+    assert!(texts(&run).is_none() && hatches(&run).is_none());
+    assert!(
+        run.report
+            .components
+            .is_none_or(|c| c.annotations.is_empty() && !c.texts && !c.fills)
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1624_the_last_call_wins_between_annotations_and_the_split_options() {
+    let dir = scratch("1624-order");
+    let dest = dir.join("o.pvec");
+    let out = PvecConversion::new(CadSource::Bytes(b"notes"), &dest)
+        .unit(SourceUnit::Meters)
+        .components(StreamSelection::ALL)
+        .annotations(true)
+        .fills(false)
+        .convert_with::<Notes>()
+        .unwrap();
+    let (streams, _) = open_published(&dest).unwrap().streams().unwrap();
+    let _ = fs::remove_dir_all(dir);
+    let c = out.report.components.unwrap();
+    assert!((c.texts, c.fills) == (true, false), "{c:?}");
+    assert!(
+        streams
+            .iter()
+            .any(|s| s.capability == TextStream::CAPABILITY)
+    );
+    assert!(
+        !streams
+            .iter()
+            .any(|s| s.capability == HatchStream::CAPABILITY)
+    );
 }

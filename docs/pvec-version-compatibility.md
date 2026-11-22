@@ -53,7 +53,7 @@ the capability list from the curves it is given and a drawing that holds only so
 | acadrust (default) | AC1014 to AC1032 (R14, 2000, 2004, 2007, 2010, 2013, 2018) | AC1014 | reads |
 | acadrust (default) | below AC1014, or an unknown stamp | AC1014 | refuses |
 
-- The provider is `acadrust` at revision `f1e00c11f6371c8cfcff2c726620a51a45a2ad1b` of the `libviprs/acadrust` fork.
+- The provider is `acadrust` at revision `5bf63c7b1653fbb5a51f2f8a5a5a3f01a567c094` of the `libviprs/acadrust` fork.
   `acadsharp-rs` is opt-in (the `dwg-acadsharp` feature) and takes the same DWG versions through `cad::CadDecoder`
   (`docs/vector-providers.md`); it is not the default.
 - Since acadrust 0.6.8 (upstream #267), a pre-2007 DWG's text decodes every `\U+XXXX` escape, which applies to
