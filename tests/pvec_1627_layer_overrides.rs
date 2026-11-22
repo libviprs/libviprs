@@ -27,7 +27,10 @@ use libviprs::pvec::{
     RawEntity, RawGeometry, SourceFact, SourceTransform, SourceUnit, ViewProfile, ViewportClip,
     ViewportEntity,
 };
-use libviprs::pvec_convert::{CadChoices, CadManifest, PvecConversion, apply_choices};
+use libviprs::pvec_convert::{
+    CadChoices, CadManifest, ManifestLayer, ManifestLayerState, ManifestMask, PvecConversion,
+    StateLayer, apply_choices,
+};
 
 // ---- a hand-built provider ------------------------------------------------------------
 
@@ -860,4 +863,236 @@ fn issue_1627_a_conversion_under_the_choices_follows_them() {
         "the row's Hidden wins over the text switch"
     );
     assert!(shown(&report, L_WALLS, Some(VP_A)) && !shown(&report, L_WALLS, Some(VP_B)));
+}
+
+// ---- the reason an override gives (panel decision Q1) ---------------------------------------
+
+fn fields(report: &ConversionReport, handle: u64, viewport: Option<u64>) -> Vec<Option<String>> {
+    rows(report, handle, viewport)
+        .iter()
+        .map(|r| r.policy_field.clone())
+        .collect()
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1627_a_hidden_override_is_reported_under_layers_overrides() {
+    let report = convert(
+        "reason-sheet",
+        with_overrides(sheet(), &[("WALLS", LayerOverride::Hidden)]),
+    );
+    let on_sheet = fields(&report, P_WALLS, None);
+    assert_eq!(on_sheet, [Some("layers.overrides".to_string())], "{on_sheet:?}");
+    let report = convert(
+        "reason-model",
+        with_overrides(model(), &[("WALLS", LayerOverride::Hidden)]),
+    );
+    for h in [L_WALLS, T_WALLS] {
+        let f = fields(&report, h, None);
+        assert_eq!(f, [Some("layers.overrides".to_string())], "{h:#X}: {f:?}");
+    }
+    // An off layer is still `layers.off`: the override is the user's word, not the file's.
+    let report = convert("reason-off", model());
+    assert_eq!(fields(&report, L_OFF, None), [Some("layers.off".to_string())]);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1627_a_per_viewport_hidden_reports_the_same_reason() {
+    let report = convert(
+        "reason-vp",
+        with_viewport_overrides(sheet(), &[("Sheet/32", "WALLS", LayerOverride::Hidden)]),
+    );
+    let f = fields(&report, L_WALLS, Some(VP_B));
+    assert_eq!(f, [Some("layers.overrides".to_string())], "{f:?}");
+}
+
+// ---- the most specific override wins (panel decision Q3) -------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1627_a_viewport_visible_beats_a_global_hidden_for_that_viewport_only() {
+    let mut p = with_overrides(sheet(), &[("WALLS", LayerOverride::Hidden)]);
+    p = with_viewport_overrides(p, &[("Sheet/31", "WALLS", LayerOverride::Visible)]);
+    let report = convert("specific-visible", p);
+    assert!(shown(&report, L_WALLS, Some(VP_A)), "{:#?}", report.entities);
+    assert!(!shown(&report, L_WALLS, Some(VP_B)), "the other viewport follows the row");
+    assert!(shown(&report, BLOCK_WALLS_LINE, Some(VP_A)), "and so does the expansion");
+    assert!(!shown(&report, BLOCK_WALLS_LINE, Some(VP_B)));
+    assert!(
+        !shown(&report, P_WALLS, None),
+        "paper space follows the global override, a viewport entry never reaches it"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1627_a_viewport_hidden_beats_a_global_visible_for_that_viewport_only() {
+    let mut p = with_overrides(sheet(), &[("BOTHCOLD", LayerOverride::Visible)]);
+    p = with_viewport_overrides(p, &[("Sheet/32", "BOTHCOLD", LayerOverride::Hidden)]);
+    let report = convert("specific-hidden", p);
+    assert!(shown(&report, L_BOTHCOLD, Some(VP_A)), "thawed by the row");
+    assert!(!shown(&report, L_BOTHCOLD, Some(VP_B)), "hidden by its own entry");
+}
+
+// ---- a chosen layer state folds into the overrides (panel decision Q2) ------------------------
+
+fn layer(name: &str, on: bool, frozen: bool, plot: bool) -> ManifestLayer {
+    ManifestLayer {
+        name: name.into(),
+        on,
+        frozen,
+        plot,
+        ..ManifestLayer::default()
+    }
+}
+
+fn recorded(name: &str, on: bool, frozen: bool, plot: bool) -> StateLayer {
+    StateLayer {
+        name: name.into(),
+        on,
+        frozen,
+        locked: false,
+        plot,
+        vp_frozen: false,
+    }
+}
+
+fn state_manifest(
+    layers: Vec<ManifestLayer>,
+    mask: ManifestMask,
+    recorded: Vec<StateLayer>,
+) -> CadManifest {
+    CadManifest {
+        schema: 1,
+        layers,
+        layer_states: vec![ManifestLayerState {
+            name: "S".into(),
+            mask,
+            layers: recorded,
+            ..ManifestLayerState::default()
+        }],
+        ..CadManifest::default()
+    }
+}
+
+fn folded(m: &CadManifest, profile: ViewProfile, json: &str) -> ViewProfile {
+    apply_choices(profile, m, &choices(json))
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1627_a_state_that_freezes_a_layer_hides_it_in_model_mode() {
+    let m = state_manifest(
+        vec![layer("WALLS", true, false, true)],
+        ManifestMask {
+            frozen: true,
+            ..ManifestMask::default()
+        },
+        vec![recorded("WALLS", true, true, true)],
+    );
+    let p = folded(&m, model(), r#"{"schema":1,"mode":"model","layerState":"S"}"#);
+    assert_eq!(
+        p.layers.state_overrides,
+        [("WALLS".to_string(), LayerOverride::Hidden)]
+    );
+    assert!(p.layers.overrides.is_empty(), "nothing the user set by hand");
+    let report = convert("state-freeze", p);
+    assert_eq!(
+        fields(&report, L_WALLS, None),
+        [Some("layers.overrides".to_string())]
+    );
+}
+
+#[test]
+fn issue_1627_a_state_that_does_not_set_plot_leaves_a_no_plot_layer_alone() {
+    // The state records plot = true for the layer, but its mask does not carry Plot, so the
+    // answer does not change and no override is made.
+    let m = state_manifest(
+        vec![layer("NOPLOT", true, false, false)],
+        ManifestMask {
+            plot: false,
+            on: true,
+            ..ManifestMask::default()
+        },
+        vec![recorded("NOPLOT", true, false, true)],
+    );
+    let p = folded(&m, sheet(), r#"{"schema":1,"mode":"layouts","layerState":"S"}"#);
+    assert!(p.layers.state_overrides.is_empty(), "{:?}", p.layers.state_overrides);
+    // And with Plot in the mask the state does change it, to visible.
+    let m = state_manifest(
+        vec![layer("NOPLOT", true, false, false)],
+        ManifestMask {
+            plot: true,
+            ..ManifestMask::default()
+        },
+        vec![recorded("NOPLOT", true, false, true)],
+    );
+    let p = folded(&m, sheet(), r#"{"schema":1,"mode":"layouts","layerState":"S"}"#);
+    assert_eq!(
+        p.layers.state_overrides,
+        [("NOPLOT".to_string(), LayerOverride::Visible)]
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1627_a_state_visible_never_thaws_a_viewport() {
+    let m = state_manifest(
+        vec![layer("BOTHCOLD", false, false, true)],
+        ManifestMask {
+            on: true,
+            ..ManifestMask::default()
+        },
+        vec![recorded("BOTHCOLD", true, false, true)],
+    );
+    let p = folded(&m, sheet(), r#"{"schema":1,"mode":"layouts","layerState":"S"}"#);
+    assert_eq!(
+        p.layers.state_overrides,
+        [("BOTHCOLD".to_string(), LayerOverride::Visible)]
+    );
+    assert!(p.layers.overrides.is_empty(), "only a user's Visible thaws viewports");
+    let report = convert("state-visible", p);
+    assert!(shown_nowhere(&report, L_BOTHCOLD), "A and B still freeze it");
+}
+
+#[test]
+fn issue_1627_turn_off_layers_not_in_state_hides_an_unlisted_layer() {
+    let m = state_manifest(
+        vec![layer("WALLS", true, false, true), layer("FRZ2", true, false, true)],
+        ManifestMask::default(),
+        vec![recorded("FRZ2", true, false, true)],
+    );
+    let p = folded(
+        &m,
+        model(),
+        r#"{"schema":1,"mode":"model","layerState":"S","turnOffLayersNotInState":true}"#,
+    );
+    assert_eq!(
+        p.layers.state_overrides,
+        [("WALLS".to_string(), LayerOverride::Hidden)]
+    );
+}
+
+#[test]
+fn issue_1627_a_users_layer_entry_beats_the_state_for_the_same_name() {
+    let m = state_manifest(
+        vec![layer("WALLS", true, false, true)],
+        ManifestMask {
+            frozen: true,
+            ..ManifestMask::default()
+        },
+        vec![recorded("WALLS", true, true, true)],
+    );
+    let p = folded(
+        &m,
+        model(),
+        r#"{"schema":1,"mode":"model","layerState":"S","layers":{"walls":"visible"}}"#,
+    );
+    assert_eq!(p.layers.overrides, [("walls".to_string(), LayerOverride::Visible)]);
+    assert!(
+        p.layers.state_overrides.is_empty(),
+        "the state's entry for the same name is replaced: {:?}",
+        p.layers.state_overrides
+    );
 }

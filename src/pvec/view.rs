@@ -19,7 +19,8 @@
 //! # Order, and exactly one reason
 //!
 //! An entity is checked in a fixed order and the first match is its only reason:
-//! [`PolicyReason::NotInSelectedLayout`], then layer state on the effective layer (the layer
+//! [`PolicyReason::NotInSelectedLayout`], then [`PolicyReason::LayerOverridden`] (the user's own
+//! Hidden, which also stops the flags below from being read for a Visible layer), then layer state on the effective layer (the layer
 //! override when there is one): [`PolicyReason::LayerOff`], [`PolicyReason::LayerFrozen`],
 //! [`PolicyReason::LayerNoPlotText`], [`PolicyReason::ViewportFrozen`], then
 //! [`PolicyReason::EntityInvisible`], then
@@ -69,6 +70,8 @@ pub enum PolicyReason {
     LayerFrozen,
     /// It is text and its effective layer does not plot, under `layers.no_plot_text = exclude`.
     LayerNoPlotText,
+    /// The user set its layer to Hidden (#1627): their word, not the file's.
+    LayerOverridden,
     /// Its effective layer is frozen in the viewport it is seen through (opt-in).
     ViewportFrozen,
     /// The entity's own visibility flag is off.
@@ -83,8 +86,9 @@ pub enum PolicyReason {
 
 impl PolicyReason {
     /// Every reason, in evaluation order.
-    pub const ALL: [PolicyReason; 8] = [
+    pub const ALL: [PolicyReason; 9] = [
         PolicyReason::NotInSelectedLayout,
+        PolicyReason::LayerOverridden,
         PolicyReason::LayerOff,
         PolicyReason::LayerFrozen,
         PolicyReason::LayerNoPlotText,
@@ -101,6 +105,7 @@ impl PolicyReason {
             PolicyReason::LayerOff => "layers.off",
             PolicyReason::LayerFrozen => "layers.frozen",
             PolicyReason::LayerNoPlotText => "layers.no_plot_text",
+            PolicyReason::LayerOverridden => "layers.overrides",
             PolicyReason::ViewportFrozen => "layers.frozen_in_viewport",
             PolicyReason::EntityInvisible => "entity.visible",
             PolicyReason::NotInSelectedLayout
@@ -115,9 +120,10 @@ impl PolicyReason {
     #[must_use]
     pub fn code(self) -> &'static str {
         match self {
-            PolicyReason::LayerOff | PolicyReason::LayerFrozen | PolicyReason::LayerNoPlotText => {
-                "LAYER_HIDDEN"
-            }
+            PolicyReason::LayerOff
+            | PolicyReason::LayerFrozen
+            | PolicyReason::LayerNoPlotText
+            | PolicyReason::LayerOverridden => "LAYER_HIDDEN",
             PolicyReason::ViewportFrozen => "VIEWPORT_STATE_IGNORED",
             PolicyReason::EntityInvisible => "ENTITY_INVISIBLE",
             PolicyReason::NotInSelectedLayout => "NOT_IN_SELECTED_LAYOUT",
@@ -368,6 +374,7 @@ pub struct VisibilityFilter {
     frozen_text: LayerStateRule,
     no_plot_text: LayerStateRule,
     overrides: Vec<(String, LayerOverride)>,
+    state_overrides: Vec<(String, LayerOverride)>,
     freeze_mode: ViewportFreezeMode,
     viewports: Vec<ViewportInput>,
 }
@@ -437,6 +444,7 @@ impl VisibilityFilter {
             frozen_text: profile.layers.frozen_text,
             no_plot_text: profile.layers.no_plot_text,
             overrides: profile.layers.overrides.clone(),
+            state_overrides: profile.layers.state_overrides.clone(),
             freeze_mode: ViewportFreezeMode::default(),
             viewports: Vec::new(),
         }
@@ -463,6 +471,7 @@ impl VisibilityFilter {
     pub(crate) fn forced(&self, name: &str) -> Option<LayerOverride> {
         self.overrides
             .iter()
+            .chain(&self.state_overrides)
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
             .map(|(_, o)| *o)
     }
@@ -492,7 +501,7 @@ impl VisibilityFilter {
         // the entity, Visible skips the layer flags and the viewport freezes below.
         let forced = self.forced(layer);
         if forced == Some(LayerOverride::Hidden) {
-            return Some(PolicyReason::LayerOff);
+            return Some(PolicyReason::LayerOverridden);
         }
         if forced.is_none()
             && let Some(ls) = self.layer_state(layer)

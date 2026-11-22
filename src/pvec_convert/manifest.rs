@@ -792,10 +792,12 @@ pub fn apply_choices(
     manifest: &CadManifest,
     choices: &CadChoices,
 ) -> ViewProfile {
-    // The manifest is where a chosen layer state will fold into the overrides; that rule is not
-    // settled yet (which mode's resolved value becomes the override), so only what the user set
-    // by hand is carried today.
-    let _ = manifest;
+    // A chosen layer state folds into the overrides where it changes the answer for the mode of
+    // `choices` (model space, or the drawing-wide plot value in layouts mode), by resolving the
+    // choices with and without the state and the user's own rows. A user's entry for the same
+    // name wins, and a state's Visible never thaws a viewport: those entries stay apart from the
+    // user's. Known gap: a text-bearing layer a state freezes loses its text even under
+    // `frozenLayers: show`, because the fold is a Hidden.
     let mut profile = profile;
     let switch = |s: TextSwitch| match s {
         TextSwitch::Show => LayerStateRule::Ignore,

@@ -551,6 +551,8 @@ impl<'a> PvecConversion<'a> {
         // nothing (P-3), one refused with 508 for a view this slice cannot map, or one drawn
         // through its similarity onto the sheet and its rectangle.
         let mut windows: Vec<(ViewportEntity, Window)> = Vec::new();
+        // The layers an override froze in each of `windows`, by position (#1627).
+        let mut window_hidden: Vec<Vec<String>> = Vec::new();
         // The layers that do not plot. A viewport on one still draws what it shows; only its
         // border is hidden, as AutoCAD prints it (P-3, #1577).
         let no_plot: BTreeSet<String> = if layout.kind == LayoutKind::Paper
@@ -574,8 +576,10 @@ impl<'a> PvecConversion<'a> {
             };
             for mut v in listed.into_iter().filter(|v| v.layout == layout.id) {
                 // The user's overrides edit this viewport's frozen list before anything is drawn
-                // (#1627): a Visible layer is thawed everywhere, then the viewport's own
-                // overrides thaw or freeze it here only.
+                // (#1627): a Visible layer is thawed everywhere, a Hidden one that this layout's
+                // other viewports show is frozen here, then the viewport's own entries thaw or
+                // freeze it here only, the most specific word winning. `added` is what an
+                // override froze, so the report can say so.
                 let layers = &view_profile.layers;
                 v.frozen_layers.retain(|f| {
                     !layers
@@ -583,10 +587,21 @@ impl<'a> PvecConversion<'a> {
                         .iter()
                         .any(|(n, o)| *o == LayerOverride::Visible && n.eq_ignore_ascii_case(f))
                 });
+                let mut added: Vec<String> = Vec::new();
+                for n in layers.hidden_but_shown_in_a_viewport(&layout.name) {
+                    added.push(n.to_owned());
+                    v.frozen_layers.push(n.to_owned());
+                }
                 let key = format!("{}/{:X}", layout.name, v.handle.get());
-                for (_, name, o) in layers.viewport_overrides.iter().filter(|(k, ..)| *k == key) {
+                for (_, name, o) in layers
+                    .viewport_overrides
+                    .iter()
+                    .filter(|(k, ..)| k.eq_ignore_ascii_case(&key))
+                {
                     v.frozen_layers.retain(|f| !f.eq_ignore_ascii_case(name));
+                    added.retain(|f| !f.eq_ignore_ascii_case(name));
                     if *o == LayerOverride::Hidden {
+                        added.push(name.clone());
                         v.frozen_layers.push(name.clone());
                     }
                 }
@@ -639,6 +654,7 @@ impl<'a> PvecConversion<'a> {
                     }
                 };
                 windows.push((v, window));
+                window_hidden.push(added);
             }
         }
         // `1:N`, one paper unit to N model units, of a drawn viewport.
@@ -956,6 +972,18 @@ impl<'a> PvecConversion<'a> {
             through_profile.space = SpaceSelection::Model;
             through_profile.viewport_clipping = ViewportClipping::Unsupported;
             through_profile.layers.frozen_in_viewport = ViewportFreezeRule::IgnoreAndReport;
+            // A layer hidden for the drawing that one viewport shows again stays in the model
+            // walk, and the other viewports freeze it (#1627).
+            let rescued: Vec<String> = view_profile
+                .layers
+                .hidden_but_shown_in_a_viewport(&layout.name)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            through_profile
+                .layers
+                .overrides
+                .retain(|(n, _)| !rescued.iter().any(|r| r.eq_ignore_ascii_case(n)));
             model_view = Some(
                 through_profile
                     .apply(provider)
@@ -1369,6 +1397,10 @@ impl<'a> PvecConversion<'a> {
                             .iter()
                             .any(|l| l.eq_ignore_ascii_case(layer))
                     };
+                    let by_override = |layer: &str| {
+                        window_hidden[k].iter().any(|l| l.eq_ignore_ascii_case(layer))
+                    };
+                    let mut overridden = false;
                     // The leaf's own effective layer, or that of any INSERT it is reached
                     // through: an INSERT on layer 0 takes its parent's (V1-2).
                     let mut parent = "0";
@@ -1379,23 +1411,36 @@ impl<'a> PvecConversion<'a> {
                                 parent = own;
                             }
                             through_cold |= cold(parent);
+                            overridden |= cold(parent) && by_override(parent);
                         }
                     }
                     let frozen = through_cold
                         || model_layers
                             .get(&flat_key(f))
                             .is_some_and(|layer| cold(layer));
+                    overridden |= model_layers
+                        .get(&flat_key(f))
+                        .is_some_and(|layer| cold(layer) && by_override(layer));
                     if frozen {
                         if view_profile.layers.frozen_in_viewport == ViewportFreezeRule::Apply {
                             frozen_here = true;
                             done = without_geometry(
                                 Classification::ignored_by_policy(
-                                    "layers.frozen_in_viewport",
+                                    if overridden {
+                                        PolicyReason::LayerOverridden.field()
+                                    } else {
+                                        "layers.frozen_in_viewport"
+                                    },
                                     raw.provenance.class_name.as_str(),
                                 ),
                                 vec![format!(
-                                    "{}: its layer is frozen in viewport {:X}",
-                                    PolicyReason::ViewportFrozen.code(),
+                                    "{}: its layer is {} in viewport {:X}",
+                                    if overridden {
+                                        PolicyReason::LayerOverridden.code()
+                                    } else {
+                                        PolicyReason::ViewportFrozen.code()
+                                    },
+                                    if overridden { "hidden" } else { "frozen" },
                                     v.handle.get()
                                 )],
                             );
