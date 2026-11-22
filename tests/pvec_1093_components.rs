@@ -99,6 +99,7 @@ fn rows<'a>(f: &'a Fixture, styles: &'a [LineStyleComponent]) -> Vec<ComponentSo
             stub,
             style: styles.get(i),
             viewport: None,
+            paint: None,
         })
         .collect()
 }
@@ -171,6 +172,7 @@ fn issue_1093_every_subset_of_streams_builds_writes_and_decodes() {
             layer: mask & 1 != 0,
             line_style: mask & 2 != 0,
             provenance: mask & 4 != 0,
+            stroke_paint: false,
         };
         let built = build_streams(select, &f.ids, &layers(), &rows(&f, &styles))
             .unwrap()
@@ -289,6 +291,7 @@ fn issue_1500_every_stream_subset_reads_back_through_pvec_reader() {
             layer: mask & 1 != 0,
             line_style: mask & 2 != 0,
             provenance: mask & 4 != 0,
+            stroke_paint: false,
         };
         let built = build_streams(select, &f.ids, &layers(), &rows(&f, &styles))
             .unwrap()

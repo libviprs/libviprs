@@ -853,6 +853,10 @@ pub enum SourceColour {
     /// consumer to resolve along the INSERT chain, because the provider hands out
     /// one block definition at a time.
     ByBlock,
+    /// BYLAYER, handed on only where the layer is the INSERT chain's to name: an entity on layer
+    /// `0` inside a block takes the layer of the INSERT that places it, which the provider cannot
+    /// see (#1638). Anywhere else the provider resolves BYLAYER through the layer table itself.
+    ByLayer,
 }
 
 /// A lineweight as the drawing states it, after the BYLAYER rule has been applied.

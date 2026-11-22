@@ -771,6 +771,7 @@ fn issue_1562_print_lineweights_false_drops_widths_from_the_line_style_stream() 
                 layer: false,
                 line_style: true,
                 provenance: false,
+                stroke_paint: false,
             })
         });
         let report = out.unwrap().report;

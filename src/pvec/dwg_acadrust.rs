@@ -1556,7 +1556,8 @@ impl AcadrustCursor<'_> {
     ///
     /// BYBLOCK is handed on as it is: this cursor sees one block definition and does
     /// not know the INSERT that is drawing it, so a layer whose own value is BYBLOCK
-    /// gives `Present(ByBlock)` too. A BYLAYER entity on a layer the table does not
+    /// gives `Present(ByBlock)` too, and BYLAYER on layer "0" inside a block gives
+    /// `Present(ByLayer)`. A BYLAYER entity on a layer the table does not
     /// have, or on one whose own value is BYLAYER or no colour, has nothing to
     /// resolve to and reports [`SourceFact::Absent`].
     fn style_of(&self, common: &acr::entities::EntityCommon) -> EntityStyle {
@@ -1567,6 +1568,11 @@ impl AcadrustCursor<'_> {
                 .find(|l| l.name.eq_ignore_ascii_case(&common.layer))
         });
         let colour = match common.color {
+            // Layer "0" inside a block is drawn on the layer of the INSERT that places it, which
+            // this cursor cannot see, so BYLAYER there is handed on for the consumer to resolve (#1638).
+            acr::Color::ByLayer if common.layer == "0" && !self.path.is_root() => {
+                SourceFact::Present(SourceColour::ByLayer)
+            }
             acr::Color::ByLayer => layer.map_or(SourceFact::Absent, |l| fact_colour(l.color)),
             c => fact_colour(c),
         };
