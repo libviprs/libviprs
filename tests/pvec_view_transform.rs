@@ -269,9 +269,9 @@ fn n2_6_1055_every_row_of_the_decision_table_has_a_knob_and_every_knob_a_test_ab
             "layer-no-plot-text",
             "layer-frozen-in-viewport",
             "insert-layer-override",
+            "entity-invisible",
             "nested-insert",
-            "xref",
-            "entity-invisible"
+            "xref"
         ]
     );
     // `layer-no-plot` is the print profile's row (#1559); its named tests are in

@@ -197,7 +197,8 @@ fn handles(o: &libviprs::pvec::ViewOutcome) -> Vec<u64> {
 #[test]
 fn n3_3_1097_default_profile_is_pinned_field_by_field() {
     use libviprs::pvec::{
-        LayerVisibility, NestedInsertPolicy, ViewportClipping, ViewportFreezeRule, XrefPolicy,
+        EntityPolicy, LayerVisibility, NestedInsertPolicy, ViewportClipping, ViewportFreezeRule,
+        XrefPolicy,
     };
     let expected = ViewProfile {
         space: SpaceSelection::Model,
@@ -210,6 +211,9 @@ fn n3_3_1097_default_profile_is_pinned_field_by_field() {
             no_plot_text: LayerStateRule::Ignore,
             frozen_in_viewport: ViewportFreezeRule::IgnoreAndReport,
             insert_override: InsertLayerRule::InheritOnLayerZero,
+        },
+        entities: EntityPolicy {
+            invisible: LayerStateRule::Exclude,
         },
         nested_inserts: NestedInsertPolicy { max_depth: 64 },
         xrefs: XrefPolicy::ReportExternal,
