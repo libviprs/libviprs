@@ -248,8 +248,81 @@ pub struct PvecConversion<'a> {
     texts: bool,
     fills: bool,
     element_rules: Option<ElementRules>,
+    plot_settings: PlotSettings,
     xrefs: Vec<(String, CadSource<'a>)>,
     xref_note: Arc<Mutex<xref::XrefNote>>,
+}
+
+/// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
+/// makes over the layout's own plot settings. [`Default`] is the layout as it stands, which is
+/// what a conversion does without this.
+///
+/// It only reaches a paper layout whose plot settings the drawing reports. Without them the frame
+/// is the extents whatever is asked, and the report notes `plot-settings-not-applied`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlotSettings {
+    /// What to plot.
+    pub area: PlotArea,
+    /// Paper size in millimetres, width then height, before the layout's rotation. `None` is the
+    /// layout's own paper. An override clears the layout's margins, which belong to its paper.
+    pub paper_mm: Option<[f64; 2]>,
+    /// Portrait or landscape. `None` is the layout's own, after its rotation.
+    pub orientation: Option<Orientation>,
+    /// Scale the plot so what it covers fits the printable area of the paper. Under
+    /// [`PlotArea::Extents`] that is the sheet's extents. Under [`PlotArea::Layout`] it is the
+    /// layout's own printable area, which only changes anything with a paper override. The frame is
+    /// the part of the drawing the paper then shows; the calibration stays the plot scale, and the
+    /// fit ratio is a note in the report.
+    pub fit_to_paper: bool,
+    /// The plot scale in place of the layout's own: a preset and a custom scale are both a
+    /// [`PlotScale`]. `None` is the layout's own.
+    pub scale: Option<PlotScale>,
+    /// The plot offset in millimetres, in place of the layout's own plot origin. `None` is the
+    /// layout's own.
+    pub offset_mm: Option<[f64; 2]>,
+    /// Centre the extents on the printable area. The offset is then ignored. Only for
+    /// [`PlotArea::Extents`], as in AutoCAD; under `Layout` it is ignored and the report says so.
+    pub center: bool,
+    /// Lineweights print. `None` is the layout's own; `Some(false)` drops widths.
+    pub print_lineweights: Option<bool>,
+    /// Paper space draws after what the viewports show. `None` is the layout's own.
+    pub paperspace_last: Option<bool>,
+}
+
+/// A plot scale as the plot dialog's custom row gives it: `paper` paper units of `paper_unit` to
+/// `drawing` drawing units, each the size of the conversion's own unit. `1 inch = 50 units` is
+/// `{ paper: 1.0, paper_unit: Inches, drawing: 50.0 }`, whatever the sheet's own unit is. The
+/// calibration record carries `paper_unit` as its paper unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlotScale {
+    /// Paper units, in `paper_unit`.
+    pub paper: f64,
+    /// The unit the paper side is in.
+    pub paper_unit: SourceUnit,
+    /// Drawing units.
+    pub drawing: f64,
+}
+
+/// Portrait or landscape, the drawing orientation of the plot dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Orientation {
+    /// Taller than wide.
+    Portrait,
+    /// Wider than tall.
+    Landscape,
+}
+
+/// The part of a layout a plot covers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum PlotArea {
+    /// The layout's own frame, the paper placed from its margins and origin.
+    #[default]
+    Layout,
+    /// The extents of what the sheet draws: its own kept geometry and the rectangles of its drawn
+    /// viewports. The paper is placed from the extents' lower left corner.
+    Extents,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -273,6 +346,7 @@ impl<'a> PvecConversion<'a> {
             texts: false,
             fills: false,
             element_rules: None,
+            plot_settings: PlotSettings::default(),
             xrefs: Vec::new(),
             xref_note: Arc::default(),
         }
@@ -358,6 +432,13 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn limits(mut self, limits: SourceLimits) -> Self {
         self.view_profile = self.view_profile.with_limits(limits);
+        self
+    }
+
+    /// What a paper sheet plots: area, paper size, offset and centre, fit to paper (#1628).
+    #[must_use]
+    pub fn plot_settings(mut self, settings: PlotSettings) -> Self {
+        self.plot_settings = settings;
         self
     }
 
@@ -576,6 +657,7 @@ impl<'a> PvecConversion<'a> {
             fills: want_fills,
             element_rules,
             calibration: caller_calibration,
+            plot_settings,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -755,6 +837,7 @@ impl<'a> PvecConversion<'a> {
             let mut frame_box = None;
             let mut drop_widths = false;
             let mut written = None;
+            let mut place = None;
             match &fact {
                 SourceFact::Absent => summary.frame_reason = Some("plot-settings-absent".into()),
                 SourceFact::Present(p) => {
@@ -773,7 +856,11 @@ impl<'a> PvecConversion<'a> {
                         plot_plot_styles: p.plot_plot_styles,
                     });
                     let sized = |v: f64| v.is_finite() && v > 0.0;
-                    if !(sized(p.paper_width) && sized(p.paper_height)) {
+                    let fit = plot_settings.fit_to_paper;
+                    let [paper_w, paper_h] = plot_settings
+                        .paper_mm
+                        .unwrap_or([p.paper_width, p.paper_height]);
+                    if !(sized(paper_w) && sized(paper_h)) {
                         summary.frame_reason = Some("paper-size-zero".into());
                     } else {
                         let sheet_unit = match p.paper_units {
@@ -795,27 +882,90 @@ impl<'a> PvecConversion<'a> {
                             None => None,
                         };
                         let (w, h) = if matches!(p.rotation, 1 | 3) {
+                            (paper_h, paper_w)
+                        } else {
+                            (paper_w, paper_h)
+                        };
+                        // The orientation turns the paper to the shape asked for, after the
+                        // layout's rotation.
+                        let turned = match plot_settings.orientation {
+                            Some(Orientation::Portrait) if w > h => (h, w),
+                            Some(Orientation::Landscape) if h > w => (h, w),
+                            _ => (w, h),
+                        };
+                        if turned != (w, h) {
+                            summary.notes.push("plot-orientation".into());
+                        }
+                        let (w, h) = turned;
+                        // An override replaces the paper, so the margins that belong to the
+                        // layout's paper go with it.
+                        let margins = if plot_settings.paper_mm.is_some() {
+                            [0.0; 4]
+                        } else {
+                            p.margins
+                        };
+                        // The offset is the plot origin the dialog shows, so it replaces the
+                        // layout's own.
+                        let shift = plot_settings.offset_mm.unwrap_or(p.origin);
+                        // What the layout itself prints, for a fit under the Layout area: its
+                        // paper (after its rotation) less its own margins.
+                        let (lw, lh) = if matches!(p.rotation, 1 | 3) {
                             (p.paper_height, p.paper_width)
                         } else {
                             (p.paper_width, p.paper_height)
                         };
+                        let own = [
+                            lw - p.margins[0] - p.margins[2],
+                            lh - p.margins[1] - p.margins[3],
+                        ];
                         // UNMEASURED (the print profile ADR's open item): the paper's lower left
                         // is taken to sit at -(margin + plot origin) from the paper-space origin.
                         // No fixture with non-zero margins and origin has measured it, so the
                         // report says `position: unmeasured`.
-                        let placed = (
-                            to_unit(p.margins[0] + p.origin[0]),
-                            to_unit(p.margins[1] + p.origin[1]),
-                            to_unit(w),
-                            to_unit(h),
-                        );
-                        match placed {
-                            (Some(dx), Some(dy), Some(w), Some(h)) => {
-                                let (x0, y0) = (0.0 - dx, 0.0 - dy);
-                                frame_box = Some([x0, y0, x0 + w, y0 + h]);
+                        let su = |v: [f64; 2]| to_unit(v[0]).zip(to_unit(v[1]));
+                        let converted = su([margins[0], margins[1]])
+                            .zip(su([margins[2], margins[3]]))
+                            .zip(su([w, h]))
+                            .zip(su(own))
+                            // The margin and the shift added in millimetres, then converted once.
+                            .zip(su([margins[0] + shift[0], margins[1] + shift[1]]));
+                        match converted {
+                            Some((((((l, b), (r, t)), size), own), corner)) => {
+                                let at = Place {
+                                    margin: [l, b, r, t],
+                                    size: [size.0, size.1],
+                                    corner: [corner.0, corner.1],
+                                };
+                                // Drawing units to a paper unit. Under the Layout area a fit
+                                // fits the layout's own printable area to the new paper's.
+                                let mut k = 1.0;
+                                if fit && plot_settings.area == PlotArea::Layout {
+                                    let printable =
+                                        [(at.size[0] - l - r, own.0), (at.size[1] - b - t, own.1)];
+                                    let tight = printable
+                                        .into_iter()
+                                        .filter(|(n, d)| sized(*n) && sized(*d))
+                                        .min_by(|x, y| (x.0 / x.1).total_cmp(&(y.0 / y.1)));
+                                    match tight {
+                                        Some((n, d)) if n != d => {
+                                            k = d / n;
+                                            summary.notes.push("plot-fit-to-paper".into());
+                                            summary.notes.push(format!("plot-fit-ratio 1:{k}"));
+                                        }
+                                        Some(_) => summary.notes.push("plot-fit-no-change".into()),
+                                        None => summary.notes.push("plot-fit-skipped".into()),
+                                    }
+                                }
+                                if plot_settings.center && plot_settings.area == PlotArea::Layout {
+                                    summary.notes.push("plot-centre-not-applicable".into());
+                                }
+                                let (x0, y0) = (-at.corner[0] * k, -at.corner[1] * k);
+                                frame_box =
+                                    Some([x0, y0, x0 + at.size[0] * k, y0 + at.size[1] * k]);
                                 plot_unit = sheet_unit;
+                                place = Some(at);
                             }
-                            _ => summary.frame_reason = Some("unit-not-declarable".into()),
+                            None => summary.frame_reason = Some("unit-not-declarable".into()),
                         }
                     }
                     if let (Some(b), Some(sheet_unit)) = (frame_box, plot_unit) {
@@ -825,104 +975,50 @@ impl<'a> PvecConversion<'a> {
                         if matches!(p.paper_units, 0 | 1) {
                             summary.unit_source = "plot-paper-units".into();
                         }
-                        drop_widths = !p.print_lineweights;
+                        drop_widths = !plot_settings
+                            .print_lineweights
+                            .unwrap_or(p.print_lineweights);
                         summary.widths_dropped = drop_widths;
+                        if plot_settings.print_lineweights.is_some() {
+                            summary.notes.push("plot-lineweights-overridden".into());
+                        }
+                        if plot_settings.paper_mm.is_some() {
+                            summary.notes.push("plot-paper-overridden".into());
+                        }
+                        if plot_settings.offset_mm.is_some()
+                            && !(plot_settings.center && plot_settings.area == PlotArea::Extents)
+                        {
+                            summary.notes.push("plot-offset".into());
+                        }
                         if p.plot_type != 5 {
                             summary.notes.push("plot-type-not-applied".into());
                         }
                         if p.rotation != 0 {
                             summary.notes.push("rotation-not-applied".into());
                         }
-                        // P-9: the plot scale is the calibration record, never applied to a
-                        // coordinate. A caller's calibration wins.
-                        let (n, d) = (p.scale_numerator, p.scale_denominator);
-                        if caller_calibration.is_some() {
-                            summary.notes.push("caller-calibration".into());
-                        } else if !(sized(n) && sized(d)) {
-                            summary.notes.push("scale-zero".into());
-                        } else {
-                            // Both sides integral after scaling by one power of ten up to 10^6
-                            // reduce exactly; anything else is rounded at 10^6 and the record
-                            // carries the rounding as its uncertainty. A side is integral at `k`
-                            // when its rounded multiple divided back by `k` is the stored value:
-                            // a decimal such as 2.01 is no binary fraction, so `2.01 * 100` is not
-                            // 201 in f64, but `201 / 100` is the f64 nearest 2.01, which is it.
-                            let integral = |v: f64| (1.0..9.0e15).contains(&v).then_some(v as u64);
-                            let at = |v: f64, k: f64| {
-                                let r = (v * k).round();
-                                if r / k == v { integral(r) } else { None }
-                            };
-                            let exact = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6]
-                                .into_iter()
-                                .find_map(|k| Some((at(n, k)?, at(d, k)?)));
-                            let uncertain = exact.is_none();
-                            let ratio = exact.or_else(|| {
-                                Some((integral((n * 1e6).round())?, integral((d * 1e6).round())?))
+                        let [n, d] = plot_settings
+                            .scale
+                            .map_or([p.scale_numerator, p.scale_denominator], |s| {
+                                [s.paper, s.drawing]
                             });
-                            let reduced = ratio.and_then(|(a, b)| {
-                                let (mut x, mut y) = (a, b);
-                                while y != 0 {
-                                    (x, y) = (y, x % y);
-                                }
-                                Some((u32::try_from(a / x).ok()?, u32::try_from(b / x).ok()?))
-                            });
-                            let paper = metres_per_unit(sheet_unit).ok();
-                            // The scale is paper units to drawing units, so a paper unit is
-                            // `den / num` drawing units, each the size of the drawing's own unit.
-                            // Inches of model space on a millimetre sheet are not millimetres
-                            // (#1610). A drawing that names no length unit stands in the sheet's.
-                            let drawing = unit
-                                .filter(|u| u.is_physical())
-                                .and_then(|u| metres_per_unit(u).ok())
-                                .or(paper);
-                            let claim = reduced.zip(paper).map(|((num, den), paper)| {
-                                let raw = n / d;
-                                let mut note = if uncertain {
-                                    format!("plot scale {n}:{d} as stored, written as {num}:{den}")
-                                } else {
-                                    format!("plot scale {num}:{den}")
-                                };
-                                if let Some(one) = &single_scale {
-                                    note.push_str(&format!("; viewport {one}"));
-                                }
-                                ScaleClaim {
-                                    metres_per_source_unit: drawing.unwrap_or(paper)
-                                        * f64::from(den)
-                                        / f64::from(num),
-                                    provenance: ScaleProvenance::PlanScale {
-                                        numerator: num,
-                                        denominator: den,
-                                        paper_metres_per_unit: paper,
-                                    },
-                                    uncertainty: uncertain.then(|| {
-                                        (f64::from(num) / f64::from(den) - raw).abs() / raw
-                                    }),
-                                    note: if note.len() <= 255 {
-                                        note
-                                    } else {
-                                        format!("plot scale written as {num}:{den}")
-                                    },
-                                }
-                            });
-                            match claim.map(|c| Calibration::new(Some(c), None, None)) {
-                                Some(Ok(c)) => {
-                                    if uncertain {
-                                        summary.notes.push("scale-not-reduced".into());
-                                    }
-                                    summary.calibration = if uncertain {
-                                        "plot-scale-uncertain".into()
-                                    } else {
-                                        "plot-scale".into()
-                                    };
-                                    summary.scale = reduced.map(|(a, b)| format!("{a}:{b}"));
-                                    written = Some(c);
-                                }
-                                _ => summary.notes.push("scale-refused".into()),
-                            }
+                        if plot_settings.scale.is_some() {
+                            summary.notes.push("plot-scale-overridden".into());
                         }
+                        written = plot_scale_record(
+                            [n, d],
+                            plot_settings.scale.map_or(sheet_unit, |s| s.paper_unit),
+                            sheet_unit,
+                            unit,
+                            single_scale.as_deref(),
+                            caller_calibration.is_some(),
+                            &mut summary,
+                        );
                     }
                 }
                 _ => summary.frame_reason = Some("plot-settings-not-reportable".into()),
+            }
+            if frame_box.is_none() && *plot_settings != PlotSettings::default() {
+                summary.notes.push("plot-settings-not-applied".into());
             }
             summary.unit = plot_unit
                 .or(unit)
@@ -934,6 +1030,7 @@ impl<'a> PvecConversion<'a> {
                 unit: plot_unit,
                 calibration: written,
                 drop_widths,
+                place,
             });
         }
         let source_name = match *source {
@@ -1006,6 +1103,11 @@ impl<'a> PvecConversion<'a> {
             .and_then(|_| provider.layout_plot(layout.id).ok())
             .and_then(|f| f.present().map(|p| p.draw_viewports_first))
             .unwrap_or(false);
+        // Paper space last is viewports first; the caller's choice replaces the layout's.
+        let first = plot_settings
+            .paperspace_last
+            .filter(|_| sheet.is_some())
+            .unwrap_or(first);
         let drawn: Vec<usize> = windows
             .iter()
             .enumerate()
@@ -1332,6 +1434,81 @@ impl<'a> PvecConversion<'a> {
                 pieces.insert(0, joined);
             }
             Some(pieces)
+        }
+        // Plot area Extents places the paper from the extents of what the sheet draws: the paper's
+        // own kept geometry and the rectangles of its drawn viewports. Centre and fit to paper work
+        // on those extents too (#1628). The frame was the layout's own until now.
+        if let Some(sh) = sheet
+            .as_mut()
+            .filter(|_| plot_settings.area == PlotArea::Extents)
+            && let Some(pl) = sh.place
+        {
+            let mut ext: Option<[f64; 4]> = None;
+            let mut grow = |b: [f64; 4]| {
+                ext = Some(ext.map_or(b, |e| {
+                    [
+                        e[0].min(b[0]),
+                        e[1].min(b[1]),
+                        e[2].max(b[2]),
+                        e[3].max(b[3]),
+                    ]
+                }));
+            };
+            for (at, item) in items.iter().enumerate() {
+                let Item::Leaf(f) = item else { continue };
+                if via[at].1.is_some() || f.entity.provenance.class_name == "VIEWPORT" {
+                    continue;
+                }
+                if let Ok(done) = classify_item(item, &f.entity, gate, None)
+                    && let Some(b) = done.geometry.source_bounds()
+                {
+                    let (lo, hi) = (b.min(), b.max());
+                    grow([lo.x, lo.y, hi.x, hi.y]);
+                }
+            }
+            for (_, w) in &windows {
+                if let Window::Drawn { rect, .. } = w {
+                    grow(*rect);
+                }
+            }
+            sh.summary.notes.push("plot-area-extents".into());
+            if let Some(e) = ext {
+                let [ml, mb, mr, mt] = pl.margin;
+                let (printable_w, printable_h) = (pl.size[0] - ml - mr, pl.size[1] - mb - mt);
+                let (ew, eh) = (e[2] - e[0], e[3] - e[1]);
+                // Drawing units to a paper unit: the reciprocal of the fit ratio, one division.
+                let mut k = 1.0;
+                if plot_settings.fit_to_paper {
+                    let by_width = (printable_w / ew, printable_w, ew);
+                    let by_height = (printable_h / eh, printable_h, eh);
+                    let tight = [by_width, by_height]
+                        .into_iter()
+                        .filter(|r| r.0.is_finite() && r.0 > 0.0)
+                        .min_by(|a, b| a.0.total_cmp(&b.0));
+                    match tight {
+                        Some((_, n, d)) => {
+                            k = d / n;
+                            sh.summary.notes.push("plot-fit-to-paper".into());
+                            sh.summary.notes.push(format!("plot-fit-ratio 1:{k}"));
+                        }
+                        None => sh.summary.notes.push("plot-fit-skipped".into()),
+                    }
+                }
+                let (x0, y0) = if plot_settings.center {
+                    sh.summary.notes.push("plot-centered".into());
+                    (
+                        (e[0] + e[2]) / 2.0 - printable_w * k / 2.0 - ml * k,
+                        (e[1] + e[3]) / 2.0 - printable_h * k / 2.0 - mb * k,
+                    )
+                } else {
+                    (e[0] - pl.corner[0] * k, e[1] - pl.corner[1] * k)
+                };
+                let b = [x0, y0, x0 + pl.size[0] * k, y0 + pl.size[1] * k];
+                sh.frame = Some(b);
+                sh.summary.sheet_box = Some(b.map(|v| format!("{v}")));
+            } else {
+                sh.summary.notes.push("plot-extents-empty".into());
+            }
         }
         let frame = sheet.as_ref().and_then(|s| s.frame);
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
@@ -2524,6 +2701,119 @@ struct Classified {
     sheet: Option<Sheet>,
 }
 
+/// The plot scale as the calibration record (P-9, #1562): `n` paper units to `d` drawing units,
+/// the paper unit being `sheet_unit`. It is never applied to a coordinate. A caller's calibration
+/// wins. The summary says what became of it.
+fn plot_scale_record(
+    [n, d]: [f64; 2],
+    paper_unit: SourceUnit,
+    sheet_unit: SourceUnit,
+    unit: Option<SourceUnit>,
+    single_scale: Option<&str>,
+    caller_calibration: bool,
+    summary: &mut SheetSummary,
+) -> Option<Calibration> {
+    let sized = |v: f64| v.is_finite() && v > 0.0;
+    let mut written = None;
+    // P-9: the plot scale is the calibration record, never applied to a
+    // coordinate. A caller's calibration wins.
+    if caller_calibration {
+        summary.notes.push("caller-calibration".into());
+    } else if !(sized(n) && sized(d)) {
+        summary.notes.push("scale-zero".into());
+    } else {
+        // Both sides integral after scaling by one power of ten up to 10^6
+        // reduce exactly; anything else is rounded at 10^6 and the record
+        // carries the rounding as its uncertainty. A side is integral at `k`
+        // when its rounded multiple divided back by `k` is the stored value:
+        // a decimal such as 2.01 is no binary fraction, so `2.01 * 100` is not
+        // 201 in f64, but `201 / 100` is the f64 nearest 2.01, which is it.
+        let integral = |v: f64| (1.0..9.0e15).contains(&v).then_some(v as u64);
+        let at = |v: f64, k: f64| {
+            let r = (v * k).round();
+            if r / k == v { integral(r) } else { None }
+        };
+        let exact = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6]
+            .into_iter()
+            .find_map(|k| Some((at(n, k)?, at(d, k)?)));
+        let uncertain = exact.is_none();
+        let ratio =
+            exact.or_else(|| Some((integral((n * 1e6).round())?, integral((d * 1e6).round())?)));
+        let reduced = ratio.and_then(|(a, b)| {
+            let (mut x, mut y) = (a, b);
+            while y != 0 {
+                (x, y) = (y, x % y);
+            }
+            Some((u32::try_from(a / x).ok()?, u32::try_from(b / x).ok()?))
+        });
+        let paper = metres_per_unit(paper_unit).ok();
+        // The coordinates are in the sheet's unit and the scale's paper side in `paper_unit`, so
+        // a coordinate unit is this many paper units.
+        let along = if paper_unit == sheet_unit {
+            Some(1.0)
+        } else {
+            paper
+                .zip(metres_per_unit(sheet_unit).ok())
+                .map(|(p, s)| s / p)
+        };
+        // The scale is paper units to drawing units, so a paper unit is
+        // `den / num` drawing units, each the size of the drawing's own unit.
+        // Inches of model space on a millimetre sheet are not millimetres
+        // (#1610). A drawing that names no length unit stands in the sheet's.
+        let drawing = unit
+            .filter(|u| u.is_physical())
+            .and_then(|u| metres_per_unit(u).ok())
+            .or(metres_per_unit(sheet_unit).ok());
+        let claim = reduced
+            .zip(paper)
+            .zip(along)
+            .map(|(((num, den), paper), along)| {
+                let raw = n / d;
+                let mut note = if uncertain {
+                    format!("plot scale {n}:{d} as stored, written as {num}:{den}")
+                } else {
+                    format!("plot scale {num}:{den}")
+                };
+                if let Some(one) = &single_scale {
+                    note.push_str(&format!("; viewport {one}"));
+                }
+                ScaleClaim {
+                    metres_per_source_unit: drawing.unwrap_or(paper * along) * f64::from(den)
+                        / f64::from(num)
+                        * along,
+                    provenance: ScaleProvenance::PlanScale {
+                        numerator: num,
+                        denominator: den,
+                        paper_metres_per_unit: paper,
+                    },
+                    uncertainty: uncertain
+                        .then(|| (f64::from(num) / f64::from(den) - raw).abs() / raw),
+                    note: if note.len() <= 255 {
+                        note
+                    } else {
+                        format!("plot scale written as {num}:{den}")
+                    },
+                }
+            });
+        match claim.map(|c| Calibration::new(Some(c), None, None)) {
+            Some(Ok(c)) => {
+                if uncertain {
+                    summary.notes.push("scale-not-reduced".into());
+                }
+                summary.calibration = if uncertain {
+                    "plot-scale-uncertain".into()
+                } else {
+                    "plot-scale".into()
+                };
+                summary.scale = reduced.map(|(a, b)| format!("{a}:{b}"));
+                written = Some(c);
+            }
+            _ => summary.notes.push("scale-refused".into()),
+        }
+    }
+    written
+}
+
 /// A paper sheet as `classify` worked it out (#1562): the report's section, the frame to clip to
 /// and to hand the writer, the unit the plot settings put the sheet in, the calibration the plot
 /// scale gives and whether widths print.
@@ -2534,6 +2824,21 @@ struct Sheet {
     unit: Option<SourceUnit>,
     calibration: Option<Calibration>,
     drop_widths: bool,
+    /// What the frame is placed from, for the extents pass (#1628). `None` when it is the extents.
+    place: Option<Place>,
+}
+
+/// A paper sheet's placement in the sheet unit: what the frame is worked out from once the
+/// extents of what the sheet draws are known (#1628).
+#[derive(Clone, Copy)]
+struct Place {
+    /// Unprintable margins, left, bottom, right, top.
+    margin: [f64; 4],
+    /// The paper, after the layout's rotation and the chosen orientation.
+    size: [f64; 2],
+    /// The margin plus the shift, summed in millimetres and converted once, so that a sheet with
+    /// no override frames exactly as it did before the plot settings (#1584).
+    corner: [f64; 2],
 }
 
 /// What the component streams read off one written entity: where it came from and its line style.

@@ -14,8 +14,26 @@ assert_eq!(out.report.totals.encountered, out.fidelity.encountered());
 ## Builder
 
 `view_profile`, `limits`, `unit`, `leaves` (spatial directory and Tier 0), `cancel`, `observer`, `queue_capacity`, `calibration` (a `Calibration`, written into the artifact's calibration block),
-`profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
+`plot_settings`, `profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
 writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the trait carries no unit, so `unit` is required there.
+
+## Plot settings
+
+`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`.
+
+| field | effect |
+|---|---|
+| `area` | `PlotArea::Layout` (default) frames the paper from its margins and origin. `PlotArea::Extents` places the paper at the lower left of the extents: the sheet's kept geometry plus the rectangles of its drawn viewports. |
+| `paper_mm` | Paper size in millimetres, width then height, before the layout's rotation. It replaces the layout's paper and clears the layout's margins. A size that is zero, negative or not finite is refused as `paper-size-zero` and the frame is the extents. |
+| `orientation` | `Orientation::Portrait` or `Landscape`: turns the paper, after the layout's rotation, to the shape asked for. `None` is the layout's own. |
+| `scale` | A `PlotScale { paper, paper_unit, drawing }` in place of the layout's plot scale: `paper` paper units of `paper_unit` to `drawing` drawing units (the conversion's own unit), as the dialog's custom row and its presets give it. `1 inch = 50 units` is `{ 1, Inches, 50 }` on a sheet of any unit. It is the calibration record, with `paper_unit` as its paper unit. |
+| `offset_mm` | The plot offset, in place of the layout's own plot origin (the dialog shows one value). `None` is the layout's own. |
+| `center` | Centres the extents on the printable area (the paper less its margins); the offset is then ignored. Plot area Extents only: under Layout it is ignored with `plot-centre-not-applicable`. |
+| `fit_to_paper` | Scales what the plot covers into the printable area, the tighter side binding. Under Extents that is the extents. Under Layout it is the layout's own printable area, which only changes anything with a paper override (otherwise `plot-fit-no-change`). The frame is the window of the drawing the paper then shows, so the report's box is not the paper: read the paper size from the report's plot fields. The calibration stays the plot scale, and the fit ratio is the note `plot-fit-ratio 1:N`. |
+| `print_lineweights` | Lineweights print. `Some(false)` drops widths. `None` is the layout's own. |
+| `paperspace_last` | Paper space draws after what the viewports show. `None` is the layout's own. |
+
+Rotation 180 and the plot Window area are reported, not applied. The report's `sheet.notes` carry `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-centre-not-applicable`, `plot-paper-overridden`, `plot-orientation`, `plot-scale-overridden`, `plot-lineweights-overridden`, `plot-fit-to-paper`, `plot-fit-ratio 1:N`, `plot-fit-no-change` and `plot-fit-skipped`.
 
 ## Profiles and the capability gate
 

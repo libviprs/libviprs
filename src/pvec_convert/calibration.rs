@@ -57,14 +57,18 @@ pub struct ScaleClaim {
 pub enum ScaleProvenance {
     /// The source declares a unit the manifest's table cannot name, such as a PDF's points.
     DeclaredUnit,
-    /// A ratio stated on the sheet: `numerator` paper units to `denominator` world units, with
-    /// one source unit being `paper_metres_per_unit` metres of paper.
+    /// A ratio stated on the sheet: `numerator` paper units to `denominator` world units, the
+    /// paper unit being the one the scale was stated in (`paper_metres_per_unit` metres, 0.0254
+    /// for inches). That unit is the plot scale's own: a caller's scale override carries its own
+    /// paper unit, which can differ from the unit the sheet's coordinates are in. The record's
+    /// `metres_per_source_unit` is the ratio carried over to the coordinates, so it is not
+    /// `paper_metres_per_unit` times the ratio when those two units differ.
     PlanScale {
         /// The paper side of the ratio, at least 1.
         numerator: u32,
         /// The world side of the ratio, at least 1.
         denominator: u32,
-        /// Metres of paper per source unit.
+        /// Metres per paper unit, the unit the ratio's paper side is in.
         paper_metres_per_unit: f64,
     },
     /// Two source points and the real distance between them, in metres.
