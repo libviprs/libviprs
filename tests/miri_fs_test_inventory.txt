@@ -809,6 +809,10 @@ annotated   fs-detected  tests/pvec_1635_manifest_guids.rs::a_resaved_drawing_ke
 annotated   fs-detected  tests/pvec_1635_manifest_guids.rs::manifest_carries_fingerprint_version_and_plot_config_name
 annotated   not-detected tests/pvec_1635_manifest_guids.rs::the_66_layout_drawing_carries_its_fingerprint_and_plot_config_names
 annotated   fs-detected  tests/pvec_1635_manifest_guids.rs::the_dwg_manifest_carries_the_same_facts
+annotated   fs-detected  tests/pvec_1633_effective_layer.rs::issue_1633_a_layer_zero_leaf_in_an_insert_is_on_the_inserts_layer_in_the_stream
+annotated   fs-detected  tests/pvec_1633_effective_layer.rs::issue_1633_the_effective_layer_is_carried_through_a_nested_insert
+annotated   fs-detected  tests/pvec_1633_invisible_flag.rs::issue_1633_entity_invisible_flag_drops_the_entity
+annotated   fs-detected  tests/pvec_1633_invisible_flag.rs::issue_1633_the_fixture_draws_every_entity_when_none_is_invisible
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage

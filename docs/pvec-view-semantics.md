@@ -17,6 +17,7 @@ explicitly so a caller can see what they accepted, and a test pins every value
 | `layers.overrides` | none | layer-overrides |
 | `layers.frozen_in_viewport` | ignore-and-report | layer-frozen-in-viewport |
 | `layers.insert_override` | inherit-on-layer-zero | insert-layer-override |
+| `entities.invisible` | exclude | entity-invisible |
 | `nested_inserts.max_depth` | 64 | nested-insert |
 | `xrefs` | report-external | xref |
 <!-- view:end -->
