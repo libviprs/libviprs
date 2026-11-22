@@ -80,7 +80,7 @@ fn layers() -> Vec<LayerState> {
         frozen,
         locked: false,
         plottable: true,
-        colour: None,
+        ..LayerState::default()
     };
     vec![
         l("0", false, false),

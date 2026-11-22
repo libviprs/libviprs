@@ -368,3 +368,26 @@ fn issue_1638_a_sheet_paints_the_model_strokes_seen_through_its_viewport() {
     assert!(paint.colours.iter().all(|w| w & 0xFF == 0xFF));
     let _ = fs::remove_dir_all(dir);
 }
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1638_without_the_paint_stream_colours_ignored_counts_every_colour_as_before() {
+    // The line style stream is on and the paint stream is off: nothing writes the colours, so each
+    // stroke with an explicit colour index is still counted as ignored.
+    let mut d = Drawing::new(&[("WALLS", Color::Index(5))]);
+    d.line(None, 1.0, "WALLS", Color::Index(3));
+    d.line(None, 2.0, "WALLS", Color::Index(1));
+    let run = convert(
+        "ignored-off",
+        &d.bytes(),
+        StreamSelection {
+            line_style: true,
+            ..StreamSelection::NONE
+        },
+    );
+    assert_eq!(
+        run.out.report.components.as_ref().unwrap().colours_ignored,
+        2
+    );
+    let _ = fs::remove_dir_all(run.dir);
+}
