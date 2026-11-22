@@ -30,6 +30,7 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 | `layers.no_plot` | ignore |
 | `layers.no_plot_text` | ignore |
 | `layers.off` | exclude |
+| `layers.overrides` | none |
 | `nested_inserts.max_depth` | 64 |
 | `space` | model |
 | `viewport_clipping` | unsupported |
@@ -40,7 +41,7 @@ the pin with the policy PVec exports, so a change of PVec's policy is a red test
 `tests/common/pvec_gold.rs`.
 
 **5. The provider compatibility range.** The default provider is `acadrust`, at revision
-`f1e00c11f6371c8cfcff2c726620a51a45a2ad1b`, and it takes DWG versions AC1014 to AC1032. A drawing below AC1014 is
+`5bf63c7b1653fbb5a51f2f8a5a5a3f01a567c094`, and it takes DWG versions AC1014 to AC1032. A drawing below AC1014 is
 refused at conversion start. `docs/pvec-version-compatibility.md` has the table.
 
 ## The baselines it was frozen against

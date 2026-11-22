@@ -85,6 +85,7 @@ diagnostic aid. An entity dropped this way is counted under `ENTITY_INVISIBLE`.
 | `layers.no_plot` | ignore | exclude | `layer-no-plot` |
 | `layers.frozen_text` | ignore | ignore | `layer-frozen-text` |
 | `layers.no_plot_text` | ignore | exclude | `layer-no-plot-text` |
+| `layers.overrides` | none | none | `layer-overrides` |
 | `layers.frozen_in_viewport` | ignore-and-report | apply | `layer-frozen-in-viewport` |
 | `layers.insert_override` | inherit-on-layer-zero | inherit-on-layer-zero | `insert-layer-override` |
 | `entities.invisible` | exclude | exclude | `entity-invisible` |
