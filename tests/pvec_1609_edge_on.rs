@@ -84,6 +84,7 @@ impl DwgProvider for Drawing {
                 frozen: false,
                 locked: false,
                 plottable: true,
+                ..LayerState::default()
             })
             .collect())
     }
