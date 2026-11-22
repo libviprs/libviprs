@@ -25,11 +25,21 @@ writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the tr
 |---|---|
 | `area` | `PlotArea::Layout` (default) frames the paper from its margins and origin. `PlotArea::Extents` places the paper at the lower left of the extents: the sheet's kept geometry plus the rectangles of its drawn viewports. |
 | `paper_mm` | Paper size in millimetres, width then height, before the layout's rotation. It replaces the layout's paper and clears the layout's margins. A size that is zero, negative or not finite is refused as `paper-size-zero` and the frame is the extents. |
-| `offset_mm` | Added to the layout's own plot origin. |
-| `center` | Centres the extents on the printable area (the paper less its margins). The offset is then ignored. |
-| `fit_to_paper` | Scales the extents into the printable area, the tighter side binding. The frame is the window of the drawing the paper then shows, and the ratio is the calibration record (P-9). |
+| `orientation` | `Orientation::Portrait` or `Landscape`: turns the paper, after the layout's rotation, to the shape asked for. `None` is the layout's own. |
+| `scale` | A `PlotScale { paper, paper_unit, drawing }` in place of the layout's plot scale: `paper` paper units of `paper_unit` to `drawing` drawing units (the conversion's own unit), as the dialog's custom row and its presets give it. `1 inch = 50 units` is `{ 1, Inches, 50 }` on a sheet of any unit. It is the calibration record, with `paper_unit` as its paper unit. |
+| `offset_mm` | The plot offset, in place of the layout's own plot origin (the dialog shows one value). `None` is the layout's own. |
+| `center` | Centres the extents on the printable area (the paper less its margins); the offset is then ignored. Plot area Extents only: under Layout it is ignored with `plot-centre-not-applicable`. |
+| `fit_to_paper` | Scales what the plot covers into the printable area, the tighter side binding. Under Extents that is the extents. Under Layout it is the layout's own printable area, which only changes anything with a paper override (otherwise `plot-fit-no-change`). The frame is the window of the drawing the paper then shows, so the report's box is not the paper: read the paper size from the report's plot fields. The calibration stays the plot scale, and the fit ratio is the note `plot-fit-ratio 1:N`. |
+| `print_lineweights` | Lineweights print. `Some(false)` drops widths. `None` is the layout's own. |
+| `paperspace_last` | Paper space draws after what the viewports show. `None` is the layout's own. |
 
-Centre and fit use the extents even when `area` is `Layout`. Rotation 180 and the plot Window area are reported, not applied. The report's `sheet.notes` carry `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-paper-overridden` and `plot-fit-to-paper`.
+Rotation 180 and the plot Window area are reported, not applied. The report's `sheet.notes` carry `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-centre-not-applicable`, `plot-paper-overridden`, `plot-orientation`, `plot-scale-overridden`, `plot-lineweights-overridden`, `plot-fit-to-paper`, `plot-fit-ratio 1:N`, `plot-fit-no-change` and `plot-fit-skipped`.
+
+## Thumbnail
+
+With `--features pvec-raster-thumbnail`, `PvecConversion::thumbnail(width_px)` also draws the converted sheet into `PvecConversionOutput::thumbnail` as an 8-bit RGB PNG. Strokes only, black and one pixel wide on opaque white; text is not drawn. The width is the caller's and the height follows the frame's aspect, so a long thin sheet gives a tall or a flat image. A paper layout is drawn edge to edge. Model space, and a layout without plot settings, leave 2 percent of the frame's longer side empty on every side. A paper sheet with nothing to stroke yields a blank picture and no artifact (`written == 0`). One call per layout: `PvecLayoutSet::sheets` passes it on to each sheet. A zero width is `PvecConvertError::Thumbnail`.
+
+`pvec::thumbnail::thumbnail(artifact, width_px)` draws an artifact that is already published, framed on its declared bounds with no margin.
 
 ## Profiles and the capability gate
 
