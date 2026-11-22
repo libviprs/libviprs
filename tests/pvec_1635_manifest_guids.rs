@@ -5,7 +5,7 @@
 //! the same drawing, and the wizard shows the PC3 and CTB the drawing itself names.
 //!
 //! The small drawings are written with acadrust so each value is known; the big one is the
-//! 66-layout drawing named by `IASBUILT_DWG_LAYOUTS_FIXTURE`, which says so when unset. Needs
+//! 66-layout drawing named by `LIBVIPRS_DWG_LAYOUTS_FIXTURE`, which says so when unset. Needs
 //! `--features pvec-convert`.
 
 #![cfg(feature = "pvec-convert")]
@@ -206,8 +206,8 @@ fn the_manifest_serialises_the_new_fields_under_the_spec_names() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn the_66_layout_drawing_carries_its_fingerprint_and_plot_config_names() {
-    let Some(path) = std::env::var_os("IASBUILT_DWG_LAYOUTS_FIXTURE") else {
-        eprintln!("skipped: IASBUILT_DWG_LAYOUTS_FIXTURE is not set (the 66-layout drawing)");
+    let Some(path) = std::env::var_os("LIBVIPRS_DWG_LAYOUTS_FIXTURE") else {
+        eprintln!("skipped: LIBVIPRS_DWG_LAYOUTS_FIXTURE is not set (the 66-layout drawing)");
         return;
     };
     let m = cad_manifest::<AcadrustProvider>(CadSource::Path(Path::new(&path)))

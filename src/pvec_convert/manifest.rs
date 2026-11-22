@@ -15,19 +15,10 @@ use super::layouts::{listed_viewports, sheet_skip};
 use super::{ViewportClass, viewport_class};
 use crate::cad::{CadSource, ItemHandle};
 use crate::pvec::{
-    DwgProvider, EntityScope, LayoutId, LayoutKind, ProviderError, SourceColour, SourceFact,
+    DwgProvider, EntityScope, LayerOverride, LayoutId, LayoutKind, ProviderError, SourceColour,
+    SourceFact,
 };
 use crate::pvec_convert::{LayoutSetError, SheetSkip};
-
-/// What the user forces for one layer: wins over every flag, Defpoints included.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum LayerOverride {
-    /// Draw the layer.
-    Visible,
-    /// Leave the layer out.
-    Hidden,
-}
 
 /// The two states a resolved layer is in for model space, or for one layout or viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -357,6 +348,9 @@ pub struct ManifestLayerState {
     pub layers: Vec<StateLayer>,
     /// Names the state records that the drawing no longer has.
     pub missing_layers: Vec<String>,
+    /// Handles (hex) of recorded layers that have no name, because the layer was deleted from the
+    /// table and the file keeps only its handle. `missing_layers` never holds a blank.
+    pub missing_layer_handles: Vec<String>,
     /// Drawing layers the state does not mention.
     pub unlisted_layers: Vec<String>,
 }
@@ -651,8 +645,15 @@ pub fn cad_manifest<P: DwgProvider>(source: CadSource<'_>) -> Result<CadManifest
             missing_layers: s
                 .layers
                 .iter()
+                .filter(|sl| !sl.name.is_empty())
                 .filter(|sl| !layers.iter().any(|l| same(&l.name, &sl.name)))
                 .map(|sl| sl.name.clone())
+                .collect(),
+            missing_layer_handles: s
+                .layers
+                .iter()
+                .filter(|sl| sl.name.is_empty())
+                .filter_map(|sl| hex(sl.handle))
                 .collect(),
             unlisted_layers: layers
                 .iter()
@@ -675,6 +676,7 @@ pub fn cad_manifest<P: DwgProvider>(source: CadSource<'_>) -> Result<CadManifest
             layers: s
                 .layers
                 .iter()
+                .filter(|l| !l.name.is_empty())
                 .map(|l| StateLayer {
                     name: l.name.clone(),
                     on: !l.off,
