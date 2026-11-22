@@ -893,10 +893,12 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #302 adds 1: `tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports`, which reads `blueprint-mix.pdf`. It said 1140 before this line moved.
 /// #1609 and #1610 land together: 7 from `tests/pvec_1609_annotations.rs` and the `pvec_dwg_basic`/`pvec_block_flatten` cells, 5 from #1610's region and sheet cells. It said 1146 and 1148 on the two branches before this line moved.
 /// #1609 (the rest of it) adds 1: `tests/pvec_1609_annotations.rs::issue_1609_a_disc_and_a_sliver_are_stored_and_a_line_is_said_to_have_no_area`. #1615 adds 4: the three `tests/pvec_1615_bake_default.rs` cells and the `tests/pvec_1615_baked_report.rs` cell that convert a PDF into a temp dir. It said 1153 before this line moved.
-/// #1638 adds 8: the `tests/pvec_1638_stroke_paint.rs` cells that convert a drawing into a temp dir and read the paint stream back. It said 1166 before this line moved.
-/// #1633 adds 4 (merged in here): the `tests/pvec_1633_effective_layer.rs` and `tests/pvec_1633_invisible_flag.rs` cells that convert a hand-built drawing into a temp dir. It said 1174 before this line moved.
-/// #1638 adds 1 more: the colours_ignored cell with the paint stream off. It said 1178 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1179;
+/// #1639 adds 17: the `tests/pvec_1621_text_layers.rs` cells that convert a drawing into a temp dir (or read the ADRs) and read the artifact back. It said 1166 before this line moved.
+/// #1622 adds 1: `tests/pvec_1564_layout_set.rs::issue_1622_rom_s_floor_plan_lists_its_66_sheets_in_tab_order`, which reads Rom's drawing when `LIBVIPRS_DWG_LAYOUTS_FIXTURE` names it. It said 1183 before this line moved.
+/// #1638 adds 8: the `tests/pvec_1638_stroke_paint.rs` cells that convert a drawing into a temp dir and read the paint stream back. It said 1184 before this line moved.
+/// #1633 adds 4 (merged in here): the `tests/pvec_1633_effective_layer.rs` and `tests/pvec_1633_invisible_flag.rs` cells that convert a hand-built drawing into a temp dir. It said 1192 before this line moved.
+/// #1638 adds 1 more: the colours_ignored cell with the paint stream off. It said 1196 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1197;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

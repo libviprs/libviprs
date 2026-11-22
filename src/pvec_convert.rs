@@ -75,7 +75,10 @@ pub use georef::{
     GeoreferenceError, GeoreferenceHandoff, HandoffV1, SidecarImport, SourceBox, UnitRecord,
     georef_path, import_sidecar,
 };
-pub use layouts::{LayoutSetError, LayoutSetOutput, PvecLayoutSet, SheetOutcome, SheetSkip};
+pub use layouts::{
+    LayoutSetError, LayoutSetOutput, PaperSheet, PvecLayoutSet, SheetOutcome, SheetSkip,
+    paper_sheets,
+};
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
 pub use pdf::{PdfConversion, PdfConversionOutput, PdfConvertError};
