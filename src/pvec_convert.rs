@@ -55,8 +55,8 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 mod calibration;
 mod capability;
@@ -64,6 +64,7 @@ mod georef;
 mod layouts;
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+mod xref;
 pub use crate::pvec::writer::recalibrate;
 pub use calibration::{
     Calibration, CalibrationError, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat,
@@ -238,6 +239,7 @@ pub struct PvecConversion<'a> {
     annotations: bool,
     element_rules: Option<ElementRules>,
     xrefs: Vec<(String, CadSource<'a>)>,
+    xref_note: Arc<Mutex<xref::XrefNote>>,
 }
 
 impl<'a> PvecConversion<'a> {
@@ -261,6 +263,7 @@ impl<'a> PvecConversion<'a> {
             annotations: false,
             element_rules: None,
             xrefs: Vec::new(),
+            xref_note: Arc::default(),
         }
     }
 
@@ -450,7 +453,11 @@ impl<'a> PvecConversion<'a> {
     /// [`convert_with`](Self::convert_with) would.
     pub fn probe_with<P: DwgProvider>(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-        let c = self.classify(&provider, self.unit)?;
+        let c = if self.xrefs.is_empty() {
+            self.classify(&provider, self.unit)?
+        } else {
+            self.classify(&self.with_xrefs(provider)?, self.unit)?
+        };
         c.tally
             .finish(c.encountered)
             .map_err(PvecConvertError::Tally)
@@ -491,10 +498,28 @@ impl<'a> PvecConversion<'a> {
                 .ok_or(PvecConvertError::UnitRequired)
                 .and_then(|unit| {
                     let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-                    self.run(&provider, unit)
+                    if self.xrefs.is_empty() {
+                        return self.run(&provider, unit);
+                    }
+                    let with = self.with_xrefs(provider)?;
+                    self.run(&with, unit)
                 })
         };
         report_failure(observer.as_deref(), result)
+    }
+
+    /// `host` with the xref drawings the caller supplied behind it (#1631).
+    fn with_xrefs<P: DwgProvider>(
+        &self,
+        host: P,
+    ) -> Result<xref::XrefProvider<P>, PvecConvertError> {
+        xref::attach(
+            host,
+            &self.xrefs,
+            self.view_profile.limits.max_block_depth,
+            self.xref_note.clone(),
+        )
+        .map_err(PvecConvertError::Open)
     }
 
     /// Everything a conversion decides about its entities, up to but not including the write.
@@ -1975,6 +2000,10 @@ impl<'a> PvecConversion<'a> {
                 .collect();
             s
         });
+        let xref_note = self
+            .xref_note
+            .lock()
+            .expect("the xref note is not poisoned");
         let xrefs = XrefSummary {
             unresolved: flat
                 .skipped
@@ -1987,8 +2016,18 @@ impl<'a> PvecConversion<'a> {
                     path_refusal: None,
                 })
                 .collect(),
-            resolved: Vec::new(),
+            resolved: xref_note.resolved.iter().cloned().collect(),
         };
+        let mut diagnostics = consumed.diagnostics;
+        for name in &xref_note.unattached {
+            diagnostics.push(Diagnostic::new(
+                DiagnosticCode::InsertNotExpanded,
+                "xref-not-attached",
+                format!(
+                    "a drawing was supplied for xref {name}, and no xref block of that name exists"
+                ),
+            ));
+        }
         // No rule named a wall, so the layer names carry no meaning here: the straight lines are
         // the walls, and the derivation drops the ones that join nothing (#1610).
         let wall_source = if walls.is_empty() && !lines.is_empty() {
@@ -2005,7 +2044,7 @@ impl<'a> PvecConversion<'a> {
             encountered,
             view: ViewSummary::from_report(&view.report),
             xrefs,
-            diagnostics: consumed.diagnostics,
+            diagnostics,
             peak_queue_depth: consumed.peak,
             sides: consumed.sides,
             walls,

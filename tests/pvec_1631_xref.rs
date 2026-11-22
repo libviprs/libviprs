@@ -17,14 +17,13 @@ use std::fs;
 use std::path::PathBuf;
 
 use libviprs::cad::{CadSource, ItemHandle};
-use libviprs::pvec::flatten::FlattenError;
 use libviprs::pvec::publish::open_published;
 use libviprs::pvec::report::ConversionReport;
 use libviprs::pvec::{
     ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet,
-    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, Limit,
-    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, SourceLimits,
-    SourceTransform, SourceUnit, XrefAttachment,
+    FacetSource, InstancePath, LayerState, LayoutId, LayoutKind, LayoutState, ProvenanceStub,
+    ProviderCaps, ProviderError, RawEntity, RawGeometry, SourceLimits, SourceTransform, SourceUnit,
+    XrefAttachment,
 };
 use libviprs::pvec_convert::{PvecConversion, PvecConversionOutput, PvecConvertError};
 use pvec_facade::Curve;
@@ -230,6 +229,17 @@ fn segments(dest: &std::path::Path) -> Vec<([f64; 2], [f64; 2], f64)> {
         .collect()
 }
 
+/// The text of a refusal, with its sources, or a panic when the conversion went through.
+fn refusal(out: Result<PvecConversionOutput, PvecConvertError>) -> String {
+    let mut e: &dyn std::error::Error = &out.expect_err("the conversion is refused");
+    let mut text = e.to_string();
+    while let Some(next) = e.source() {
+        text.push_str(&format!(" / {next}"));
+        e = next;
+    }
+    text
+}
+
 fn near(a: f64, b: f64) -> bool {
     (a - b).abs() < 1e-9
 }
@@ -362,7 +372,7 @@ fn issue_1631_xref_layer_override_applies() {
         .filter(|r| matches!(r.source_handle, Some(100 | 101)))
         .collect();
     assert_eq!(hidden.len(), 2, "{:#?}", off.report.entities);
-    assert!(hidden.iter().all(|r| r.fidelity == "ignored-by-policy"));
+    assert!(hidden.iter().all(|r| r.fidelity == "IgnoredByPolicy"));
     assert!(
         hidden
             .iter()
@@ -461,13 +471,10 @@ fn issue_1631_xref_nested_depth_capped() {
     let mut limits = SourceLimits::default();
     limits.max_block_depth = 1;
     let (capped, _) = run("nested-capped", |c| both(c).limits(limits));
-    match capped {
-        Err(PvecConvertError::Flatten(FlattenError::Limit {
-            limit: Limit::BlockDepth,
-            ..
-        })) => {}
-        other => panic!("the nesting is refused at the depth cap: {other:?}"),
-    }
+    assert!(
+        refusal(capped).contains("max_block_depth"),
+        "the nesting is refused at the depth cap"
+    );
 }
 
 #[test]
@@ -487,11 +494,8 @@ fn issue_1631_a_fan_out_is_refused_by_the_shared_entity_guard() {
         c.xref("WING", CadSource::Bytes(b"wing-file"))
             .limits(limits)
     });
-    match out {
-        Err(PvecConvertError::Flatten(FlattenError::Limit {
-            limit: Limit::Entities,
-            ..
-        })) => {}
-        other => panic!("the xref's entities count against the host's guard: {other:?}"),
-    }
+    assert!(
+        refusal(out).contains("max_entities"),
+        "the xref's entities count against the host's guard"
+    );
 }
