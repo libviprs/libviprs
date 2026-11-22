@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use acadrust::plot_style::PlotStyleTable;
 use libviprs::cad::{CadSource, ItemHandle};
 use libviprs::pvec::{
     Availability, DwgProvider, EntityCursor, EntityScope, EntityStyle, Facet, FacetSource,
@@ -263,13 +264,31 @@ fn issue_1636_one_page_per_layout_in_tab_order() {
             ("B".into(), plot(200.0, 100.0, 0), l(2)),
         ],
     };
-    let (out, dir) = plot_pdf("set", mock, |p| p.all_layouts());
+    let (out, dir) = plot_pdf("set", mock, |p| p.layouts(["A", "B"]));
     let out = out.unwrap();
     assert_eq!(out.pages, 2);
     let sizes = page_sizes(&out.file);
     assert_eq!(sizes.len(), 2);
     near(sizes[0], 100.0, 50.0);
     near(sizes[1], 200.0, 100.0);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// A paper override is said in the output's notes, in the sheet report's words.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1636_notes_carry_what_was_replaced() {
+    let (out, dir) = plot_pdf("notes", horizontal(), |p| {
+        p.plot_settings(PlotSettings {
+            paper_mm: Some([210.0, 297.0]),
+            ..PlotSettings::default()
+        })
+    });
+    let notes = out.unwrap().notes;
+    assert!(
+        notes.contains(&"plot-paper-overridden".to_string()),
+        "{notes:?}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -351,8 +370,20 @@ mod rendered {
         let _ = fs::remove_dir_all(dir);
     }
 
-    /// The style for colour 1 is blue and 1 mm wide, though the entity asks for red and 0.1 mm.
-    /// `style_for_aci` stands in for the plot style table #1630 brings.
+    /// A plot style table that maps colour 1 to blue and a 1 mm pen, though the entity asks for
+    /// red and 0.1 mm.
+    fn blue_one_mm() -> PlotStyleTable {
+        let mut table = PlotStyleTable::identity("blue.ctb");
+        let pen = table
+            .lineweights
+            .iter()
+            .position(|w| (*w - 1.0).abs() < 1e-6)
+            .expect("a 1.00 mm pen") as u8;
+        table.aci_entries[1].color = Some([0, 0, 255]);
+        table.aci_entries[1].lineweight = pen;
+        table
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn issue_1636_pdf_plot_applies_ctb_width_and_colour() {
@@ -360,7 +391,7 @@ mod rendered {
             plot(100.0, 50.0, 0),
             vec![line(1, [10.0, 25.0], [90.0, 25.0], 1, 10)],
         );
-        let (out, dir) = plot_pdf("ctb", mock, |p| p.style_for_aci(1, [0, 0, 255], 1.0));
+        let (out, dir) = plot_pdf("ctb", mock, |p| p.plot_style_table(blue_one_mm()));
         let pdf = out.unwrap().file;
         let on = pixel(&pdf, 50.0, 25.0);
         assert!(
@@ -379,6 +410,26 @@ mod rendered {
         let _ = fs::remove_dir_all(dir);
     }
 
+    /// Screening 50 per cent lightens the stroke to a mid grey.
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn issue_1636_pdf_plot_applies_ctb_screening() {
+        let mock = one_sheet(
+            plot(100.0, 50.0, 0),
+            vec![line(1, [10.0, 25.0], [90.0, 25.0], 7, 100)],
+        );
+        let mut table = PlotStyleTable::identity("half.ctb");
+        table.aci_entries[7].color = Some([0, 0, 0]);
+        table.aci_entries[7].screening = 50;
+        let (out, dir) = plot_pdf("screen", mock, |p| p.plot_style_table(table));
+        let on = pixel(&out.unwrap().file, 50.0, 25.0);
+        assert!(
+            on.iter().all(|&c| (100..200).contains(&c)),
+            "mid grey: {on:?}"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn issue_1636_the_offset_moves_the_geometry_on_the_page() {
@@ -388,7 +439,7 @@ mod rendered {
         );
         let (out, dir) = plot_pdf("offset", mock, |p| {
             p.plot_settings(PlotSettings {
-                offset_mm: [20.0, 0.0],
+                offset_mm: Some([20.0, 0.0]),
                 ..PlotSettings::default()
             })
         });

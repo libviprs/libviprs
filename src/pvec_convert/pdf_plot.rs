@@ -3,6 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
+use acadrust::plot_style::PlotStyleTable;
+
 use super::{PlotSettings, PvecConvertError};
 use crate::cad::CadSource;
 use crate::pvec::{DwgProvider, SourceUnit, ViewProfile};
@@ -14,6 +16,9 @@ pub struct PdfPlotOutput {
     pub file: PathBuf,
     /// Its page count.
     pub pages: u32,
+    /// What was not applied or was replaced, in the vocabulary of the sheet report's `notes`
+    /// (`plot-paper-overridden`, ...). The PDF plot has no report section of its own.
+    pub notes: Vec<String>,
 }
 
 /// A print layout, plotted to a PDF.
@@ -48,16 +53,17 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
-    /// Plot style for one AutoCAD colour index: stroke colour and width in millimetres. A
-    /// placeholder for the plot style table type that #1630 brings.
+    /// The plot style table: stroke colour, width and screening per AutoCAD colour index.
     #[must_use]
-    pub fn style_for_aci(self, _aci: u8, _rgb: [u8; 3], _width_mm: f64) -> Self {
+    pub fn plot_style_table(self, _table: PlotStyleTable) -> Self {
         self
     }
 
-    /// One page per paper layout, in tab order, instead of the profile's single layout.
+    /// Only these paper layouts, one page each in tab order, matched the way
+    /// [`PvecLayoutSet::layouts`](super::PvecLayoutSet::layouts) matches them. Without this the
+    /// page is the layout the view profile names.
     #[must_use]
-    pub fn all_layouts(self) -> Self {
+    pub fn layouts<S: Into<String>>(self, _names: impl IntoIterator<Item = S>) -> Self {
         self
     }
 
