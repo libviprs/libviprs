@@ -1165,16 +1165,25 @@ fn issue_1627_a_state_freeze_keeps_the_notes_under_frozen_layers_show() {
         vec![recorded("WALLS", true, true, true)],
     );
     for (tag, text, note) in [
-        ("show", r#""frozenLayers":"show","noPlotLayers":"show""#, true),
-        ("hide", r#""frozenLayers":"hide","noPlotLayers":"show""#, false),
+        (
+            "show",
+            r#""frozenLayers":"show","noPlotLayers":"show""#,
+            true,
+        ),
+        (
+            "hide",
+            r#""frozenLayers":"hide","noPlotLayers":"show""#,
+            false,
+        ),
     ] {
-        let json = format!(
-            r#"{{"schema":1,"mode":"model","layerState":"S","text":{{{text}}}}}"#
-        );
+        let json = format!(r#"{{"schema":1,"mode":"model","layerState":"S","text":{{{text}}}}}"#);
         let p = folded(&m, model(), &json);
         assert_eq!(p.layers.state_frozen, ["WALLS"], "{tag}");
         let report = convert(&format!("state-freeze-text-{tag}"), p);
-        assert!(!shown(&report, L_WALLS, None), "{tag}: the line is frozen out");
+        assert!(
+            !shown(&report, L_WALLS, None),
+            "{tag}: the line is frozen out"
+        );
         assert_eq!(shown(&report, T_WALLS, None), note, "{tag}: the note");
     }
 }

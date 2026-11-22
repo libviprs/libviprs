@@ -180,6 +180,7 @@ impl LayerVisibility {
     /// The layers the user set to Hidden for the whole drawing that a viewport of `layout` still
     /// shows because it has an entry of its own saying Visible: the most specific override wins
     /// for model space seen through that viewport, and paper space follows the global one (#1627).
+    #[cfg(feature = "pvec-convert")]
     pub(crate) fn hidden_but_shown_in_a_viewport(&self, layout: &str) -> Vec<&str> {
         let prefix = format!("{layout}/");
         self.overrides
@@ -467,7 +468,10 @@ impl ViewProfile {
             },
             Knob {
                 field: "layers.overrides",
-                value: match self.layers.overrides.len() + self.layers.state_overrides.len() + self.layers.state_frozen.len() {
+                value: match self.layers.overrides.len()
+                    + self.layers.state_overrides.len()
+                    + self.layers.state_frozen.len()
+                {
                     0 => "none".into(),
                     n => format!("{n} layers"),
                 },

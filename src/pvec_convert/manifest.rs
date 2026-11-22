@@ -812,10 +812,12 @@ pub fn apply_choices(
         let mut with_state = file.clone();
         with_state.layer_state = choices.layer_state.clone();
         with_state.turn_off_layers_not_in_state = choices.turn_off_layers_not_in_state;
-        let state = manifest
-            .layer_states
-            .iter()
-            .find(|st| choices.layer_state.as_deref().is_some_and(|n| same(&st.name, n)));
+        let state = manifest.layer_states.iter().find(|st| {
+            choices
+                .layer_state
+                .as_deref()
+                .is_some_and(|n| same(&st.name, n))
+        });
         let flips = resolve_visibility(manifest, &with_state)
             .into_iter()
             .zip(resolve_visibility(manifest, &file))

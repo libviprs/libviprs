@@ -513,7 +513,10 @@ impl VisibilityFilter {
             // A chosen state's freeze is a flag like the file's own, so it answers to `frozen` and
             // `frozen_text` the same way (#1627).
             let frozen_flag = ls.is_some_and(|ls| ls.frozen)
-                || self.state_frozen.iter().any(|n| n.eq_ignore_ascii_case(layer));
+                || self
+                    .state_frozen
+                    .iter()
+                    .any(|n| n.eq_ignore_ascii_case(layer));
             let frozen = if text { self.frozen_text } else { self.frozen };
             if frozen_flag && frozen == LayerStateRule::Exclude {
                 return Some(PolicyReason::LayerFrozen);
