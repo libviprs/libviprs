@@ -110,7 +110,9 @@ pub(crate) fn draw<'a>(
     // The background is opaque, so dropping the alpha loses nothing.
     let rgb: Vec<u8> = pixmap
         .data()
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| [p[0], p[1], p[2]])
         .collect();
     let mut png = Vec::new();
