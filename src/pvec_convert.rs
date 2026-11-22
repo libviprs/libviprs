@@ -1785,7 +1785,8 @@ impl<'a> PvecConversion<'a> {
                 }
                 // A text, a hatch or a SOLID goes in a stream when the provider can say what it
                 // draws, and is counted as unmapped otherwise (#1609). Its carriers are written
-                // hidden, so only the model space of a drawing with no sheet clip is mapped.
+                // hidden. On a sheet or through a viewport a text is kept line by line when its
+                // start is inside what it is cut to, and a fill is not carried at all.
                 let mut pending: Option<Body> = None;
                 // Texts and fills are two choices (#1624): a class whose choice is off stays
                 // unmapped and says so, so a caller that asked for one never gets the other.
@@ -1797,11 +1798,10 @@ impl<'a> PvecConversion<'a> {
                     matches!(raw.provenance.class_name.as_str(), "HATCH" | "SOLID"),
                 );
                 if annotate
-                    && window.is_none()
-                    && clip_box.is_none()
                     && matches!(item, Item::Leaf(_))
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && ((text_class && !*want_texts) || (fill_class && !*want_fills))
+                    && ((text_class && !*want_texts)
+                        || (fill_class && !*want_fills && window.is_none() && clip_box.is_none()))
                 {
                     let (class, choice) = (
                         raw.provenance.class_name.as_str(),
@@ -1811,11 +1811,11 @@ impl<'a> PvecConversion<'a> {
                         .push(format!("{class}: not carried, {choice} are off"));
                 }
                 if annotate
-                    && window.is_none()
-                    && clip_box.is_none()
+                    && !frozen_here
                     && let Item::Leaf(f) = item
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && ((text_class && *want_texts) || (fill_class && *want_fills))
+                    && ((text_class && *want_texts)
+                        || (fill_class && *want_fills && window.is_none() && clip_box.is_none()))
                 {
                     let class = raw.provenance.class_name.as_str();
                     let made = raw
@@ -1828,7 +1828,28 @@ impl<'a> PvecConversion<'a> {
                             _ => provider.annotation(h),
                         })
                         .ok_or("it draws nothing the provider can report")
-                        .and_then(|a| annotation::map(f, a));
+                        .and_then(|a| {
+                            annotation::map(f, a, &|p| {
+                                clip_box.is_none_or(|b| {
+                                    p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
+                                }) && ring.is_none_or(|r| {
+                                    // Even-odd crossing count over the viewport's polygon.
+                                    let mut inside = false;
+                                    for (i, a) in r.iter().enumerate() {
+                                        let b = &r[(i + 1) % r.len()];
+                                        if (a[1] > p[1]) != (b[1] > p[1])
+                                            && p[0]
+                                                < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1])
+                                                    + a[0]
+                                        {
+                                            inside = !inside;
+                                        }
+                                    }
+                                    inside
+                                })
+                            })
+                        });
+                    let made_clipped = matches!(made, Err(annotation::CLIPPED));
                     let carried = match made {
                         Ok((carriers, body)) => carriers
                             .into_iter()
@@ -1840,6 +1861,7 @@ impl<'a> PvecConversion<'a> {
                                     .all(|d| d.geometry.geometry().is_some())
                                     .then_some((pieces, body))
                             }),
+                        Err(annotation::CLIPPED) => Ok(None),
                         Err(why) => {
                             done.warnings.push(format!("{class}: not carried, {why}"));
                             Ok(None)
@@ -1865,6 +1887,11 @@ impl<'a> PvecConversion<'a> {
                             let mut it = pieces.into_iter();
                             done = it.next().expect("a mapped annotation has a carrier");
                             more = it.collect();
+                        }
+                        Ok(None) if made_clipped => {
+                            *annotation_counts
+                                .entry(format!("{class}.clipped"))
+                                .or_default() += 1;
                         }
                         Ok(None) => {
                             *annotation_counts
@@ -1990,7 +2017,7 @@ impl<'a> PvecConversion<'a> {
                     sent.fetch_add(1, Ordering::Release);
                 }
                 match pending {
-                    Some(Body::Text(t)) => texts.push((carried_ids[0], t)),
+                    Some(Body::Text(lines)) => texts.extend(carried_ids.into_iter().zip(lines)),
                     Some(Body::Fill(f)) => fills.push((carried_ids, f)),
                     None => {}
                 }

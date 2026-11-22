@@ -15,7 +15,7 @@ use libviprs::pvec::publish::open_published;
 use libviprs::pvec::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityScope,
     EntityStyle, Facet, FacetSource, LayerState, LayoutId, LayoutKind, LayoutState, ProviderCaps,
-    ProviderError, RawEntity, RawGeometry, RawVertex, SourceTransform, SourceUnit,
+    ProviderError, RawEntity, RawGeometry, RawVertex, SourceTransform, SourceUnit, TextAnchorV,
 };
 use libviprs::pvec_convert::PvecConversion;
 use plan::{scratch, stub};
@@ -57,6 +57,11 @@ fn text(position: [f64; 3], height: f64, rotation: f64, content: &str) -> Annota
         rotation,
         content: content.into(),
         normal: [0.0, 0.0, 1.0],
+        width_factor: 1.0,
+        anchor: (0.0, TextAnchorV::Baseline),
+        fit: None,
+        block_width: 0.0,
+        line_spacing: 1.0,
     }
 }
 
