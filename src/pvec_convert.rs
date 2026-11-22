@@ -872,15 +872,16 @@ impl<'a> PvecConversion<'a> {
                         let su = |v: [f64; 2]| to_unit(v[0]).zip(to_unit(v[1]));
                         let converted = su([margins[0], margins[1]])
                             .zip(su([margins[2], margins[3]]))
-                            .zip(su(shift))
                             .zip(su([w, h]))
-                            .zip(su(own));
+                            .zip(su(own))
+                            // The margin and the shift added in millimetres, then converted once.
+                            .zip(su([margins[0] + shift[0], margins[1] + shift[1]]));
                         match converted {
-                            Some((((((l, b), (r, t)), sh), size), own)) => {
+                            Some((((((l, b), (r, t)), size), own), corner)) => {
                                 let at = Place {
                                     margin: [l, b, r, t],
-                                    shift: [sh.0, sh.1],
                                     size: [size.0, size.1],
+                                    corner: [corner.0, corner.1],
                                 };
                                 // Drawing units to a paper unit. Under the Layout area a fit
                                 // fits the layout's own printable area to the new paper's.
@@ -905,7 +906,7 @@ impl<'a> PvecConversion<'a> {
                                 if plot_settings.center && plot_settings.area == PlotArea::Layout {
                                     summary.notes.push("plot-centre-not-applicable".into());
                                 }
-                                let (x0, y0) = (-(l + sh.0) * k, -(b + sh.1) * k);
+                                let (x0, y0) = (-at.corner[0] * k, -at.corner[1] * k);
                                 frame_box =
                                     Some([x0, y0, x0 + at.size[0] * k, y0 + at.size[1] * k]);
                                 plot_unit = sheet_unit;
@@ -1429,7 +1430,7 @@ impl<'a> PvecConversion<'a> {
                         (e[1] + e[3]) / 2.0 - printable_h * k / 2.0 - mb * k,
                     )
                 } else {
-                    (e[0] - (ml + pl.shift[0]) * k, e[1] - (mb + pl.shift[1]) * k)
+                    (e[0] - pl.corner[0] * k, e[1] - pl.corner[1] * k)
                 };
                 let b = [x0, y0, x0 + pl.size[0] * k, y0 + pl.size[1] * k];
                 sh.frame = Some(b);
@@ -2673,10 +2674,11 @@ struct Sheet {
 struct Place {
     /// Unprintable margins, left, bottom, right, top.
     margin: [f64; 4],
-    /// The plot origin plus the plot offset.
-    shift: [f64; 2],
     /// The paper, after the layout's rotation and the chosen orientation.
     size: [f64; 2],
+    /// The margin plus the shift, summed in millimetres and converted once, so that a sheet with
+    /// no override frames exactly as it did before the plot settings (#1584).
+    corner: [f64; 2],
 }
 
 /// What the component streams read off one written entity: where it came from and its line style.
