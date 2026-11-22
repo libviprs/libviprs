@@ -62,8 +62,10 @@ mod calibration;
 mod capability;
 mod georef;
 mod layouts;
+mod manifest;
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+pub use crate::pvec::LayerOverride;
 pub use crate::pvec::writer::recalibrate;
 pub use calibration::{
     Calibration, CalibrationError, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat,
@@ -78,6 +80,12 @@ pub use georef::{
 pub use layouts::{
     LayoutSetError, LayoutSetOutput, PaperSheet, PvecLayoutSet, SheetOutcome, SheetSkip,
     paper_sheets,
+};
+pub use manifest::{
+    CadChoices, CadManifest, CadMode, CadText, LayerCounts, ManifestColour, ManifestLayer,
+    ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace, ManifestPaper,
+    ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility, ResolvedLayer,
+    StateLayer, TextSwitch, Visibility, VpRef, cad_manifest, resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
@@ -588,96 +596,51 @@ impl<'a> PvecConversion<'a> {
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
             for v in listed.into_iter().filter(|v| v.layout == layout.id) {
-                let finite = [v.width, v.height, v.view_height, v.center[0], v.center[1]]
-                    .into_iter()
-                    .chain(v.view_center)
-                    .chain(v.view_target)
-                    .all(f64::is_finite);
-                let window = if paper_view(&v) {
-                    Window::Paper
-                } else if !v.visible {
-                    Window::Dropped("off")
-                } else if v.hide_plot {
-                    Window::Dropped("hide-plot")
-                } else if !(v.view_direction[0] == 0.0
-                    && v.view_direction[1] == 0.0
-                    && v.view_direction[2] > 0.0)
-                {
-                    Window::Refused("non-plan")
-                } else if v.perspective {
-                    Window::Refused("perspective")
-                } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
-                    Window::Refused("view-height")
-                } else if v.twist != 0.0 {
-                    // The twist sign is not measured against AutoCAD yet (the ADR's open item).
-                    Window::Refused("twist")
-                } else {
-                    // A rectangle, or a polygon with straight edges (#1565), whose vertices are
-                    // in paper units and cut what the viewport shows. A bulged edge or a curved
-                    // boundary is not cut yet.
-                    let polygon = match &v.clip {
-                        ViewportClip::Rectangle(_) => Ok(None),
-                        ViewportClip::Polygon(vs) if vs.iter().any(|q| q.bulge != 0.0) => {
-                            Err("clip-bulge")
-                        }
-                        ViewportClip::Polygon(vs)
-                            if vs.len() < 3
-                                || !vs.iter().all(|q| q.x.is_finite() && q.y.is_finite()) =>
-                        {
-                            Err("clip-polygon")
-                        }
-                        ViewportClip::Polygon(vs) => {
-                            Ok(Some(vs.iter().map(|q| [q.x, q.y]).collect::<Vec<_>>()))
-                        }
-                        ViewportClip::Circle(_) => Err("clip-circle"),
-                        ViewportClip::Ellipse(_) => Err("clip-ellipse"),
-                        ViewportClip::Spline(_) => Err("clip-spline"),
-                        _ => Err("clip-other"),
-                    };
-                    match polygon {
-                        Err(why) => Window::Refused(why),
-                        Ok(ring) => {
-                            // paper = centre + s * (model - target - view centre), for a plan view.
-                            // The view centre is in display coordinates, whose origin is the target
-                            // (DXF), so a target off the origin shifts the view (#1610).
-                            let s = v.height / v.view_height;
-                            let (hw, hh) = (v.width / 2.0, v.height / 2.0);
-                            let rect = match &ring {
-                                Some(r) => r.iter().fold(
+                let window = match viewport_class(&v) {
+                    ViewportClass::Paper => Window::Paper,
+                    ViewportClass::Dropped(why) => Window::Dropped(why),
+                    ViewportClass::Refused(why) => Window::Refused(why),
+                    ViewportClass::Drawn(ring) => {
+                        // paper = centre + s * (model - target - view centre), for a plan view.
+                        // The view centre is in display coordinates, whose origin is the target
+                        // (DXF), so a target off the origin shifts the view (#1610).
+                        let s = v.height / v.view_height;
+                        let (hw, hh) = (v.width / 2.0, v.height / 2.0);
+                        let rect = match &ring {
+                            Some(r) => r.iter().fold(
+                                [
+                                    f64::INFINITY,
+                                    f64::INFINITY,
+                                    f64::NEG_INFINITY,
+                                    f64::NEG_INFINITY,
+                                ],
+                                |b, q| {
                                     [
-                                        f64::INFINITY,
-                                        f64::INFINITY,
-                                        f64::NEG_INFINITY,
-                                        f64::NEG_INFINITY,
-                                    ],
-                                    |b, q| {
-                                        [
-                                            b[0].min(q[0]),
-                                            b[1].min(q[1]),
-                                            b[2].max(q[0]),
-                                            b[3].max(q[1]),
-                                        ]
-                                    },
-                                ),
-                                None => [
-                                    v.center[0] - hw,
-                                    v.center[1] - hh,
-                                    v.center[0] + hw,
-                                    v.center[1] + hh,
-                                ],
-                            };
-                            Window::Drawn {
-                                map: [
-                                    s,
-                                    0.0,
-                                    0.0,
-                                    s,
-                                    v.center[0] - s * (v.view_center[0] + v.view_target[0]),
-                                    v.center[1] - s * (v.view_center[1] + v.view_target[1]),
-                                ],
-                                rect,
-                                ring,
-                            }
+                                        b[0].min(q[0]),
+                                        b[1].min(q[1]),
+                                        b[2].max(q[0]),
+                                        b[3].max(q[1]),
+                                    ]
+                                },
+                            ),
+                            None => [
+                                v.center[0] - hw,
+                                v.center[1] - hh,
+                                v.center[0] + hw,
+                                v.center[1] + hh,
+                            ],
+                        };
+                        Window::Drawn {
+                            map: [
+                                s,
+                                0.0,
+                                0.0,
+                                s,
+                                v.center[0] - s * (v.view_center[0] + v.view_target[0]),
+                                v.center[1] - s * (v.view_center[1] + v.view_target[1]),
+                            ],
+                            rect,
+                            ring,
                         }
                     }
                 };
@@ -2465,6 +2428,68 @@ struct Side {
 /// sheet test both decide it here (#1583).
 fn paper_view(v: &ViewportEntity) -> bool {
     v.id == 1 && v.center == v.view_center && v.height == v.view_height
+}
+
+/// What a viewport of a sheet comes to, decided from its record alone (#1563, #1626): the
+/// conversion and the manifest's listing both ask this, so the reason a viewport is refused is
+/// the same one before and after the conversion.
+enum ViewportClass {
+    /// The sheet's own paper view.
+    Paper,
+    /// Contributes nothing to a print: `off` or `hide-plot` (P-3).
+    Dropped(&'static str),
+    /// A view the print cannot map, and why.
+    Refused(&'static str),
+    /// Model space shows through it, cut by this polygon when it is clipped to one (#1565).
+    Drawn(Option<Vec<[f64; 2]>>),
+}
+
+fn viewport_class(v: &ViewportEntity) -> ViewportClass {
+    let finite = [v.width, v.height, v.view_height, v.center[0], v.center[1]]
+        .into_iter()
+        .chain(v.view_center)
+        .chain(v.view_target)
+        .all(f64::is_finite);
+    if paper_view(v) {
+        ViewportClass::Paper
+    } else if !v.visible {
+        ViewportClass::Dropped("off")
+    } else if v.hide_plot {
+        ViewportClass::Dropped("hide-plot")
+    } else if !(v.view_direction[0] == 0.0
+        && v.view_direction[1] == 0.0
+        && v.view_direction[2] > 0.0)
+    {
+        ViewportClass::Refused("non-plan")
+    } else if v.perspective {
+        ViewportClass::Refused("perspective")
+    } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
+        ViewportClass::Refused("view-height")
+    } else if v.twist != 0.0 {
+        // The twist sign is not measured against AutoCAD yet (the ADR's open item).
+        ViewportClass::Refused("twist")
+    } else {
+        // A rectangle, or a polygon with straight edges (#1565), whose vertices are in paper
+        // units and cut what the viewport shows. A bulged edge or a curved boundary is not cut yet.
+        match &v.clip {
+            ViewportClip::Rectangle(_) => ViewportClass::Drawn(None),
+            ViewportClip::Polygon(vs) if vs.iter().any(|q| q.bulge != 0.0) => {
+                ViewportClass::Refused("clip-bulge")
+            }
+            ViewportClip::Polygon(vs)
+                if vs.len() < 3 || !vs.iter().all(|q| q.x.is_finite() && q.y.is_finite()) =>
+            {
+                ViewportClass::Refused("clip-polygon")
+            }
+            ViewportClip::Polygon(vs) => {
+                ViewportClass::Drawn(Some(vs.iter().map(|q| [q.x, q.y]).collect()))
+            }
+            ViewportClip::Circle(_) => ViewportClass::Refused("clip-circle"),
+            ViewportClip::Ellipse(_) => ViewportClass::Refused("clip-ellipse"),
+            ViewportClip::Spline(_) => ViewportClass::Refused("clip-spline"),
+            _ => ViewportClass::Refused("clip-other"),
+        }
+    }
 }
 
 /// What the print profile makes of one viewport of a sheet (#1563).

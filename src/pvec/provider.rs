@@ -166,7 +166,7 @@ pub struct LayoutState {
     pub block_name: String,
 }
 
-/// One layer's state flags, as the layer table stores them.
+/// One layer's state flags and properties, as the layer table stores them.
 ///
 /// Not applied to anything. Which of these hides an entity is the visible-drawing
 /// rule's (N1.4), and a viewport freeze is not here at all.
@@ -185,6 +185,91 @@ pub struct LayerState {
     /// The layer prints. `false` is a no-plot layer (`Defpoints` is one by default); a print
     /// leaves it out, a model-space view keeps it (#1560).
     pub plottable: bool,
+    /// The layer's colour, `None` when the drawing gives it none (#1626).
+    pub color: Option<SourceColour>,
+    /// The layer's linetype name.
+    pub linetype: String,
+    /// The layer's lineweight in hundredths of a millimetre, `None` for a default, by-layer or
+    /// by-block weight.
+    pub lineweight: Option<i16>,
+    /// The layer's transparency alpha, 0 opaque to 255 clear, `None` when it is not explicit.
+    pub transparency: Option<u8>,
+    /// The plot style name, `None` when the layer names none.
+    pub plot_style: Option<String>,
+    /// The layer's description, empty when it has none.
+    pub description: String,
+    /// Frozen by default in viewports made after this (flags bit 2). Read and shown; this crate
+    /// never makes viewports, so it decides nothing.
+    pub frozen_in_new_viewports: bool,
+    /// The layer belongs to an external reference (its name is `xref|layer`).
+    pub xref_dependent: bool,
+}
+
+impl Default for LayerState {
+    /// A layer that shows and prints: on, thawed, unlocked, plottable, nothing else set.
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            handle: None,
+            off: false,
+            frozen: false,
+            locked: false,
+            plottable: true,
+            color: None,
+            linetype: "Continuous".into(),
+            lineweight: None,
+            transparency: None,
+            plot_style: None,
+            description: String::new(),
+            frozen_in_new_viewports: false,
+            xref_dependent: false,
+        }
+    }
+}
+
+/// Which properties a [`NamedLayerState`] restores (AutoCAD saves a mask with each state).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LayerStateMask {
+    /// On or off.
+    pub on: bool,
+    /// Frozen or thawed.
+    pub frozen: bool,
+    /// Locked or unlocked.
+    pub locked: bool,
+    /// Plot or no-plot.
+    pub plot: bool,
+    /// Frozen in new viewports.
+    pub new_viewport_frozen: bool,
+    /// Colour.
+    pub color: bool,
+    /// Linetype.
+    pub linetype: bool,
+    /// Lineweight.
+    pub lineweight: bool,
+    /// Plot style.
+    pub plot_style: bool,
+    /// Transparency.
+    pub transparency: bool,
+    /// The settings of the viewport the state was saved from.
+    pub viewport: bool,
+}
+
+/// A named layer state stored in the drawing (`ACAD_LAYERSTATES`), as the drawing stores it
+/// (#1626). Nothing here is applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedLayerState {
+    /// The state's name.
+    pub name: String,
+    /// Its description, empty when it has none.
+    pub description: String,
+    /// What the state restores.
+    pub mask: LayerStateMask,
+    /// AutoCAD hides the state from its own list (a state it saved for itself).
+    pub hidden: bool,
+    /// The layers the state records, with the values it saved. Only `name`, `off`, `frozen`,
+    /// `locked`, `plottable` and `frozen_in_new_viewports` and the styling fields mean anything
+    /// here; the rest are as [`LayerState::default`] leaves them.
+    pub layers: Vec<LayerState>,
 }
 
 /// A layout's plot settings, as the drawing stores them (#1560). Nothing here is applied: which
@@ -941,6 +1026,8 @@ impl RawEntity {
 pub enum Facet {
     /// [`LayerState`] from [`DwgProvider::layers`].
     LayerState,
+    /// [`NamedLayerState`] from [`DwgProvider::layer_states`] (#1626).
+    NamedLayerStates,
     /// [`LayoutState`] from [`DwgProvider::layouts`].
     LayoutState,
     /// A spline's knot vector with its repeats.
@@ -972,8 +1059,9 @@ pub enum Facet {
 
 impl Facet {
     /// Every facet.
-    pub const ALL: [Facet; 14] = [
+    pub const ALL: [Facet; 15] = [
         Facet::LayerState,
+        Facet::NamedLayerStates,
         Facet::LayoutState,
         Facet::KnotMultiplicity,
         Facet::Weights,
@@ -1177,12 +1265,32 @@ pub trait DwgProvider {
         Err(ProviderError::CannotReport(Facet::LayoutPlot))
     }
 
+    /// The handle of the layout's own object (the Layout, not its block record), the key a
+    /// layout keeps across revisions of a drawing (#1626). [`None`] when the drawing gives none
+    /// or the provider cannot report it.
+    fn layout_handle(&self, layout: LayoutId) -> Option<ItemHandle> {
+        let _ = layout;
+        None
+    }
+
     /// The layer table, in the drawing's own order.
     ///
     /// # Errors
     ///
     /// [`ProviderError::CannotReport`] with [`Facet::LayerState`] when the caps say so.
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError>;
+
+    /// The named layer states the drawing stores, in the drawing's order (#1626). Empty when it
+    /// stores none.
+    ///
+    /// The default says the provider cannot report them.
+    ///
+    /// # Errors
+    ///
+    /// [`ProviderError::CannotReport`] with [`Facet::NamedLayerStates`] when the caps say so.
+    fn layer_states(&self) -> Result<Vec<NamedLayerState>, ProviderError> {
+        Err(ProviderError::CannotReport(Facet::NamedLayerStates))
+    }
 
     /// Per-entity facts for every entity of `scope`, by handle. An entity with no
     /// handle has no entry.

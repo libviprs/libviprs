@@ -59,6 +59,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::limits::{Limit, LimitError, SourceGuard, SourceLimits, over};
@@ -126,6 +127,19 @@ pub enum InsertLayerRule {
 pub enum XrefPolicy {
     /// Contribute nothing, report as external.
     ReportExternal,
+}
+
+/// What the user forces for one layer: it wins over every flag, Defpoints included (#1626).
+///
+/// This is the user's visibility choice, not [`Facet::LayerOverride`](super::Facet::LayerOverride),
+/// which is a layer a drawing gives one entity in place of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LayerOverride {
+    /// Draw the layer.
+    Visible,
+    /// Leave the layer out.
+    Hidden,
 }
 
 /// Layer visibility.

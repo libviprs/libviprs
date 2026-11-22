@@ -59,10 +59,11 @@ use acr::{DwgReader, DxfReader, EntityType};
 use crate::cad::{CadSource, Fill, ItemHandle, decode_escapes, display_text};
 use crate::pvec::provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
-    EntityScope, EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayoutId, LayoutKind,
-    LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
-    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
-    SourceTransform, TextAnchorV, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    EntityScope, EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayerStateMask,
+    LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, Point3, ProvenanceStub,
+    ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact,
+    SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef, ViewportClip,
+    ViewportEntity, XrefAttachment,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -439,6 +440,8 @@ pub struct AcadrustProvider {
     /// The plot settings of each of `layouts`, by position; `None` for a layout named after its
     /// block record, which has no Layout object to hold them.
     plots: Vec<Option<LayoutPlot>>,
+    /// The Layout object's own handle for each of `layouts`, by position.
+    layout_handles: Vec<Option<ItemHandle>>,
 }
 
 impl AcadrustProvider {
@@ -673,14 +676,25 @@ impl AcadrustProvider {
         })
     }
 
-    fn collect_layouts(doc: &acr::CadDocument) -> Vec<(LayoutState, Option<LayoutPlot>)> {
+    fn collect_layouts(
+        doc: &acr::CadDocument,
+    ) -> Vec<(LayoutState, Option<LayoutPlot>, Option<ItemHandle>)> {
         let block_of = |handle: acr::Handle| {
             doc.block_records
                 .iter()
                 .find(|b| b.handle == handle)
                 .map(|b| b.name.clone())
         };
-        let mut found: Vec<(i16, u64, String, String, Option<LayoutPlot>)> = Vec::new();
+        // Tab order, handle, name, block name, plot settings, the Layout object's handle.
+        type Found = (
+            i16,
+            u64,
+            String,
+            String,
+            Option<LayoutPlot>,
+            Option<ItemHandle>,
+        );
+        let mut found: Vec<Found> = Vec::new();
         for o in doc.objects.values() {
             if let ObjectType::Layout(l) = o
                 && let Some(block) = block_of(l.block_record)
@@ -720,6 +734,7 @@ impl AcadrustProvider {
                     l.name.clone(),
                     block,
                     Some(plot),
+                    item_handle(l.handle),
                 ));
             }
         }
@@ -734,7 +749,7 @@ impl AcadrustProvider {
                     } else {
                         b.name.clone()
                     };
-                    found.push((0, b.handle.value(), name, b.name.clone(), None));
+                    found.push((0, b.handle.value(), name, b.name.clone(), None, None));
                 }
             }
         }
@@ -744,7 +759,7 @@ impl AcadrustProvider {
         found
             .into_iter()
             .enumerate()
-            .map(|(i, (_, _, name, block, plot))| {
+            .map(|(i, (_, _, name, block, plot, handle))| {
                 let state = LayoutState {
                     id: LayoutId(u32::try_from(i).unwrap_or(u32::MAX)),
                     name,
@@ -755,7 +770,7 @@ impl AcadrustProvider {
                     },
                     block_name: block,
                 };
-                (state, plot)
+                (state, plot, handle)
             })
             .collect()
     }
@@ -803,12 +818,20 @@ impl DwgProvider for AcadrustProvider {
                 });
             }
         };
-        let (layouts, plots) = Self::collect_layouts(&doc).into_iter().unzip();
+        let mut layouts = Vec::new();
+        let mut plots = Vec::new();
+        let mut layout_handles = Vec::new();
+        for (state, plot, handle) in Self::collect_layouts(&doc) {
+            layouts.push(state);
+            plots.push(plot);
+            layout_handles.push(handle);
+        }
         Ok(Self {
             doc,
             caps: Self::capabilities(),
             layouts,
             plots,
+            layout_handles,
         })
     }
 
@@ -832,6 +855,13 @@ impl DwgProvider for AcadrustProvider {
         Ok(plot.clone().map_or(SourceFact::Absent, SourceFact::Present))
     }
 
+    fn layout_handle(&self, layout: LayoutId) -> Option<ItemHandle> {
+        self.layout_handles
+            .get(layout.0 as usize)
+            .copied()
+            .flatten()
+    }
+
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
         Ok(self
             .doc
@@ -844,6 +874,60 @@ impl DwgProvider for AcadrustProvider {
                 frozen: l.is_frozen(),
                 locked: l.is_locked(),
                 plottable: l.is_plottable,
+                color: layer_colour(l.color),
+                linetype: l.line_type.clone(),
+                lineweight: layer_lineweight(l.line_weight),
+                transparency: l.transparency.explicit_alpha(),
+                plot_style: Some(l.plot_style.clone()).filter(|p| !p.is_empty()),
+                description: l.description.clone(),
+                frozen_in_new_viewports: l.flags.frozen_in_new_viewport,
+                xref_dependent: l.flags.xref_dependent,
+            })
+            .collect())
+    }
+
+    fn layer_states(&self) -> Result<Vec<NamedLayerState>, ProviderError> {
+        use acr::layer_state::LayerStateMask as M;
+        Ok(self
+            .doc
+            .layer_states()
+            .into_iter()
+            .map(|s| NamedLayerState {
+                name: s.name,
+                description: s.description,
+                mask: LayerStateMask {
+                    on: s.mask.contains(M::ON),
+                    frozen: s.mask.contains(M::FROZEN),
+                    locked: s.mask.contains(M::LOCKED),
+                    plot: s.mask.contains(M::PLOT),
+                    new_viewport_frozen: s.mask.contains(M::NEW_VIEWPORT),
+                    color: s.mask.contains(M::COLOR),
+                    linetype: s.mask.contains(M::LINE_TYPE),
+                    lineweight: s.mask.contains(M::LINE_WEIGHT),
+                    plot_style: s.mask.contains(M::PLOT_STYLE),
+                    transparency: s.mask.contains(M::TRANSPARENCY),
+                    viewport: s.mask.contains(M::CURRENT_VIEWPORT),
+                },
+                hidden: s.hidden,
+                layers: s
+                    .layers
+                    .into_iter()
+                    .map(|l| LayerState {
+                        name: l.layer_name,
+                        handle: item_handle(l.layer_handle),
+                        off: l.off,
+                        frozen: l.frozen,
+                        locked: l.locked,
+                        plottable: l.plottable,
+                        color: layer_colour(l.color),
+                        linetype: l.line_type,
+                        lineweight: layer_lineweight(l.line_weight),
+                        transparency: l.transparency.and_then(|t| t.explicit_alpha()),
+                        plot_style: Some(l.plot_style).filter(|p| !p.is_empty()),
+                        frozen_in_new_viewports: l.new_viewport_frozen,
+                        ..LayerState::default()
+                    })
+                    .collect(),
             })
             .collect())
     }
@@ -1384,6 +1468,24 @@ fn item_handle(h: acr::Handle) -> Option<ItemHandle> {
 }
 
 /// A stored colour as a fact. `ByLayer` and `None` carry no colour of their own.
+/// A layer's colour: an index or a true colour, and nothing for the by-layer, by-block and none
+/// markers a layer has no use for.
+fn layer_colour(c: acr::Color) -> Option<SourceColour> {
+    match c {
+        acr::Color::Index(i) => Some(SourceColour::Aci(i)),
+        acr::Color::Rgb { r, g, b } => Some(SourceColour::True { r, g, b }),
+        _ => None,
+    }
+}
+
+/// A layer's lineweight in hundredths of a millimetre, when it states one.
+fn layer_lineweight(w: acr::LineWeight) -> Option<i16> {
+    match w {
+        acr::LineWeight::Value(v) => Some(v),
+        _ => None,
+    }
+}
+
 fn fact_colour(c: acr::Color) -> SourceFact<SourceColour> {
     match c {
         acr::Color::Index(i) => SourceFact::Present(SourceColour::Aci(i)),
