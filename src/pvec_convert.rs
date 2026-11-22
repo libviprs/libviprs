@@ -261,9 +261,9 @@ pub struct PlotSettings {
     /// the part of the drawing the paper then shows; the calibration stays the plot scale, and the
     /// fit ratio is a note in the report.
     pub fit_to_paper: bool,
-    /// The plot scale, paper units to drawing units, in place of the layout's own: a preset and a
-    /// custom scale are both a numerator and a denominator. `None` is the layout's own.
-    pub scale: Option<[f64; 2]>,
+    /// The plot scale in place of the layout's own: a preset and a custom scale are both a
+    /// [`PlotScale`]. `None` is the layout's own.
+    pub scale: Option<PlotScale>,
     /// The plot offset in millimetres, in place of the layout's own plot origin. `None` is the
     /// layout's own.
     pub offset_mm: Option<[f64; 2]>,
@@ -274,6 +274,20 @@ pub struct PlotSettings {
     pub print_lineweights: Option<bool>,
     /// Paper space draws after what the viewports show. `None` is the layout's own.
     pub paperspace_last: Option<bool>,
+}
+
+/// A plot scale as the plot dialog's custom row gives it: `paper` paper units of `paper_unit` to
+/// `drawing` drawing units, each the size of the conversion's own unit. `1 inch = 50 units` is
+/// `{ paper: 1.0, paper_unit: Inches, drawing: 50.0 }`, whatever the sheet's own unit is. The
+/// calibration record carries `paper_unit` as its paper unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlotScale {
+    /// Paper units, in `paper_unit`.
+    pub paper: f64,
+    /// The unit the paper side is in.
+    pub paper_unit: SourceUnit,
+    /// Drawing units.
+    pub drawing: f64,
 }
 
 /// Portrait or landscape, the drawing orientation of the plot dialog.
@@ -928,7 +942,9 @@ impl<'a> PvecConversion<'a> {
                         }
                         let [n, d] = plot_settings
                             .scale
-                            .unwrap_or([p.scale_numerator, p.scale_denominator]);
+                            .map_or([p.scale_numerator, p.scale_denominator], |s| {
+                                [s.paper, s.drawing]
+                            });
                         if plot_settings.scale.is_some() {
                             summary.notes.push("plot-scale-overridden".into());
                         }
