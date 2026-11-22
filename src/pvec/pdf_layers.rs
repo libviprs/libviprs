@@ -166,7 +166,8 @@ pub enum PdfLayersError {
     /// The bytes are not a PDF this can read.
     #[error("cannot read the PDF: {0}")]
     Read(String),
-    /// The PDF is encrypted.
+    /// The PDF is encrypted. `apply_pdf_layers` refuses every encrypted file, including one that
+    /// opens with an empty user password; `pdf_manifest` reads the latter.
     #[error("the PDF is encrypted")]
     Encrypted,
     /// The rewritten PDF could not be written.
@@ -176,6 +177,12 @@ pub enum PdfLayersError {
 
 /// Nesting the visibility expressions, `/Order` trees and form streams are followed to.
 const MAX_DEPTH: usize = 16;
+
+/// How many nodes one walk over an expression, `/Order` tree or membership list may visit.
+/// Depth alone does not bound the work: an indirect array can be named many times by the array
+/// above it, so a few hundred bytes of PDF can fan out to billions of visits. Past the budget a
+/// walk stops (an expression counts as shown).
+const MAX_NODES: usize = 4096;
 
 fn deref<'a>(doc: &'a Document, o: &'a Object) -> Option<&'a Object> {
     doc.dereference(o).ok().map(|(_, o)| o)
@@ -297,7 +304,7 @@ impl OcModel {
         }
         let mut order = BTreeMap::new();
         if let Some(Object::Array(items)) = d.get(b"Order").ok().and_then(|o| deref(doc, o)) {
-            walk_order(doc, items, &mut Vec::new(), &mut order, 0);
+            walk_order(doc, items, &mut Vec::new(), &mut order, 0, &mut { MAX_NODES });
         }
         let rb = match d.get(b"RBGroups").ok().and_then(|o| deref(doc, o)) {
             Some(Object::Array(a)) => a.iter().map(|g| refs(doc, Some(g))).collect(),
@@ -365,7 +372,7 @@ impl OcModel {
             return self.state(id, mode);
         }
         if let Some(Object::Array(ve)) = dict.get(b"VE").ok().and_then(|v| deref(doc, v)) {
-            return self.expression(doc, ve, mode, 0);
+            return self.expression(doc, ve, mode, 0, &mut { MAX_NODES });
         }
         let members = match dict.get(b"OCGs").ok() {
             Some(Object::Reference(r)) if doc.get_dictionary(*r).is_ok() => vec![*r],
@@ -388,10 +395,18 @@ impl OcModel {
         }
     }
 
-    fn expression(&self, doc: &Document, ve: &[Object], mode: PdfLayerMode, depth: usize) -> bool {
-        if depth > MAX_DEPTH {
+    fn expression(
+        &self,
+        doc: &Document,
+        ve: &[Object],
+        mode: PdfLayerMode,
+        depth: usize,
+        budget: &mut usize,
+    ) -> bool {
+        if depth > MAX_DEPTH || *budget == 0 {
             return true;
         }
+        *budget -= 1;
         let Some(op) = ve
             .first()
             .and_then(|o| deref(doc, o))
@@ -401,10 +416,10 @@ impl OcModel {
         };
         let operand = |o: &Object| match o {
             Object::Reference(id) => match deref(doc, o) {
-                Some(Object::Array(a)) => self.expression(doc, a, mode, depth + 1),
+                Some(Object::Array(a)) => self.expression(doc, a, mode, depth + 1, budget),
                 _ => self.state(*id, mode),
             },
-            Object::Array(a) => self.expression(doc, a, mode, depth + 1),
+            Object::Array(a) => self.expression(doc, a, mode, depth + 1, budget),
             _ => true,
         };
         let mut rest = ve[1..].iter().map(operand);
@@ -424,10 +439,12 @@ fn walk_order(
     path: &mut Vec<String>,
     out: &mut BTreeMap<ObjectId, Vec<String>>,
     depth: usize,
+    budget: &mut usize,
 ) {
-    if depth > MAX_DEPTH {
+    if depth > MAX_DEPTH || *budget == 0 {
         return;
     }
+    *budget -= 1;
     let mut previous: Option<String> = None;
     for item in items {
         match deref(doc, item) {
@@ -442,7 +459,7 @@ fn walk_order(
                 };
                 let pushed = label.is_some();
                 path.extend(label);
-                walk_order(doc, rest, path, out, depth + 1);
+                walk_order(doc, rest, path, out, depth + 1, budget);
                 if pushed {
                     path.pop();
                 }
@@ -569,18 +586,23 @@ fn load(bytes: &[u8]) -> Result<Document, PdfLayersError> {
 ///
 /// See [`PdfLayersError`].
 pub fn pdf_manifest(bytes: &[u8]) -> Result<PdfManifest, PdfLayersError> {
-    fn mentioned(doc: &Document, o: &Object, out: &mut Vec<ObjectId>, depth: usize) {
-        if depth > MAX_DEPTH {
+    fn mentioned(doc: &Document, o: &Object, out: &mut Vec<ObjectId>, depth: usize, budget: &mut usize) {
+        if depth > MAX_DEPTH || *budget == 0 {
             return;
         }
+        *budget -= 1;
         match o {
             Object::Reference(id) => match deref(doc, o) {
                 Some(Object::Array(a)) => {
-                    a.iter().for_each(|x| mentioned(doc, x, out, depth + 1));
+                    a.iter().for_each(|x| mentioned(doc, x, out, depth + 1, budget));
                 }
-                _ => out.push(*id),
+                _ => {
+                    if !out.contains(id) {
+                        out.push(*id);
+                    }
+                }
             },
-            Object::Array(a) => a.iter().for_each(|x| mentioned(doc, x, out, depth + 1)),
+            Object::Array(a) => a.iter().for_each(|x| mentioned(doc, x, out, depth + 1, budget)),
             _ => {}
         }
     }
@@ -645,10 +667,11 @@ pub fn pdf_manifest(bytes: &[u8]) -> Result<PdfManifest, PdfLayersError> {
                 let target = Object::Reference(*id);
                 // The groups the OCMD lists, or its expression mentions.
                 let mut members = Vec::new();
+                let mut budget = MAX_NODES;
                 if let Some(Object::Array(ve)) = d.get(b"VE").ok().and_then(|v| deref(doc, v)) {
                     ve.iter()
                         .skip(1)
-                        .for_each(|x| mentioned(doc, x, &mut members, 0));
+                        .for_each(|x| mentioned(doc, x, &mut members, 0, &mut budget));
                 } else {
                     match d.get(b"OCGs").ok() {
                         Some(Object::Reference(r)) if doc.get_dictionary(*r).is_ok() => {
@@ -718,6 +741,12 @@ pub fn apply_pdf_layers(
     choices: &PdfLayerChoices,
 ) -> Result<Vec<u8>, PdfLayersError> {
     let doc = load(bytes)?;
+    // lopdf decrypts a file that opens with the empty password while loading it, and drops
+    // `/Encrypt` from the trailer. An update built on that trailer would mark the whole file as
+    // plain while every original string and stream is still ciphertext, so refuse it.
+    if doc.encryption_state.is_some() {
+        return Err(PdfLayersError::Encrypted);
+    }
     let Some(model) = OcModel::load(&doc) else {
         return Ok(bytes.to_vec());
     };

@@ -668,3 +668,118 @@ fn pdfium_draws_what_the_rewritten_layers_say() {
     assert!(!dark(&after, 20, 80), "pdfium still draws the hidden group");
     assert!(dark(&after, 70, 80));
 }
+
+/// A one-page PDF with one OCG, saved with RC4 128 encryption: owner password `owner`, empty
+/// user password, so every reader opens it without asking.
+fn owner_password_only_pdf() -> Vec<u8> {
+    use lopdf::{EncryptionState, EncryptionVersion, Permissions};
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let g = doc.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal("G") });
+    let content = doc.add_object(Stream::new(Dictionary::new(), b"1 1 5 5 re f".to_vec()));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+        "Contents" => content,
+    });
+    doc.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => vec![Object::from(page)], "Count" => 1 }.into(),
+    );
+    let catalog = doc.add_object(dictionary! {
+        "Type" => "Catalog", "Pages" => pages_id,
+        "OCProperties" => dictionary! {
+            "OCGs" => vec![Object::from(g)],
+            "D" => dictionary! { "BaseState" => "ON" },
+        },
+    });
+    doc.trailer.set("Root", catalog);
+    let id = Object::String(b"0123456789abcdef".to_vec(), lopdf::StringFormat::Hexadecimal);
+    doc.trailer.set("ID", Object::Array(vec![id.clone(), id]));
+    let state = EncryptionState::try_from(EncryptionVersion::V2 {
+        document: &doc,
+        owner_password: "owner",
+        user_password: "",
+        key_length: 128,
+        permissions: Permissions::all(),
+    })
+    .expect("an RC4 encryption state");
+    doc.encrypt(&state).expect("encrypts");
+    let mut out = Vec::new();
+    doc.save_to(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn issue_1637_an_owner_password_only_pdf_is_refused_not_rewritten() {
+    let bytes = owner_password_only_pdf();
+    // Reading it is fine: lopdf opens it with the empty password.
+    assert_eq!(manifest(&bytes).layers.len(), 1);
+    let err = apply_pdf_layers(&bytes, &choices(PdfLayerMode::View, &[("G", PdfLayerOverride::Hidden)]))
+        .expect_err("rewriting an encrypted file must be refused");
+    assert!(
+        matches!(err, libviprs::pvec::pdf_layers::PdfLayersError::Encrypted),
+        "got {err:?}"
+    );
+}
+
+/// 17 arrays, each holding the next one four times, with a shared leaf group at the bottom: 4^16
+/// leaf visits for a walk that follows every reference, from under 2 KB of PDF.
+fn fan_out_pdf() -> Vec<u8> {
+    let mut doc = Document::with_version("1.5");
+    let pages_id = doc.new_object_id();
+    let g = doc.add_object(dictionary! { "Type" => "OCG", "Name" => Object::string_literal("G") });
+    let mut next: Object = g.into();
+    let mut top = next.clone();
+    for _ in 0..17 {
+        let mut a = vec![Object::Name(b"And".to_vec())];
+        a.extend(std::iter::repeat_n(next.clone(), 4));
+        top = Object::from(doc.add_object(Object::Array(a)));
+        next = top.clone();
+    }
+    let ocmd = doc.add_object(dictionary! { "Type" => "OCMD", "VE" => top.clone() });
+    let order = Object::Array(vec![top.clone()]);
+    let content = doc.add_object(Stream::new(
+        Dictionary::new(),
+        b"/OC /P1 BDC 10 10 20 20 re f EMC".to_vec(),
+    ));
+    let page = doc.add_object(dictionary! {
+        "Type" => "Page", "Parent" => pages_id,
+        "MediaBox" => vec![0.into(), 0.into(), 100.into(), 100.into()],
+        "Contents" => content,
+        "Resources" => dictionary! { "Properties" => dictionary! { "P1" => ocmd } },
+    });
+    doc.objects.insert(
+        pages_id,
+        dictionary! { "Type" => "Pages", "Kids" => vec![Object::from(page)], "Count" => 1 }.into(),
+    );
+    let catalog = doc.add_object(dictionary! {
+        "Type" => "Catalog", "Pages" => pages_id,
+        "OCProperties" => dictionary! {
+            "OCGs" => vec![Object::from(g)],
+            "D" => dictionary! { "BaseState" => "ON", "Order" => order },
+        },
+    });
+    doc.trailer.set("Root", catalog);
+    let mut out = Vec::new();
+    doc.save_to(&mut out).unwrap();
+    out
+}
+
+#[test]
+fn issue_1637_a_shared_array_fan_out_stays_bounded() {
+    // The VE, the /Order tree and the OCMD member list all fan out 4^16 ways.
+    let bytes = fan_out_pdf();
+    assert!(bytes.len() < 4096, "the hostile file is tiny: {}", bytes.len());
+    let started = std::time::Instant::now();
+    let m = manifest(&bytes);
+    let ocmd = m.ocmds.first().expect("the OCMD is listed");
+    assert!(ocmd.groups.len() <= 4096, "{} members", ocmd.groups.len());
+    let _ = xs(&bytes);
+    let _ = apply_pdf_layers(&bytes, &choices(PdfLayerMode::View, &[]));
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "took {:?}",
+        started.elapsed()
+    );
+}
