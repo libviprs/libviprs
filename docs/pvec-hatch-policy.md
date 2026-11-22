@@ -6,7 +6,7 @@ The code is `src/pvec/fill_policy.rs`. `FILL_POLICY` there is the same table as 
 
 ## Update, issue #1609
 
-The table below is the default. With `PvecConversion::annotations(true)` a DWG `HATCH` and `SOLID` are carried through PVec's hatch
+The table below is the default. With `PvecConversion::fills(true)` (or `annotations(true)`, which asks for texts and fills together; #1624) a DWG `HATCH` and `SOLID` are carried through PVec's hatch
 stream: each boundary loop becomes a hidden closed polyline (so the boundary is a curve entity, as the stream wants, and the fill
 points at it), solid fills carry the RGBA of the entity's colour and pattern fills their name, angle and scale. Arcs, elliptic
 arcs and spline edges become short straight chords, because PVec's container stores straight polylines and refuses a ring with

@@ -44,6 +44,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object};
 use thiserror::Error;
 
+use super::pdf_layers::{OcModel, PdfLayerMode};
 use super::pdf_shading::{PdfFillPattern, PdfShading, PdfShadingPaint, read_shading};
 use super::pdf_text::{PdfTextRun, TextContext, TextParams, TextTracker};
 use super::pdf_tiling::{PdfTiling, read_tiling};
@@ -804,6 +805,8 @@ pub fn extract_page_paths_from_bytes(
         tiling_cache: std::collections::BTreeMap::new(),
         tilings_not_read: 0,
         image_bytes: 0,
+        oc: OcModel::load(&doc),
+        hidden: 0,
     };
     let resources = inherited_resources(&doc, page_id)?;
     run.stream(&ops, resources, base, 0)?;
@@ -1602,6 +1605,12 @@ struct Run<'a> {
     tilings_not_read: u32,
     /// Encoded image bytes kept so far, for `max_image_bytes`.
     image_bytes: u64,
+    /// The document's optional content, `None` when it has no `/OCProperties`: then nothing is
+    /// hidden and the page is read as it always was.
+    oc: Option<OcModel>,
+    /// Marked-content spans open right now that the default configuration hides (issue #1637).
+    /// Their paint, images, shadings and text are dropped; their clips and state still apply.
+    hidden: u32,
 }
 
 /// What `q` saves and `Q` restores.
@@ -1664,6 +1673,8 @@ impl Run<'_> {
     ) -> Result<(), PdfVectorError> {
         let base = self.stack.len();
         let mut path = PathState::default();
+        // Whether each marked-content span this stream opened hides its content.
+        let mut marks: Vec<bool> = Vec::new();
         for op in ops {
             self.operations += 1;
             if self.operations > self.limits.max_operations {
@@ -1672,6 +1683,7 @@ impl Run<'_> {
                     observed: self.operations,
                 });
             }
+            let runs_before = self.tracker.runs.len();
             self.tracker.operator(
                 self.doc,
                 resources,
@@ -1685,7 +1697,32 @@ impl Run<'_> {
                     active_clips: &self.clips,
                 },
             );
+            if self.hidden > 0 {
+                self.tracker.runs.truncate(runs_before);
+            }
             match op.operator.as_str() {
+                "BMC" => marks.push(false),
+                "BDC" => {
+                    // Whether this `BDC` opens an `/OC` span the default configuration hides.
+                    let hide = match (op.operands.as_slice(), &self.oc) {
+                        ([Object::Name(tag), Object::Name(prop)], Some(oc)) if tag == b"OC" => {
+                            let doc = self.doc;
+                            resources
+                                .and_then(|r| r.get(b"Properties").ok())
+                                .and_then(|p| as_dict(doc, p))
+                                .and_then(|p| p.get(prop).ok())
+                                .is_some_and(|target| !oc.shows(doc, target, PdfLayerMode::View))
+                        }
+                        _ => false,
+                    };
+                    self.hidden += u32::from(hide);
+                    marks.push(hide);
+                }
+                "EMC" => {
+                    if marks.pop() == Some(true) {
+                        self.hidden -= 1;
+                    }
+                }
                 "q" => {
                     let observed = self.stack.len() + 1;
                     if observed > self.limits.max_graphics_stack {
@@ -1833,12 +1870,14 @@ impl Run<'_> {
                     }
                 }
                 "Tj" | "TJ" | "'" | "\"" => {
-                    self.text.record_pdf(&op.operator, self.font);
+                    if self.hidden == 0 {
+                        self.text.record_pdf(&op.operator, self.font);
+                    }
                     if (4..=7).contains(&self.render_mode) {
                         self.text_clip_pending = true;
                     }
                 }
-                "sh" => {
+                "sh" if self.hidden == 0 => {
                     self.shadings = self.shadings.saturating_add(1);
                     self.paint_shading(op, resources, &ctm);
                 }
@@ -1875,8 +1914,9 @@ impl Run<'_> {
                 )));
             }
         }
-        // A stream that leaves `q` open does not leak into its caller.
+        // A stream that leaves `q` open does not leak into its caller, nor a span left open.
         self.stack.truncate(base);
+        self.hidden -= marks.iter().filter(|h| **h).count() as u32;
         Ok(())
     }
 
@@ -1908,6 +1948,16 @@ impl Run<'_> {
         if close_first {
             close(&mut state);
         }
+        // Hidden content paints nothing, but a clip it sets is kept as one that paints nothing.
+        let hidden = self.hidden > 0;
+        if hidden && state.clip.is_none() {
+            return Ok(());
+        }
+        let (fill, stroke) = if hidden {
+            (None, false)
+        } else {
+            (fill, stroke)
+        };
         // An empty path under `W` is an empty clip region, which excludes everything after it
         // (PDF 32000-1 8.5.4). It is kept so the policy can say so. Painting an empty path with
         // no clip draws nothing.
@@ -2183,6 +2233,9 @@ impl Run<'_> {
         operator: &str,
         stream: Option<&lopdf::Stream>,
     ) -> Result<(), PdfVectorError> {
+        if self.hidden > 0 {
+            return Ok(());
+        }
         if self.images.len() >= self.limits.max_images {
             return Err(PdfVectorError::ImageLimitExceeded {
                 limit: self.limits.max_images,
@@ -2289,6 +2342,12 @@ impl Run<'_> {
             // Not found, or not a stream: nothing to expand, as a viewer would do.
             return Ok(());
         };
+        // A form or image that is itself marked `/OC` and hidden is not run at all.
+        if let (Some(oc), Some(target)) = (&self.oc, xobj.dict.get(b"OC").ok())
+            && !oc.shows(doc, target, PdfLayerMode::View)
+        {
+            return Ok(());
+        }
         let is_form = xobj
             .dict
             .get(b"Subtype")

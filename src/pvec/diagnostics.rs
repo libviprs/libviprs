@@ -66,6 +66,8 @@ pub enum DiagnosticCode {
     EntityIgnoredByPolicy,
     /// An INSERT was not expanded.
     InsertNotExpanded,
+    /// A drawing was supplied for an xref that no xref block names.
+    XrefNotAttached,
     /// The source could not be opened.
     SourceOpenFailed,
     /// The view profile could not be applied.
@@ -88,11 +90,12 @@ pub enum DiagnosticCode {
 
 impl DiagnosticCode {
     /// Every code, in the order `docs/pvec-diagnostics.md` lists them.
-    pub const ALL: [DiagnosticCode; 13] = [
+    pub const ALL: [DiagnosticCode; 14] = [
         DiagnosticCode::EntityRequiresCapability,
         DiagnosticCode::EntityUnsupported,
         DiagnosticCode::EntityIgnoredByPolicy,
         DiagnosticCode::InsertNotExpanded,
+        DiagnosticCode::XrefNotAttached,
         DiagnosticCode::SourceOpenFailed,
         DiagnosticCode::ViewFailed,
         DiagnosticCode::BlocksFailed,
@@ -112,6 +115,7 @@ impl DiagnosticCode {
             DiagnosticCode::EntityUnsupported => "ENTITY_UNSUPPORTED",
             DiagnosticCode::EntityIgnoredByPolicy => "ENTITY_IGNORED_BY_POLICY",
             DiagnosticCode::InsertNotExpanded => "INSERT_NOT_EXPANDED",
+            DiagnosticCode::XrefNotAttached => "XREF_NOT_ATTACHED",
             DiagnosticCode::SourceOpenFailed => "SOURCE_OPEN_FAILED",
             DiagnosticCode::ViewFailed => "VIEW_FAILED",
             DiagnosticCode::BlocksFailed => "BLOCKS_FAILED",
@@ -131,7 +135,8 @@ impl DiagnosticCode {
             DiagnosticCode::EntityIgnoredByPolicy | DiagnosticCode::Cancelled => Severity::Info,
             DiagnosticCode::EntityRequiresCapability
             | DiagnosticCode::EntityUnsupported
-            | DiagnosticCode::InsertNotExpanded => Severity::Warning,
+            | DiagnosticCode::InsertNotExpanded
+            | DiagnosticCode::XrefNotAttached => Severity::Warning,
             DiagnosticCode::SourceOpenFailed
             | DiagnosticCode::ViewFailed
             | DiagnosticCode::BlocksFailed
@@ -151,6 +156,7 @@ impl DiagnosticCode {
             | DiagnosticCode::EntityUnsupported
             | DiagnosticCode::EntityIgnoredByPolicy
             | DiagnosticCode::InsertNotExpanded
+            | DiagnosticCode::XrefNotAttached
             | DiagnosticCode::CapabilityRejected
             | DiagnosticCode::Cancelled => Stage::Classify,
             DiagnosticCode::SourceOpenFailed | DiagnosticCode::UnitRequired => Stage::Open,

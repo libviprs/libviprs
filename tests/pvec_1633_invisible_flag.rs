@@ -1,6 +1,6 @@
 //! Issue #1633: an entity whose own invisible flag is set (DXF group 60) is not drawn. A hidden
 //! INSERT takes its whole block with it, a hidden entity inside a block hides only that entity,
-//! and the view pass names each one it dropped. Needs `--features pvec-convert`.
+//! and the view pass names each one it dropped under the `entities.invisible` knob. Needs `--features pvec-convert`.
 
 #![cfg(feature = "pvec-convert")]
 
@@ -59,7 +59,21 @@ fn issue_1633_the_view_pass_names_what_the_flag_dropped() {
     dropped.sort_unstable();
     assert_eq!(dropped, [2, 11, 101]);
     assert_eq!(
-        view.report.excluded_by_field.get("entity.visible"),
+        view.report.excluded_by_field.get("entities.invisible"),
         Some(&3)
     );
+}
+
+#[test]
+fn issue_1633_the_default_and_print_profiles_exclude_invisible_entities() {
+    for p in [
+        ViewProfile::default_profile(),
+        ViewProfile::print_profile("A-101"),
+    ] {
+        assert!(
+            p.to_string().contains("entities.invisible = exclude"),
+            "{p}"
+        );
+        assert!(p.exclusion_fields().contains(&"entities.invisible"));
+    }
 }

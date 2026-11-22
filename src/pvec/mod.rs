@@ -74,6 +74,7 @@ mod pdf_clip_stream;
 mod pdf_filters;
 pub mod pdf_image;
 mod pdf_image_decode;
+pub mod pdf_layers;
 #[cfg(feature = "pvec-write")]
 mod pdf_paint;
 pub mod pdf_ring_cut;
@@ -153,8 +154,8 @@ pub use provider::{
     EntityScope, EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState,
     LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, Point3,
     ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour,
-    SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextStyleRef, ViewportClip,
-    ViewportEntity, XrefAttachment,
+    SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef,
+    ViewportClip, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,
@@ -169,7 +170,7 @@ pub use view::{
     select_layout,
 };
 pub use view_profile::{
-    ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerOverride, LayerStateRule,
+    EntityPolicy, ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerOverride, LayerStateRule,
     LayerVisibility, LeafPaint, NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile,
     ViewProfileError, ViewReport, ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
 };
