@@ -19,7 +19,7 @@ use libviprs::pvec::{
     ProviderCaps, ProviderError, RawEntity, RawGeometry, SourceFact, SourceUnit, ViewProfile,
 };
 use libviprs::pvec_convert::{
-    PlotArea, PlotSettings, PvecConversion, PvecConversionOutput, PvecConvertError,
+    Orientation, PlotArea, PlotSettings, PvecConversion, PvecConversionOutput, PvecConvertError,
 };
 use pvec_facade::Curve;
 
@@ -361,9 +361,9 @@ fn issue_1628_extents_wider_than_the_paper_are_cut_at_its_edge() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1628_the_offset_moves_the_paper_against_the_drawing() {
+fn issue_1628_the_offset_replaces_the_layouts_own_origin() {
     let layout = PlotSettings {
-        offset_mm: [10.0, 5.0],
+        offset_mm: Some([10.0, 5.0]),
         ..PlotSettings::default()
     };
     let mut p = plot(1, 100.0, 50.0);
@@ -375,8 +375,8 @@ fn issue_1628_the_offset_moves_the_paper_against_the_drawing() {
     );
     assert_eq!(
         b,
-        [-12.0, -8.0, 88.0, 42.0],
-        "added to the layout's own origin"
+        [-10.0, -5.0, 90.0, 45.0],
+        "in place of the layout's own origin"
     );
     assert!(
         s.notes.contains(&"plot-offset".to_string()),
@@ -386,7 +386,7 @@ fn issue_1628_the_offset_moves_the_paper_against_the_drawing() {
     let _ = fs::remove_dir_all(dir);
 
     let both = PlotSettings {
-        offset_mm: [10.0, 5.0],
+        offset_mm: Some([10.0, 5.0]),
         ..extents()
     };
     let (b, _, dir) = framed(
@@ -400,11 +400,29 @@ fn issue_1628_the_offset_moves_the_paper_against_the_drawing() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn issue_1628_an_offset_equal_to_the_layouts_origin_changes_nothing() {
+    let mut p = plot(1, 100.0, 50.0);
+    p.origin = [2.0, 3.0];
+    let mock = sheet(p, vec![line(1, [0.0; 2], [10.0; 2])]);
+    let (own, _, dir) = framed("offset-own", mock.clone(), PlotSettings::default());
+    let _ = fs::remove_dir_all(dir);
+    assert_eq!(own, [-2.0, -3.0, 98.0, 47.0]);
+    let same = PlotSettings {
+        offset_mm: Some([2.0, 3.0]),
+        ..PlotSettings::default()
+    };
+    let (b, _, dir) = framed("offset-same", mock, same);
+    assert_eq!(b, own);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1628_centre_puts_the_extents_in_the_middle_of_the_paper() {
     let centred = PlotSettings {
         center: true,
         // Ignored once centred.
-        offset_mm: [30.0, 30.0],
+        offset_mm: Some([30.0, 30.0]),
         ..extents()
     };
     let (b, s, dir) = framed("centre", one_line([200.0, 100.0], [240.0, 120.0]), centred);
@@ -424,10 +442,35 @@ fn issue_1628_centre_puts_the_extents_in_the_middle_of_the_paper() {
         sheet(p, vec![line(1, [200.0, 100.0], [240.0, 120.0])]),
         PlotSettings {
             center: true,
-            ..PlotSettings::default()
+            ..extents()
         },
     );
     assert_eq!(b, [165.0, 85.0, 265.0, 135.0]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_centre_under_the_layout_area_is_ignored_and_says_so() {
+    let (b, s, dir) = framed(
+        "centre-layout",
+        one_line([10.0, 10.0], [40.0, 20.0]),
+        PlotSettings {
+            center: true,
+            ..PlotSettings::default()
+        },
+    );
+    assert_eq!(b, [0.0, 0.0, 100.0, 50.0]);
+    assert!(
+        s.notes.contains(&"plot-centre-not-applicable".to_string()),
+        "{:?}",
+        s.notes
+    );
+    assert!(
+        !s.notes.contains(&"plot-centered".to_string()),
+        "{:?}",
+        s.notes
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -477,7 +520,7 @@ fn issue_1628_a_paper_override_follows_the_layouts_rotation() {
 fn issue_1628_fit_to_paper_scales_the_extents_into_the_printable_area() {
     let fit = PlotSettings {
         fit_to_paper: true,
-        ..PlotSettings::default()
+        ..extents()
     };
     // 200 by 100 on 100 by 50: half size, so the paper shows a 200 by 100 window onto the drawing.
     let (out, dir) = convert("fit", one_line([0.0, 0.0], [200.0, 100.0]), |c| {
@@ -490,16 +533,23 @@ fn issue_1628_fit_to_paper_scales_the_extents_into_the_printable_area() {
         Some(["0".into(), "0".into(), "200".into(), "100".into()])
     );
     assert_eq!(s.calibration, "plot-scale");
-    assert_eq!(s.scale.as_deref(), Some("1:2"));
+    // Fit changes how big the print is, not how big the drawing is: the layout's own scale is
+    // still the calibration, and the fit ratio is a note.
+    assert_eq!(s.scale.as_deref(), Some("1:1"));
     assert!(
         s.notes.contains(&"plot-fit-to-paper".to_string()),
         "{:?}",
         s.notes
     );
+    assert!(
+        s.notes.contains(&"plot-fit-ratio 1:2".to_string()),
+        "{:?}",
+        s.notes
+    );
     assert_eq!(s.clip["outside"] + s.clip["cut"] + s.clip["crossing"], 0);
     assert_eq!(row_of(&report, 1).fidelity, "SupportedEquivalent");
-    let claim = stored_scale(&dir).expect("the fit scale is the calibration record");
-    assert_eq!(claim.metres_per_source_unit, 0.001 * 2.0);
+    let claim = stored_scale(&dir).expect("the layout's scale is the calibration record");
+    assert_eq!(claim.metres_per_source_unit, 0.001);
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -510,11 +560,16 @@ fn issue_1628_fit_with_centre_uses_the_tighter_side_and_centres_the_other() {
     let both = PlotSettings {
         fit_to_paper: true,
         center: true,
-        ..PlotSettings::default()
+        ..extents()
     };
     let (b, s, dir) = framed("fit-centre", one_line([0.0, 0.0], [200.0, 50.0]), both);
     assert_eq!(b, [0.0, -25.0, 200.0, 75.0]);
-    assert_eq!(s.scale.as_deref(), Some("1:2"));
+    assert_eq!(s.scale.as_deref(), Some("1:1"));
+    assert!(
+        s.notes.contains(&"plot-fit-ratio 1:2".to_string()),
+        "{:?}",
+        s.notes
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -529,11 +584,20 @@ fn issue_1628_fit_leaves_the_margins_unprintable() {
         sheet(p, vec![line(1, [0.0, 0.0], [200.0, 0.0])]),
         PlotSettings {
             fit_to_paper: true,
-            ..PlotSettings::default()
+            ..extents()
         },
     );
     assert_eq!(b, [-25.0, 0.0, 225.0, 125.0]);
-    assert_eq!(s.scale.as_deref(), Some("2:5"));
+    assert_eq!(
+        s.scale.as_deref(),
+        Some("1:1"),
+        "the layout's own scale stays the calibration"
+    );
+    assert!(
+        s.notes.contains(&"plot-fit-ratio 1:2.5".to_string()),
+        "{:?}",
+        s.notes
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -577,6 +641,225 @@ fn issue_1628_a_paper_that_is_not_a_size_is_refused_not_framed() {
     }
 }
 
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_fit_under_the_layout_area_with_the_layouts_own_paper_is_a_no_op() {
+    let (b, s, dir) = framed(
+        "fit-layout",
+        one_line([10.0, 10.0], [40.0, 20.0]),
+        PlotSettings {
+            fit_to_paper: true,
+            ..PlotSettings::default()
+        },
+    );
+    assert_eq!(b, [0.0, 0.0, 100.0, 50.0]);
+    assert!(
+        s.notes.contains(&"plot-fit-no-change".to_string()),
+        "{:?}",
+        s.notes
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_fit_under_the_layout_area_fits_the_layouts_printable_area_to_the_new_paper() {
+    // The layout prints 80 by 50 inside 10 mm side margins. On a 160 by 100 paper (no margins) it
+    // is twice the size, so the frame is the layout's printable area, 80 by 50 from its corner.
+    let mut p = plot(1, 100.0, 50.0);
+    p.margins = [10.0, 0.0, 10.0, 0.0];
+    let (b, s, dir) = framed(
+        "fit-layout-paper",
+        sheet(p, vec![line(1, [10.0, 10.0], [40.0, 20.0])]),
+        PlotSettings {
+            fit_to_paper: true,
+            paper_mm: Some([160.0, 100.0]),
+            ..PlotSettings::default()
+        },
+    );
+    assert_eq!(b, [0.0, 0.0, 80.0, 50.0]);
+    assert!(
+        s.notes.contains(&"plot-fit-ratio 1:0.5".to_string()),
+        "{:?}",
+        s.notes
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+fn near(a: [f64; 4], b: [f64; 4]) {
+    for (x, y) in a.iter().zip(&b) {
+        assert!((x - y).abs() < 1e-9, "{a:?} against {b:?}");
+    }
+}
+
+/// A 100 by 50 mm paper whose sheet unit is inches (plot paper units 0), over a drawing in
+/// millimetres: the frame is in inches, so are the offset and the margins, and the report says so.
+fn inch_sheet(
+    tag: &str,
+    paper: Vec<RawEntity>,
+    settings: PlotSettings,
+    margins: [f64; 4],
+) -> ([f64; 4], libviprs::pvec::report::SheetSummary, PathBuf) {
+    let mut p = plot(0, 100.0, 50.0);
+    p.margins = margins;
+    let (out, dir) = convert(tag, sheet(p, paper), |c| {
+        c.unit(SourceUnit::Millimeters).plot_settings(settings)
+    });
+    let s = out.unwrap().report.sheet.unwrap();
+    let b = s
+        .sheet_box
+        .clone()
+        .unwrap()
+        .map(|v| v.parse::<f64>().unwrap());
+    (b, s, dir)
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_an_inch_sheet_over_a_millimetre_drawing_keeps_frame_and_unit_in_step() {
+    let (w, h) = (100.0 / 25.4, 50.0 / 25.4);
+    let inside = || vec![line(1, [1.0, 1.0], [2.0, 1.0])];
+    // Layout area, with a 25.4 mm offset (one inch) and a 25.4 mm left margin.
+    let (b, s, dir) = inch_sheet(
+        "inch-layout",
+        inside(),
+        PlotSettings {
+            offset_mm: Some([25.4, 0.0]),
+            ..PlotSettings::default()
+        },
+        [25.4, 0.0, 0.0, 0.0],
+    );
+    assert_eq!(s.unit, "Inches");
+    near(b, [-2.0, 0.0, -2.0 + w, h]);
+    let _ = fs::remove_dir_all(dir);
+    // Extents: the paper starts at the extents' corner, less the margin and the offset.
+    let (b, _, dir) = inch_sheet(
+        "inch-extents",
+        inside(),
+        PlotSettings {
+            offset_mm: Some([25.4, 25.4]),
+            ..extents()
+        },
+        [0.0; 4],
+    );
+    near(b, [0.0, 0.0, w, h]);
+    let _ = fs::remove_dir_all(dir);
+    // Fit: the extents, 20 inches wide, fill the 3.937 inch paper.
+    let (b, s, dir) = inch_sheet(
+        "inch-fit",
+        vec![line(1, [0.0, 0.0], [20.0, 0.0])],
+        PlotSettings {
+            fit_to_paper: true,
+            ..extents()
+        },
+        [0.0; 4],
+    );
+    near(b, [0.0, 0.0, 20.0, 20.0 * h / w]);
+    assert_eq!(s.unit, "Inches");
+    // The calibration is the layout's own scale, with no 25.4 in it from the fit.
+    assert_eq!(s.scale.as_deref(), Some("1:1"));
+    let claim = stored_scale(&dir).unwrap();
+    assert_eq!(claim.metres_per_source_unit, 0.001);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_orientation_turns_the_paper_to_portrait_or_landscape() {
+    let portrait = PlotSettings {
+        orientation: Some(Orientation::Portrait),
+        ..PlotSettings::default()
+    };
+    let (b, s, dir) = framed("portrait", one_line([10.0, 10.0], [20.0, 20.0]), portrait);
+    assert_eq!(b, [0.0, 0.0, 50.0, 100.0]);
+    assert!(
+        s.notes.contains(&"plot-orientation".to_string()),
+        "{:?}",
+        s.notes
+    );
+    let _ = fs::remove_dir_all(dir);
+
+    // Already landscape: nothing to turn. A layout rotated a quarter is portrait as drawn.
+    let landscape = PlotSettings {
+        orientation: Some(Orientation::Landscape),
+        ..PlotSettings::default()
+    };
+    let (b, _, dir) = framed(
+        "landscape",
+        one_line([10.0, 10.0], [20.0, 20.0]),
+        landscape.clone(),
+    );
+    assert_eq!(b, [0.0, 0.0, 100.0, 50.0]);
+    let _ = fs::remove_dir_all(dir);
+    let mut p = plot(1, 100.0, 50.0);
+    p.rotation = 1;
+    let (b, _, dir) = framed(
+        "landscape-from-portrait",
+        sheet(p, vec![line(1, [10.0, 10.0], [20.0, 20.0])]),
+        landscape,
+    );
+    assert_eq!(b, [0.0, 0.0, 100.0, 50.0]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_a_scale_preset_or_a_custom_scale_replaces_the_layouts_plot_scale() {
+    for (scale, written) in [
+        ([1.0, 50.0], "1:50"),
+        ([2.0, 5.0], "2:5"),
+        ([10.0, 1.0], "10:1"),
+    ] {
+        let (_, s, dir) = framed(
+            "scale",
+            one_line([10.0, 10.0], [20.0, 20.0]),
+            PlotSettings {
+                scale: Some(scale),
+                ..PlotSettings::default()
+            },
+        );
+        assert_eq!(s.scale.as_deref(), Some(written));
+        assert_eq!(s.calibration, "plot-scale");
+        assert!(
+            s.notes.contains(&"plot-scale-overridden".to_string()),
+            "{:?}",
+            s.notes
+        );
+        // The report still says what the layout itself holds.
+        assert_eq!(s.plot.unwrap().scale_denominator, "1");
+        let _ = fs::remove_dir_all(dir);
+    }
+    let (_, s, dir) = framed(
+        "scale-zero",
+        one_line([10.0, 10.0], [20.0, 20.0]),
+        PlotSettings {
+            scale: Some([0.0, 1.0]),
+            ..PlotSettings::default()
+        },
+    );
+    assert!(s.notes.contains(&"scale-zero".to_string()), "{:?}", s.notes);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1628_plot_lineweights_overrides_what_the_layout_prints() {
+    for (layout, asked) in [(true, false), (false, true)] {
+        let mut p = plot(1, 100.0, 50.0);
+        p.print_lineweights = layout;
+        let (_, s, dir) = framed(
+            "weights",
+            sheet(p, vec![line(1, [10.0, 10.0], [20.0, 20.0])]),
+            PlotSettings {
+                print_lineweights: Some(asked),
+                ..PlotSettings::default()
+            },
+        );
+        assert_eq!(s.widths_dropped, !asked, "layout {layout}, asked {asked}");
+        let _ = fs::remove_dir_all(dir);
+    }
+}
+
 // ---- #1632: plot area Window, rotation 180 --------------------------------------------------
 //
 // The sheet is 100 by 50 mm again, in millimetres, so a window's numbers are the frame's numbers.
@@ -604,7 +887,7 @@ fn ends(report: &ConversionReport, dir: &std::path::Path) -> ([f64; 2], [f64; 2]
     ([o[0], o[1]], [o[0] + d[0] * len, o[1] + d[1] * len])
 }
 
-fn near(a: [f64; 2], b: [f64; 2]) -> bool {
+fn point_near(a: [f64; 2], b: [f64; 2]) -> bool {
     (a[0] - b[0]).abs() < 1e-6 && (a[1] - b[1]).abs() < 1e-6
 }
 
@@ -756,8 +1039,8 @@ fn issue_1632_rotation_180_flips_about_the_paper_centre() {
     );
     let (a, b) = ends(&report, &dir);
     assert!(
-        (near(a, [90.0, 40.0]) && near(b, [60.0, 30.0]))
-            || (near(b, [90.0, 40.0]) && near(a, [60.0, 30.0])),
+        (point_near(a, [90.0, 40.0]) && point_near(b, [60.0, 30.0]))
+            || (point_near(b, [90.0, 40.0]) && point_near(a, [60.0, 30.0])),
         "{a:?} {b:?}"
     );
     assert!(
@@ -788,8 +1071,8 @@ fn issue_1632_rotation_180_flips_about_the_frame_centre_not_the_origin() {
     let report = out.unwrap().report;
     let (a, b) = ends(&report, &dir);
     assert!(
-        (near(a, [60.0, 50.0]) && near(b, [50.0, 50.0]))
-            || (near(b, [60.0, 50.0]) && near(a, [50.0, 50.0])),
+        (point_near(a, [60.0, 50.0]) && point_near(b, [50.0, 50.0]))
+            || (point_near(b, [60.0, 50.0]) && point_near(a, [50.0, 50.0])),
         "{a:?} {b:?}"
     );
     let _ = fs::remove_dir_all(dir);
@@ -818,8 +1101,8 @@ fn issue_1632_rotation_180_turns_a_window_about_the_windows_centre() {
     );
     let (a, b) = ends(&report, &dir);
     assert!(
-        (near(a, [60.0, 35.0]) && near(b, [50.0, 35.0]))
-            || (near(b, [60.0, 35.0]) && near(a, [50.0, 35.0])),
+        (point_near(a, [60.0, 35.0]) && point_near(b, [50.0, 35.0]))
+            || (point_near(b, [60.0, 35.0]) && point_near(a, [50.0, 35.0])),
         "{a:?} {b:?}"
     );
     let _ = fs::remove_dir_all(dir);
@@ -828,36 +1111,68 @@ fn issue_1632_rotation_180_turns_a_window_about_the_windows_centre() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1632_rotation_90_is_reported_and_measured() {
-    // Rotations 1 and 3 swap the paper's sides today, and the spec lists that as honoured, so the
-    // report must not call it "not applied". The content stays where the drawing has it: whether
-    // 90 and 270 should also turn the content is the open question this pins what is measured of.
-    for rotation in [1, 3] {
-        let (out, dir) = convert(
-            "rot90",
-            sheet(rotated(rotation), vec![line(1, [10.0, 10.0], [40.0, 20.0])]),
-            |c| c.unit(SourceUnit::Millimeters),
-        );
-        let report = out.unwrap().report;
-        let s = report.sheet.clone().unwrap();
-        assert_eq!(
-            s.sheet_box
-                .clone()
-                .unwrap()
-                .map(|v| v.parse::<f64>().unwrap()),
-            [0.0, 0.0, 50.0, 100.0],
-            "rotation {rotation}: the sides swap"
-        );
-        assert_eq!(s.plot.clone().unwrap().rotation, rotation, "reported");
-        assert!(
-            !s.notes.contains(&"rotation-not-applied".to_string()),
-            "rotation {rotation}: {:?}",
-            s.notes
-        );
-        let (a, b) = ends(&report, &dir);
-        assert!(
-            near(a, [10.0, 10.0]) && near(b, [40.0, 20.0]),
-            "rotation {rotation}: {a:?} {b:?}"
-        );
-        let _ = fs::remove_dir_all(dir);
-    }
+    // Rotation 1 is landscape: the paper's sides swap and the content stays where the drawing has
+    // it (paper space is already in the rotated frame). It is honoured, so no "not applied" note.
+    let (out, dir) = convert(
+        "rot90",
+        sheet(rotated(1), vec![line(1, [10.0, 10.0], [40.0, 20.0])]),
+        |c| c.unit(SourceUnit::Millimeters),
+    );
+    let report = out.unwrap().report;
+    let s = report.sheet.clone().unwrap();
+    assert_eq!(
+        s.sheet_box
+            .clone()
+            .unwrap()
+            .map(|v| v.parse::<f64>().unwrap()),
+        [0.0, 0.0, 50.0, 100.0],
+        "the sides swap"
+    );
+    assert_eq!(s.plot.clone().unwrap().rotation, 1, "reported");
+    assert!(
+        !s.notes.contains(&"rotation-not-applied".to_string()),
+        "{:?}",
+        s.notes
+    );
+    let (a, b) = ends(&report, &dir);
+    assert!(
+        point_near(a, [10.0, 10.0]) && point_near(b, [40.0, 20.0]),
+        "{a:?} {b:?}"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1632_rotation_270_swaps_the_sides_and_flips() {
+    // Rotation 3 is landscape upside-down: rotation 1 plus the 180 flip. The box is 50 by 100,
+    // centre (25, 50), so (10,10)-(40,20) lands at (40,90)-(10,80).
+    let (out, dir) = convert(
+        "rot270",
+        sheet(rotated(3), vec![line(1, [10.0, 10.0], [40.0, 20.0])]),
+        |c| c.unit(SourceUnit::Millimeters),
+    );
+    let report = out.unwrap().report;
+    let s = report.sheet.clone().unwrap();
+    assert_eq!(
+        s.sheet_box
+            .clone()
+            .unwrap()
+            .map(|v| v.parse::<f64>().unwrap()),
+        [0.0, 0.0, 50.0, 100.0],
+        "the sides swap"
+    );
+    assert_eq!(s.plot.clone().unwrap().rotation, 3, "reported");
+    assert!(
+        !s.notes.contains(&"rotation-not-applied".to_string()),
+        "{:?}",
+        s.notes
+    );
+    let (a, b) = ends(&report, &dir);
+    assert!(
+        (point_near(a, [40.0, 90.0]) && point_near(b, [10.0, 80.0]))
+            || (point_near(b, [40.0, 90.0]) && point_near(a, [10.0, 80.0])),
+        "{a:?} {b:?}"
+    );
+    let _ = fs::remove_dir_all(dir);
 }

@@ -666,7 +666,7 @@ fn issue_1562_inches_and_a_quarter_turn_swap_the_sheet() {
     let s = report.sheet.unwrap();
     assert_eq!(s.unit, "Inches");
     assert!(
-        s.notes.iter().any(|n| n == "rotation-not-applied"),
+        !s.notes.iter().any(|n| n == "rotation-not-applied"),
         "{:?}",
         s.notes
     );

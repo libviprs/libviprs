@@ -273,7 +273,7 @@ fn issue_1584_plot_settings_in_millimetres_frame_and_calibrate_the_sheet() {
     assert!(!plot.print_lineweights);
     assert!(s.widths_dropped, "lineweights are not printed");
     assert!(
-        s.notes.iter().any(|n| n == "rotation-not-applied"),
+        !s.notes.iter().any(|n| n == "rotation-not-applied"),
         "{:?}",
         s.notes
     );
