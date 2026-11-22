@@ -606,6 +606,9 @@ pvec-write = ["pvec-normalized", "pvec-raster", "dep:pvec-facade", "dep:pvec-cap
 # (`tests/pvec_1079_provider_default.rs`), so the feature pulls it in; `acadsharp-rs` stays opt-in.
 # Pure Rust, no new dependency beyond the two features it joins.
 pvec-convert = ["pvec-write", "dwg-acadrust"]
+# `pvec::thumbnail` and `PvecConversion::thumbnail` (issue #1629): a PNG of a sheet at a width the caller picks,
+# strokes only, drawn through resvg (already an optional dependency, so nothing new in the tree).
+pvec-raster-thumbnail = ["pvec-convert", "svg"]
 # Documentation-only deprecated alias for `object-store-sink`. Cargo has no
 # mechanism to mark a feature deprecated, so enabling `s3` emits NO build-time
 # warning: consumers pinned to `features = ["s3"]` get zero automated signal

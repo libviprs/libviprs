@@ -125,7 +125,7 @@ use crate::pvec::report::{
     ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, SheetViewport, UnresolvedXrefRow,
     ViewSummary, XrefSummary,
 };
-use crate::pvec::style::{LineStyleComponent, dwg_line_style, dwg_style_input};
+use crate::pvec::style::{DwgLineweight, LineStyleComponent, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
     CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, metres_per_unit,
@@ -210,6 +210,10 @@ pub enum PvecConvertError {
         /// The INSERT chain the entity was reached through, spelled `block@HANDLE/...`.
         block_path: String,
     },
+    /// The thumbnail could not be drawn (#1629). The artifact was published.
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    #[error("the thumbnail could not be drawn")]
+    Thumbnail(#[source] crate::pvec::thumbnail::ThumbnailError),
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
     Cancelled,
@@ -229,6 +233,9 @@ pub struct PvecConversionOutput {
     /// The most outcomes that were waiting for the consumer at once. Never above the capacity set
     /// with [`PvecConversion::queue_capacity`].
     pub peak_queue_depth: u32,
+    /// The sheet as a PNG, when [`PvecConversion::thumbnail`] asked for one (#1629).
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    pub thumbnail: Option<Vec<u8>>,
 }
 
 /// One conversion, configured the way `EngineBuilder` configures a pyramid run.
@@ -249,7 +256,10 @@ pub struct PvecConversion<'a> {
     texts: bool,
     fills: bool,
     element_rules: Option<ElementRules>,
+    plot_style: Option<acadrust::plot_style::PlotStyleTable>,
     plot_settings: PlotSettings,
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    thumbnail_width: Option<u32>,
     xrefs: Vec<(String, CadSource<'a>)>,
     xref_note: Arc<Mutex<xref::XrefNote>>,
 }
@@ -356,7 +366,10 @@ impl<'a> PvecConversion<'a> {
             texts: false,
             fills: false,
             element_rules: None,
+            plot_style: None,
             plot_settings: PlotSettings::default(),
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            thumbnail_width: None,
             xrefs: Vec::new(),
             xref_note: Arc::default(),
         }
@@ -438,10 +451,28 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// The plot style table a print conversion applies to each stroke: colour (with the grayscale
+    /// policy), screening, lineweight and linetype, per ACI for a CTB and per named style for an
+    /// STB (#1630).
+    #[must_use]
+    pub fn plot_style_table(mut self, table: acadrust::plot_style::PlotStyleTable) -> Self {
+        self.plot_style = Some(table);
+        self
+    }
+
     /// The resource ceilings (N3.6), carried on the view profile.
     #[must_use]
     pub fn limits(mut self, limits: SourceLimits) -> Self {
         self.view_profile = self.view_profile.with_limits(limits);
+        self
+    }
+
+    /// Also draw the converted sheet as a PNG `width_px` wide, into
+    /// [`PvecConversionOutput::thumbnail`] (#1629). Strokes only, black on white.
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    #[must_use]
+    pub fn thumbnail(mut self, width_px: u32) -> Self {
+        self.thumbnail_width = Some(width_px);
         self
     }
 
@@ -593,6 +624,15 @@ impl<'a> PvecConversion<'a> {
     /// [`PvecConvertError`]. After any error the destination and its report are as they were.
     pub fn convert(self) -> Result<PvecConversionOutput, PvecConvertError> {
         let observer = self.observer.clone();
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        if self.thumbnail_width == Some(0) {
+            return report_failure(
+                observer.as_deref(),
+                Err(PvecConvertError::Thumbnail(
+                    crate::pvec::thumbnail::ThumbnailError::ZeroWidth,
+                )),
+            );
+        }
         let result = if self.cancel.is_cancelled() {
             Err(PvecConvertError::Cancelled)
         } else {
@@ -667,6 +707,7 @@ impl<'a> PvecConversion<'a> {
             fills: want_fills,
             element_rules,
             calibration: caller_calibration,
+            plot_style,
             plot_settings,
             ..
         } = self;
@@ -832,6 +873,8 @@ impl<'a> PvecConversion<'a> {
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
             let text = |v: f64| format!("{v}");
+            // Only a CTB is applied: nothing says which named style an entity uses (#1630).
+            let stb = plot_style.as_ref().is_some_and(|t| t.is_stb);
             let mut summary = SheetSummary {
                 layout: layout.name.clone(),
                 frame: "extents".into(),
@@ -843,6 +886,9 @@ impl<'a> PvecConversion<'a> {
                 },
                 ..SheetSummary::default()
             };
+            if stb {
+                summary.notes.push("plot-style-stb-unsupported".into());
+            }
             let mut plot_unit = None;
             let mut frame_box = None;
             let mut drop_widths = false;
@@ -1594,6 +1640,8 @@ impl<'a> PvecConversion<'a> {
             }
         }
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
+        // The plot style table a CTB gives, applied per ACI (#1630); an STB applies nothing.
+        let table = plot_style.as_ref().filter(|t| !t.is_stb);
         // What the sheet clip did: outside, crossing, cut and the pieces the cut ones became.
         let mut clipped = [0u64; 4];
         // Ids are dense over what is written to the report, so a cut entity's pieces each take one.
@@ -2254,6 +2302,13 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
+                        // The ACI the stroke is drawn in, through BYLAYER and BYBLOCK; a true colour has none.
+                        let effective_aci = match paints.get(&leaf_key_of(&raw.provenance)) {
+                            Some(LeafPaint::Colour(SourceColour::Aci(i))) if table.is_some() => {
+                                Some(*i)
+                            }
+                            _ => None,
+                        };
                         let (style, bad_style, own_colour) = if pending.is_some() {
                             // A carrier is never drawn: the stream record is what shows.
                             let c = LineStyleComponent::new(id, None, None, false).ok();
@@ -2261,6 +2316,31 @@ impl<'a> PvecConversion<'a> {
                             (c, bad, false)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
+                            // The table's lineweight and linetype for the stroke's ACI beat the
+                            // object's; an entry that says "object" leaves them (#1630).
+                            if let (Some(t), Some(aci)) = (table, effective_aci) {
+                                if let Some(mm) = t.resolve_lineweight(aci) {
+                                    input.lineweight = Some(DwgLineweight::Hundredths(
+                                        (f64::from(mm) * 100.0).round() as i16,
+                                    ));
+                                }
+                                // Pattern lengths are in millimetres like the table's lineweights,
+                                // `linepattern_size` long: 0 solid, 1 dashed, 2 dotted, 3 dash dot.
+                                let size =
+                                    f64::from(t.aci_entries[usize::from(aci)].linepattern_size);
+                                let pattern = match t.aci_entries[usize::from(aci)].linetype {
+                                    0 => Some(Vec::new()),
+                                    1 => Some(vec![size, -size / 2.0]),
+                                    2 => Some(vec![0.0, -size / 2.0]),
+                                    3 => Some(vec![size, -size / 4.0, 0.0, -size / 4.0]),
+                                    _ => None,
+                                };
+                                if let Some(p) = pattern {
+                                    input.linetype_scale = 1.0;
+                                    input.linetype_name = None;
+                                    input.linetype_elements = Some(p).filter(|p| !p.is_empty());
+                                }
+                            }
                             // P-8: a layout that does not print lineweights has none on its sheet.
                             if drop_widths {
                                 input.lineweight = None;
@@ -2278,7 +2358,21 @@ impl<'a> PvecConversion<'a> {
                             None
                         };
                         let paint = match leaf_paint {
-                            Some(LeafPaint::Colour(c)) => paint_word(c),
+                            Some(LeafPaint::Colour(c)) => paint_word(c).map(|word| {
+                                let (Some(t), Some(aci)) = (table, effective_aci) else {
+                                    return word;
+                                };
+                                let [r, g, b, _] = word.to_be_bytes();
+                                let [r, g, b] = t.resolve_color(aci).map_or([r, g, b], |c| {
+                                    c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                                });
+                                // Screening is lighter ink on white paper, so it blends toward
+                                // white and the word stays opaque.
+                                let s = f64::from(t.resolve_screening(aci));
+                                let [r, g, b] = [r, g, b]
+                                    .map(|c| (255.0 - (255.0 - f64::from(c)) * s).round() as u8);
+                                u32::from_be_bytes([r, g, b, 255])
+                            }),
                             _ => None,
                         };
                         Side {
@@ -2478,6 +2572,8 @@ impl<'a> PvecConversion<'a> {
             annotation_counts,
             sheet,
         } = self.classify(provider, Some(unit))?;
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let thumbnail_width = self.thumbnail_width;
         let (ask_texts, ask_fills) = (self.texts, self.fills);
         let Self {
             dest,
@@ -2703,8 +2799,17 @@ impl<'a> PvecConversion<'a> {
             StreamedPublishError::Publish(PublishError::Cancelled) => PvecConvertError::Cancelled,
             StreamedPublishError::Publish(other) => PvecConvertError::Publish(other),
         };
+        // A paper sheet with nothing to stroke (only text, say) still has a paper to show, so a
+        // thumbnail of it is blank and no artifact is written (#1629).
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let blank_paper = thumbnail_width.is_some() && area.is_some();
+        #[cfg(not(feature = "pvec-raster-thumbnail"))]
+        let blank_paper = false;
         let published = match &spill {
             None => match open(geometries, None, &mut on_chunk) {
+                Err(PvecConvertError::Write(WriteError::NoGeometry)) if blank_paper => {
+                    seal(None, &[], None, None).map(|(report, fidelity)| (report, fidelity, 0))
+                }
                 Err(PvecConvertError::Write(WriteError::AllRefused(refused))) => {
                     seal(None, &refused, None, None).and_then(|(report, fidelity)| {
                         Err(PvecConvertError::NothingStorable {
@@ -2774,13 +2879,42 @@ impl<'a> PvecConversion<'a> {
             .map_err(publish_error),
         };
         let (report, fidelity, written) = published?;
-        tell(EngineEvent::ConversionPublished);
+        if written > 0 || !blank_paper {
+            tell(EngineEvent::ConversionPublished);
+        }
+        // A paper frame fills the picture; a frame that is only the kept geometry's extent (model
+        // space, or a layout without plot settings) gets 2 percent of its longer side all round.
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let thumbnail = thumbnail_width
+            .map(|width| {
+                use crate::pvec::thumbnail::{ThumbnailError, draw};
+                let paper = report.sheet.as_ref().is_some_and(|s| s.frame == "paper");
+                let margin = if paper { 0.0 } else { 0.02 };
+                match area.filter(|_| written == 0) {
+                    Some([x0, y0, x1, y1]) => {
+                        draw([x0, y0], [x1, y1], std::iter::empty(), width, 0.0)
+                    }
+                    None => {
+                        let reader = crate::pvec::publish::open_published(dest)
+                            .map_err(|e| ThumbnailError::Artifact(e.to_string()))?;
+                        let curves = reader
+                            .entities()
+                            .map_err(|e| ThumbnailError::Artifact(e.to_string()))?;
+                        let b = reader.manifest().bounds;
+                        draw(b.min, b.max, curves.iter().map(|(_, c)| c), width, margin)
+                    }
+                }
+            })
+            .transpose()
+            .map_err(PvecConvertError::Thumbnail)?;
         Ok(PvecConversionOutput {
             artifact: dest.to_path_buf(),
             report,
             fidelity,
             written,
             peak_queue_depth,
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            thumbnail,
         })
     }
 }
@@ -3586,6 +3720,8 @@ impl PvecConvertError {
                 out.block_path = Some(block_path.clone());
                 out
             }
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
         }
     }
