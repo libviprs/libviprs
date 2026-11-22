@@ -118,6 +118,7 @@ fn layer(name: &str, off: bool) -> LayerState {
         frozen: false,
         locked: false,
         plottable: true,
+        ..LayerState::default()
     }
 }
 

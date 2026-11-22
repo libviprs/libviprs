@@ -96,8 +96,8 @@ pub(super) fn build<E>(
                 continue;
             }
             let sequence = chain[end - 1];
-            if !rings.contains_key(&sequence) {
-                rings.insert(sequence, write_rings(sequence)?);
+            if let std::collections::btree_map::Entry::Vacant(slot) = rings.entry(sequence) {
+                slot.insert(write_rings(sequence)?);
             }
             let (rule, boundary) = rings[&sequence].clone();
             index.insert(prefix, clips.len() as u32);

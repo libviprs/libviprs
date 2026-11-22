@@ -23,6 +23,7 @@ fn n3_5b_1279_default_profile_names_every_field_that_can_exclude() {
     assert_eq!(
         fields,
         vec![
+            "entities.invisible",
             "layers.frozen",
             "layers.off",
             "nested_inserts.max_depth",
