@@ -46,11 +46,7 @@ pub struct PdfPlot<'a> {
     layouts: Option<Vec<String>>,
 }
 
-/// A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
-const DEFAULT_WIDTH_MM: f64 = 0.25;
 const POINTS_PER_METRE: f64 = 72.0 / 0.0254;
-/// Segments a curved piece is drawn with.
-const CURVED: usize = 96;
 
 impl<'a> PdfPlot<'a> {
     /// A plot of `source` into the PDF `dest`.
@@ -210,6 +206,8 @@ struct Page {
 
 /// Reads a scratch artifact into a page: the frame is the paper, the curves are the strokes.
 fn read_page(artifact: &Path) -> Result<Page, crate::pvec::publish::PublishError> {
+    // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
+    const DEFAULT_WIDTH_MM: f64 = 0.25;
     let other = |e: &dyn std::fmt::Display| {
         crate::pvec::publish::PublishError::Io(std::io::Error::other(e.to_string()))
     };
@@ -287,6 +285,8 @@ fn blank_page(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> Page {
 
 /// A curve as polylines. A bare line has no ends (a trimmed one does), so it has nothing to draw.
 fn polylines(curve: &Curve) -> Vec<Vec<(f64, f64)>> {
+    // Segments a curved piece is drawn with.
+    const CURVED: usize = 96;
     let along = |c: &dyn Curve2d, n: usize| {
         let d = c.domain();
         (0..=n)
