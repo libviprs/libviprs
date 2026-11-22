@@ -546,7 +546,7 @@ impl ViewProfile {
         };
         let layer_colours: Vec<(String, Option<SourceColour>)> = all_layers
             .iter()
-            .map(|l| (l.name.clone(), l.colour))
+            .map(|l| (l.name.clone(), l.color))
             .collect();
         let layer_table: Vec<LayerState> = if needs_layers { all_layers } else { Vec::new() };
         // P-3: the layers a print leaves out, from the provider's plottable flag (#1560).

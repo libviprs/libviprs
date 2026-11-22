@@ -186,7 +186,7 @@ pub struct LayerState {
     /// leaves it out, a model-space view keeps it (#1560).
     pub plottable: bool,
     /// The colour the layer is drawn in, `None` when the drawing gives none (#1638).
-    pub colour: Option<SourceColour>,
+    pub color: Option<SourceColour>,
 }
 
 /// A layout's plot settings, as the drawing stores them (#1560). Nothing here is applied: which

@@ -1859,11 +1859,11 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
-                        let (style, bad_style) = if pending.is_some() {
+                        let (style, bad_style, own_colour) = if pending.is_some() {
                             // A carrier is never drawn: the stream record is what shows.
                             let c = LineStyleComponent::new(id, None, None, false).ok();
                             let bad = c.is_none();
-                            (c, bad)
+                            (c, bad, false)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
                             // P-8: a layout that does not print lineweights has none on its sheet.
@@ -1872,9 +1872,9 @@ impl<'a> PvecConversion<'a> {
                             }
                             let c = dwg_line_style(id, &input).ok();
                             let bad = c.is_none();
-                            (c, bad)
+                            (c, bad, input.colour_index.is_some())
                         } else {
-                            (None, false)
+                            (None, false, false)
                         };
                         // A carrier is never drawn, so it has no colour either.
                         let leaf_paint = if components.stroke_paint && pending.is_none() {
@@ -1905,10 +1905,16 @@ impl<'a> PvecConversion<'a> {
                             paint,
                             // A colour the drawing names and the walk cannot reach, or one with no
                             // RGB behind it, is counted and not painted.
-                            colour_ignored: match leaf_paint {
-                                Some(LeafPaint::Unresolved) => true,
-                                Some(LeafPaint::Colour(_)) => paint.is_none(),
-                                _ => false,
+                            // With the paint stream off nothing writes a colour, so every explicit colour
+                            // index is ignored, counted as before (read only with the line style stream on).
+                            colour_ignored: if !components.stroke_paint {
+                                own_colour
+                            } else {
+                                match leaf_paint {
+                                    Some(LeafPaint::Unresolved) => true,
+                                    Some(LeafPaint::Colour(_)) => paint.is_none(),
+                                    _ => false,
+                                }
                             },
                             bad_style,
                             viewport: window.map(|k| windows[k].0.handle),
