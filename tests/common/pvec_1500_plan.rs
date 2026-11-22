@@ -240,7 +240,7 @@ impl DwgProvider for Mock {
             frozen: false,
             locked,
             plottable: true,
-            color: None,
+            ..LayerState::default()
         };
         Ok(vec![l("0", true), l("A-WALL", false), l("A-DOOR", false)])
     }

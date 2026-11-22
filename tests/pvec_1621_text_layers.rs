@@ -69,7 +69,7 @@ fn layer_table() -> Vec<LayerState> {
         frozen,
         locked: false,
         plottable,
-        colour: None,
+        ..LayerState::default()
     };
     vec![
         layer("0", false, false, true),

@@ -176,7 +176,7 @@ impl DwgProvider for Mock {
             frozen: false,
             locked: false,
             plottable,
-            color: None,
+            ..LayerState::default()
         };
         Ok(vec![
             layer("0", false, true),

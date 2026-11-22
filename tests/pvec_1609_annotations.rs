@@ -219,7 +219,7 @@ impl DwgProvider for Notes {
             frozen: false,
             locked: false,
             plottable: true,
-            color: None,
+            ..LayerState::default()
         }])
     }
 

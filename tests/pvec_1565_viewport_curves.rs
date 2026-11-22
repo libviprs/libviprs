@@ -121,7 +121,7 @@ impl DwgProvider for Mock {
             frozen: false,
             locked: false,
             plottable: true,
-            color: None,
+            ..LayerState::default()
         }])
     }
     fn viewports(&self) -> Result<Vec<ViewportEntity>, ProviderError> {
