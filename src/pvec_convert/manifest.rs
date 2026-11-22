@@ -576,25 +576,28 @@ pub fn cad_manifest<P: DwgProvider>(source: CadSource<'_>) -> Result<CadManifest
         rows.push(ManifestLayout {
             name: layout.name.clone(),
             tab: n as u32 + 1,
-            handle: hex(None),
+            handle: hex(provider.layout_handle(layout.id)),
             sheet,
             skip: skip.map(|s| match s {
                 SheetSkip::Empty => "empty".to_owned(),
                 SheetSkip::EmptyAfterView => "emptyAfterView".to_owned(),
                 _ => "failed".to_owned(),
             }),
-            paper: plot.as_ref().map(|p| ManifestPaper {
-                size_name: Some(p.paper_size.clone()).filter(|s| !s.is_empty()),
-                width_mm: p.paper_width,
-                height_mm: p.paper_height,
-                orientation: if p.paper_width >= p.paper_height {
-                    "landscape"
+            paper: plot.as_ref().map(|p| {
+                // The sheet the conversion writes: a quarter turn swaps the stored sides.
+                let (w, h) = if matches!(p.rotation.rem_euclid(4), 1 | 3) {
+                    (p.paper_height, p.paper_width)
                 } else {
-                    "portrait"
+                    (p.paper_width, p.paper_height)
+                };
+                ManifestPaper {
+                    size_name: Some(p.paper_size.clone()).filter(|s| !s.is_empty()),
+                    width_mm: w,
+                    height_mm: h,
+                    orientation: if w >= h { "landscape" } else { "portrait" }.into(),
+                    unit: if p.paper_units == 0 { "inches" } else { "mm" }.into(),
+                    rotation: u16::try_from(p.rotation.rem_euclid(4) * 90).unwrap_or(0),
                 }
-                .into(),
-                unit: if p.paper_units == 0 { "inches" } else { "mm" }.into(),
-                rotation: u16::try_from(p.rotation.rem_euclid(4) * 90).unwrap_or(0),
             }),
             plot: plot.as_ref().map(|p| ManifestPlot {
                 plot_area: match p.plot_type {
@@ -742,13 +745,17 @@ pub fn resolve_visibility(manifest: &CadManifest, choices: &CadChoices) -> Vec<R
             let forced = forced.map(|o| vis(o == LayerOverride::Visible));
             let base = on && !frozen && plot && !same(&layer.name, "DEFPOINTS");
 
+            // A paper-space-only layer is out of every viewport's reach: its frozen-list entries
+            // change nothing (spec 1.2).
+            let paper_only = layer.entity_count.model == 0 && layer.entity_count.paper > 0;
             let mut plots_count = PlotsCount::default();
             let mut per_viewport = BTreeMap::new();
             let mut layout_frozen = Vec::new();
             for l in sheets() {
                 let mut here = false;
                 for v in windows(l) {
-                    let frozen_here = v.frozen_layers.iter().any(|n| same(n, &layer.name));
+                    let frozen_here =
+                        !paper_only && v.frozen_layers.iter().any(|n| same(n, &layer.name));
                     plots_count.of += 1;
                     plots_count.frozen_in += u32::from(frozen_here);
                     here |= frozen_here;

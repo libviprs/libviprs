@@ -114,6 +114,26 @@ fn resolver_truth_table() {
     }
 }
 
+// 9.1 and spec 1.2: a layer only paper space uses is visible, whatever a viewport freezes.
+#[test]
+fn resolver_paper_space_only_layer_is_visible() {
+    let mut m = manifest("A-TITLE", [true, false, false, true, true]);
+    m.layers[0].entity_count.paper = 3;
+    let got = resolve_visibility(&m, &choices());
+    assert_eq!(got[0].plots, PlotsVisibility::Visible);
+    assert!(got[0].per_layout.is_empty());
+    assert_eq!(got[0].plots_count.frozen_in, 0);
+    // The same layer with a model-space entity is a viewport case again.
+    m.layers[0].entity_count.model = 1;
+    let got = resolve_visibility(&m, &choices());
+    assert_eq!(got[0].plots, PlotsVisibility::Viewport);
+    // Off still hides it: only the viewport part is out of reach.
+    m.layers[0].entity_count.model = 0;
+    m.layers[0].on = false;
+    let got = resolve_visibility(&m, &choices());
+    assert_eq!(got[0].plots, PlotsVisibility::Hidden);
+}
+
 // 9.1, the Defpoints row
 #[test]
 fn resolver_defpoints_never_plots() {

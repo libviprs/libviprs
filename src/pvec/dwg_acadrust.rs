@@ -440,6 +440,8 @@ pub struct AcadrustProvider {
     /// The plot settings of each of `layouts`, by position; `None` for a layout named after its
     /// block record, which has no Layout object to hold them.
     plots: Vec<Option<LayoutPlot>>,
+    /// The Layout object's own handle for each of `layouts`, by position.
+    layout_handles: Vec<Option<ItemHandle>>,
 }
 
 impl AcadrustProvider {
@@ -674,14 +676,25 @@ impl AcadrustProvider {
         })
     }
 
-    fn collect_layouts(doc: &acr::CadDocument) -> Vec<(LayoutState, Option<LayoutPlot>)> {
+    fn collect_layouts(
+        doc: &acr::CadDocument,
+    ) -> Vec<(LayoutState, Option<LayoutPlot>, Option<ItemHandle>)> {
         let block_of = |handle: acr::Handle| {
             doc.block_records
                 .iter()
                 .find(|b| b.handle == handle)
                 .map(|b| b.name.clone())
         };
-        let mut found: Vec<(i16, u64, String, String, Option<LayoutPlot>)> = Vec::new();
+        // Tab order, handle, name, block name, plot settings, the Layout object's handle.
+        type Found = (
+            i16,
+            u64,
+            String,
+            String,
+            Option<LayoutPlot>,
+            Option<ItemHandle>,
+        );
+        let mut found: Vec<Found> = Vec::new();
         for o in doc.objects.values() {
             if let ObjectType::Layout(l) = o
                 && let Some(block) = block_of(l.block_record)
@@ -721,6 +734,7 @@ impl AcadrustProvider {
                     l.name.clone(),
                     block,
                     Some(plot),
+                    item_handle(l.handle),
                 ));
             }
         }
@@ -735,7 +749,7 @@ impl AcadrustProvider {
                     } else {
                         b.name.clone()
                     };
-                    found.push((0, b.handle.value(), name, b.name.clone(), None));
+                    found.push((0, b.handle.value(), name, b.name.clone(), None, None));
                 }
             }
         }
@@ -745,7 +759,7 @@ impl AcadrustProvider {
         found
             .into_iter()
             .enumerate()
-            .map(|(i, (_, _, name, block, plot))| {
+            .map(|(i, (_, _, name, block, plot, handle))| {
                 let state = LayoutState {
                     id: LayoutId(u32::try_from(i).unwrap_or(u32::MAX)),
                     name,
@@ -756,7 +770,7 @@ impl AcadrustProvider {
                     },
                     block_name: block,
                 };
-                (state, plot)
+                (state, plot, handle)
             })
             .collect()
     }
@@ -804,12 +818,20 @@ impl DwgProvider for AcadrustProvider {
                 });
             }
         };
-        let (layouts, plots) = Self::collect_layouts(&doc).into_iter().unzip();
+        let mut layouts = Vec::new();
+        let mut plots = Vec::new();
+        let mut layout_handles = Vec::new();
+        for (state, plot, handle) in Self::collect_layouts(&doc) {
+            layouts.push(state);
+            plots.push(plot);
+            layout_handles.push(handle);
+        }
         Ok(Self {
             doc,
             caps: Self::capabilities(),
             layouts,
             plots,
+            layout_handles,
         })
     }
 
@@ -831,6 +853,13 @@ impl DwgProvider for AcadrustProvider {
             .get(layout.0 as usize)
             .ok_or_else(|| ProviderError::NoSuchScope(format!("layout {}", layout.0)))?;
         Ok(plot.clone().map_or(SourceFact::Absent, SourceFact::Present))
+    }
+
+    fn layout_handle(&self, layout: LayoutId) -> Option<ItemHandle> {
+        self.layout_handles
+            .get(layout.0 as usize)
+            .copied()
+            .flatten()
     }
 
     fn layers(&self) -> Result<Vec<LayerState>, ProviderError> {
