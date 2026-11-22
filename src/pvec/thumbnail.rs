@@ -122,12 +122,12 @@ pub(crate) fn draw<'a>(
     Ok(png)
 }
 
-/// How many segments a curved piece is drawn with.
-const CURVED: usize = 96;
-
 /// Adds the curve as one or more polylines. A bare line has no ends (a trimmed one does), so it
 /// has nothing to draw.
 fn stroke_curve(path: &mut PathBuilder, curve: &Curve, to_px: &dyn Fn(f64, f64) -> (f32, f32)) {
+    /// How many segments a curved piece is drawn with.
+    const CURVED: usize = 96;
+
     let mut run = |points: &mut dyn Iterator<Item = (f64, f64)>| {
         let mut first = true;
         for (x, y) in points {
