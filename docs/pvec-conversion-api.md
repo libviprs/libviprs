@@ -14,8 +14,22 @@ assert_eq!(out.report.totals.encountered, out.fidelity.encountered());
 ## Builder
 
 `view_profile`, `limits`, `unit`, `leaves` (spatial directory and Tier 0), `cancel`, `observer`, `queue_capacity`, `calibration` (a `Calibration`, written into the artifact's calibration block),
-`profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
+`plot_settings`, `profile`, `allowed_capabilities`, `capability_policy`. `probe` returns the per-class counts without writing, `convert`
 writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the trait carries no unit, so `unit` is required there.
+
+## Plot settings
+
+`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`.
+
+| field | effect |
+|---|---|
+| `area` | `PlotArea::Layout` (default) frames the paper from its margins and origin. `PlotArea::Extents` places the paper at the lower left of the extents: the sheet's kept geometry plus the rectangles of its drawn viewports. |
+| `paper_mm` | Paper size in millimetres, width then height, before the layout's rotation. It replaces the layout's paper and clears the layout's margins. A size that is zero, negative or not finite is refused as `paper-size-zero` and the frame is the extents. |
+| `offset_mm` | Added to the layout's own plot origin. |
+| `center` | Centres the extents on the printable area (the paper less its margins). The offset is then ignored. |
+| `fit_to_paper` | Scales the extents into the printable area, the tighter side binding. The frame is the window of the drawing the paper then shows, and the ratio is the calibration record (P-9). |
+
+Centre and fit use the extents even when `area` is `Layout`. Rotation 180 and the plot Window area are reported, not applied. The report's `sheet.notes` carry `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-paper-overridden` and `plot-fit-to-paper`.
 
 ## Profiles and the capability gate
 
@@ -75,3 +89,14 @@ exist, the index cannot be written, or the run is cancelled. Each sheet publishe
 (`schema_version` 1: per layout its name, `tab_order`, `nn`, file, status `written`, `empty`, `empty-after-view` or `failed`, the reason,
 the entities written and the report's `sheet` section) is written last, so its presence says the run finished. A drawing with no paper
 layout writes nothing, not even the index, and never falls back to model space; one whose layouts are all empty writes the index.
+
+`paper_sheets::<P>(source)` (#1622) lists the same paper layouts in the same tab order, each with `skip` set by the same rule (`None`, `Empty`
+or `EmptyAfterView`), and converts and writes nothing. It is for a caller that makes one page per sheet and has to know how many there are
+before converting the first (iasbuilt/server makes one plan per print layout at upload and converts each when it is opened). A layout listed
+as a sheet can still come out `EmptyAfterView` when converted, since only the conversion knows that none of its content survives the profile.
+
+```rust
+for s in paper_sheets::<AcadrustProvider>(CadSource::Path(&dwg))? {
+    if s.skip.is_none() { println!("{} {}", s.tab_order, s.layout); }
+}
+```

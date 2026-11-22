@@ -75,7 +75,10 @@ pub use georef::{
     GeoreferenceError, GeoreferenceHandoff, HandoffV1, SidecarImport, SourceBox, UnitRecord,
     georef_path, import_sidecar,
 };
-pub use layouts::{LayoutSetError, LayoutSetOutput, PvecLayoutSet, SheetOutcome, SheetSkip};
+pub use layouts::{
+    LayoutSetError, LayoutSetOutput, PaperSheet, PvecLayoutSet, SheetOutcome, SheetSkip,
+    paper_sheets,
+};
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
 pub use pdf::{PdfConversion, PdfConversionOutput, PdfConvertError};
@@ -855,7 +858,9 @@ impl<'a> PvecConversion<'a> {
                             summary.notes.push("rotation-not-applied".into());
                         }
                         let n_d = (p.scale_numerator, p.scale_denominator);
-                        if !fit {
+                        // Fit writes the scale it works out once the extents are known, which only
+                        // happens for a sheet that has a placement.
+                        if !(fit && place.is_some()) {
                             written = plot_scale_record(
                                 n_d.0,
                                 n_d.1,
