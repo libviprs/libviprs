@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A plan viewport with float noise in its view direction or twist is drawn** (issue #1660). A DWG stores a viewport's direction as camera minus target, so a plain plan view comes back as (5.8e-11, 0, 251705.56) with a twist of 1.6e-16, and every real sheet lost its model windows to a `non-plan` or `twist` refusal (and the manifest listed them as refused). The direction now counts as plan when x and y over z are within 1e-9, and the twist when it is within 1e-9 rad of a whole turn (so `2 pi - 1e-15` is zero); a real lean or twist of 1e-6 rad is still refused, and so is a NaN. The reader still hands over the stored values untouched.
+
 - **Sheet viewports and room detection on real plans** (issue #1610). A viewport whose view target is off the origin is drawn (`paper = centre + s * (model - target - view centre)`) instead of refused with `target`. The plot scale calibration counts drawing units in the drawing's own unit, so inches of model space on a millimetre sheet at 25.4:1 are 0.001 m per paper unit, not 0.001/25.4. The regions step falls back to every straight line that is not a column when no layer or block rule names a wall (the report's `regions.wall_source` says `geometry`), and `PvecConversion::element_rules` takes a layer mapping of its own.
 
 ### Added

@@ -1193,8 +1193,14 @@ annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1580_viewports_time
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1581_the_viewport_path_reads_a_block_definition_once_however_often_it_is_inserted
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1582_the_paper_view_is_a_policy_reason_of_its_own
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1610_a_viewport_with_a_target_off_the_origin_draws_what_it_shows
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1660_a_nan_in_the_view_stays_refused
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1660_a_noisy_view_from_below_stays_refused
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1660_a_plan_viewport_with_float_noise_in_its_direction_and_twist_is_drawn
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1660_a_twist_a_hair_under_a_full_turn_is_drawn
 annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1660_a_visibly_tilted_or_twisted_viewport_is_still_refused
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1660_noise_in_the_direction_alone_is_drawn
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1660_noise_in_the_twist_alone_is_drawn
+annotated   fs-detected  tests/pvec_1563_viewports.rs::issue_1660_the_langara_record_lands_where_an_exact_plan_puts_it
 annotated   fs-detected  tests/pvec_1636_pdf_plot.rs::issue_1636_a_paper_override_sets_the_page_size
 annotated   fs-detected  tests/pvec_1636_pdf_plot.rs::issue_1636_no_text_is_written
 annotated   fs-detected  tests/pvec_1636_pdf_plot.rs::issue_1636_notes_carry_what_was_replaced

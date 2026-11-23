@@ -110,7 +110,13 @@ itself, as AutoCAD writes it) is not a window onto the model.
 [pvec-unsupported-policy.md](pvec-unsupported-policy.md) is amended to match: paper space is no
 longer `Unsupported` as a whole. `VIEW_NOT_ENABLED` (508) stays, per viewport (a non-plan view
 direction, perspective, `view_height <= 0`, a clip boundary with a bulge or a curve, a twist until
-its sign is measured) and per entity (a rational spline crossing a clip).
+its sign is measured). Plan view and no twist are judged up to float noise (#1660): a DWG stores the
+view direction as camera minus target, so a plan view carries a lean near 1e-16 rad (x and y over z) and
+a twist of the same size, or one just under 2 pi. A view direction whose x and y over z, or a twist whose
+distance from a whole turn, is within 1e-9 rad is plan view and untwisted; anything over that is still
+508. Ignoring 1e-9 rad moves a point by that times its distance from the target, which on a 1e5 unit
+sheet is about 1e-4 drawing units. The reader hands the stored values over untouched; the tolerance is
+in `viewport_class`, the one place the conversion and the manifest both ask. and per entity (a rational spline crossing a clip).
 
 Amendment to P-3 (#1577). As first written, P-3 also dropped a viewport on a no-plot layer. That is
 not what a print does: AutoCAD prints the content of such a viewport and leaves out only its border,
