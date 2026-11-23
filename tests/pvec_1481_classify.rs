@@ -39,8 +39,10 @@ const PIN: &str = "tests/fixtures/pvec_1481_output_pin.json";
 
 /// Tracked bytes per entity encountered, above the opened provider, that a conversion of
 /// `large_industrial` may peak at. The code before #1518 measured 1,895 here; 1,329 after it, which
-/// is what #1519 tightens to 1,200 (1,119 after).
-const BUDGET_BYTES_PER_ENTITY: u64 = 1_200;
+/// is what #1519 tightens to 1,200 (1,119 after). The planviewer wave moved it to 1,428: the pvec pin
+/// bump took it to 1,236 before the wave, the effective-layer rule of #1633 to 1,345 and the stroke
+/// paint of #1638 to 1,428, so the budget is 1,450.
+const BUDGET_BYTES_PER_ENTITY: u64 = 1_450;
 
 /// The generator parameters of `cell` as the manifest has them, `large_industrial` at 1/20.
 fn params(cell: &str) -> Value {

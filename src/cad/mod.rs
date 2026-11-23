@@ -201,6 +201,8 @@ pub mod acadrust;
 #[cfg(feature = "dwg-acadsharp")]
 pub mod acadsharp;
 mod decoder;
+pub mod pc3;
+pub mod plot_files;
 mod primitive;
 mod report;
 mod text;

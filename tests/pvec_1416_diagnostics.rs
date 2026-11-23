@@ -171,6 +171,7 @@ impl DwgProvider for Mock {
             frozen: false,
             locked: false,
             plottable: true,
+            ..LayerState::default()
         };
         Ok(vec![layer("0", false), layer("HIDE", true)])
     }
@@ -254,6 +255,14 @@ fn fixtures() -> Vec<(&'static str, Vec<Diagnostic>)> {
     out.push((
         "an_insert_without_a_handle",
         report_of(b"", mock(b"MOCK-insert", &dest)),
+    ));
+
+    out.push((
+        "a_supplied_xref_nothing_attaches",
+        report_of(
+            b"",
+            mock(b"MOCK-plain", &dest).xref("NOPE", CadSource::Bytes(b"MOCK-plain")),
+        ),
     ));
 
     let fail = |e: PvecConvertError| vec![e.diagnostic()];

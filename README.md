@@ -337,6 +337,7 @@ How a DWG or a vector PDF page becomes a PVec artifact: [architecture](docs/pvec
 | `pvec-spline` | **on** (enabled by `dwg-acadrust`) | Adds `pvec::dwg_spline`, exact B-spline extraction from a provider's `RawGeometry::Spline`, validated against PVec's numeric policy (`pvec-numeric`). Needs no reader, so any provider's output goes through it. Pure Rust; `pvec-numeric` is a git dependency pinned by revision. |
 | `pvec-raster` | off | Adds `raster_pvec::container`, which hands a raster pyramid's tiles (untouched) and placement to PVec's writer and reads them back through its reader (`docs/pvec-raster-producer.md`). Pure Rust; the PVec facade is a git dependency pinned by revision. |
 | `pvec-convert` | off | Adds `pvec_convert`, the conversion API: a DWG, a view profile and limits in, a published `.pvec` and its conversion report out (issue #1048). Joins `pvec-write` and `dwg-acadrust`, so acadrust is the default provider. Pure Rust. |
+| `pvec-raster-thumbnail` | off | Adds `pvec::thumbnail` and `PvecConversion::thumbnail(width_px)`, which also fill `PvecConversionOutput::thumbnail` with an 8-bit RGB PNG of the converted sheet: strokes only, on opaque white (issue #1629, `docs/pvec-conversion-api.md`). Joins `pvec-convert` and `svg`. |
 | `pvec-write` | off | Adds `pvec::writer`, the one funnel that writes normalized geometry into a PVec artifact through the facade's writer, and `pvec::publish`, the atomic publish of the artifact and its report (issue #1314). Pure Rust; the PVec facade is a git dependency pinned by revision. |
 | `svg` | off | Enables the SVG rasteriser behind `decode_svg`. Costs 29 crates (`resvg` and its tree), which is why it is opt-in; without it `decode_svg` returns a typed `Unsupported`. |
 | `jxl` | off | Enables the JPEG XL loader and lossless encoder: `decode_jxl`, `Raster::encode_jxl`, `Raster::save_jxl`, the `.jxl` row in `Raster::save` and in `encode_to_buffer`. Costs 21 crates (`jxl-oxide`, `zune-jpegxl` and their trees, including `tracing`), which is why it is opt-in; without it every entry point still exists and returns a typed refusal. |
@@ -418,7 +419,7 @@ with the checklist in CONTRIBUTING.md.
 GitHub Actions runs two workflows, twelve jobs between them:
 
 **CI**, on every branch push and on pull requests that no push accompanies (`.github/workflows/ci.yml`):
-- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k`, `jbig2`, `dwg-acadsharp`, `dwg-acadrust`, `pvec-normalized`, `pvec-spline`, `pvec-raster`, `pvec-write` and `pvec-convert`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
+- `Check & Lint`: `cargo fmt --check`, then `cargo clippy -D warnings` once per feature. That is the default build plus `pdfium`, `object-store-sink`, `tracing`, `avif`, `svg`, `jxl`, `packfile`, `serde`, `jp2k`, `jbig2`, `dwg-acadsharp`, `dwg-acadrust`, `pvec-normalized`, `pvec-spline`, `pvec-raster`, `pvec-write`, `pvec-convert` and `pvec-raster-thumbnail`, because code behind any other `cfg` used to be linted by nothing, and a `cargo build --features s3` for the deprecated alias
 - `MSRV`: `cargo check` on the pinned toolchain, once per feature family that declares no `rust-version` of its own, plus a guard that the three written-out MSRV claims still agree. The version stays out of the job name on purpose: branch protection matches a required check by its exact name, so a bump that renamed the job would leave every open PR waiting on a context no run produces (#1011)
 - `Docs (deny broken, private and redundant intra-doc links)`: `cargo doc --no-deps --all-features`, with each of those three denied
 - `Test`: `cargo test`, once per feature that gates code, because a feature nobody names compiles its bodies out and runs zero assertions
@@ -471,7 +472,7 @@ filesystem.
 
 ```sh
 make fmt      # check formatting
-make clippy   # clippy over the default build and each of the seventeen features CI lints
+make clippy   # clippy over the default build and each of the eighteen features CI lints
 make test     # bare `cargo test`, which is the Test job's first cell of nine
 make doc      # the Docs job
 make miri     # miri (requires nightly + miri component)
@@ -479,8 +480,8 @@ make loom     # `loom_tests`, which is the Loom job's first invocation of two
 ```
 
 > **Prerequisites:** `make ci` needs Docker running and PyYAML (`pip3 install pyyaml`).
-> Budget disk for it: the whole job list compiles seventeen clippy feature permutations,
-> sixteen test ones and nine more under the 1.99 toolchain, and each gets its own
+> Budget disk for it: the whole job list compiles eighteen clippy feature permutations,
+> seventeen test ones and nine more under the 1.99 toolchain, and each gets its own
 > artifact set on the `libviprs-ci-cargo` volume rather than replacing the last.
 > `make miri` requires a nightly toolchain with the miri component, at or above this
 > crate's MSRV; the `Makefile` pins a dated one and explains why.

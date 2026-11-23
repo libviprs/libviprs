@@ -72,6 +72,9 @@ The profile as data, beside the N1.4 rows of the view-profile ADR. `layer-no-plo
 this ADR adds; the default profile carries it as `ignore`, which is what V1-3 already says. The
 two text rows were added by the #1621 amendment below. `layer-frozen-text` carries the same value
 in both profiles, and `layer-no-plot-text` is `ignore` on screen and `exclude` on a sheet (#1639).
+`entity-invisible` (#1633) is `exclude` in both: AutoCAD never draws an entity whose own invisible
+flag is set, and a hidden INSERT takes its whole block with it. `ignore` draws them, as a
+diagnostic aid. An entity dropped this way is counted under `ENTITY_INVISIBLE`.
 
 | field | default (V1) | print (P) | row |
 |---|---|---|---|
@@ -82,8 +85,10 @@ in both profiles, and `layer-no-plot-text` is `ignore` on screen and `exclude` o
 | `layers.no_plot` | ignore | exclude | `layer-no-plot` |
 | `layers.frozen_text` | ignore | ignore | `layer-frozen-text` |
 | `layers.no_plot_text` | ignore | exclude | `layer-no-plot-text` |
+| `layers.overrides` | none | none | `layer-overrides` |
 | `layers.frozen_in_viewport` | ignore-and-report | apply | `layer-frozen-in-viewport` |
 | `layers.insert_override` | inherit-on-layer-zero | inherit-on-layer-zero | `insert-layer-override` |
+| `entities.invisible` | exclude | exclude | `entity-invisible` |
 | `nested_inserts.max_depth` | 64 | 64 | `nested-insert` |
 | `xrefs` | report-external | report-external | `xref` |
 
@@ -136,6 +141,8 @@ are asserted absent.
 Rejected for this amendment: a rule inside the annotation mapper rather than a knob in the layer
 filter (two places would decide visibility); including viewport freezes; splitting DIMENSION
 into text and lines; a PVec text record carrying its layer and frozen flag (a format change).
+
+Amendment to P-6 and P-9 (#1628). The frame and the calibration can now follow the caller's plot settings (`PvecConversion::plot_settings`), and nothing changes without them. P-6: with plot area Extents the paper is placed from the extents of what the sheet draws (that corner is the origin instead of the paper-space origin); the offset replaces the layout's plot origin (one quantity, as the plot dialog shows it) and shifts the printable area's corner; centre puts the extents in the middle of the printable area (the paper less its margins), ignores the offset, and applies only to plot area Extents; a paper size override replaces the layout's paper and margins and still follows `plot_rotation`; orientation turns the paper after the rotation. Fit to paper makes the frame the window of the drawing that the paper shows, so it is no longer the paper's own size in drawing units: under Extents it fits the extents into the printable area, under Layout it fits the layout's own printable area into the new paper's (a no-op without a paper override). The report's paper fields, not its box, are the paper under fit. P-9: the calibration record is still the plot scale, the layout's or the caller's `scale` (which carries its own paper unit, and the record keeps it), and is never applied to coordinates; fit does not rewrite it, and the fit ratio is a report note. Plot lineweights and paperspace last replace the layout's flags (P-8 widths, P-1 order). Plot area Window and rotation 180 stay reported, not applied. Position is still `unmeasured`, and offset and centre compound on that unmeasured placement until the plot-settings fixture exists.
 
 Rejected: amending V1-1 and V1-3 in place (every caller of the default profile would change
 behaviour); one profile with a `space` switch that flips the rules (the rules are the profile); a

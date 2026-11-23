@@ -74,6 +74,7 @@ mod pdf_clip_stream;
 mod pdf_filters;
 pub mod pdf_image;
 mod pdf_image_decode;
+pub mod pdf_layers;
 #[cfg(feature = "pvec-write")]
 mod pdf_paint;
 pub mod pdf_ring_cut;
@@ -107,6 +108,10 @@ pub mod view_profile;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
 pub mod writer;
 pub mod xref;
+
+#[cfg(feature = "pvec-raster-thumbnail")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster-thumbnail")))]
+pub mod thumbnail;
 
 #[cfg(feature = "dwg-acadrust")]
 #[cfg_attr(docsrs, doc(cfg(feature = "dwg-acadrust")))]
@@ -151,9 +156,10 @@ pub use pdf_vector::{
 pub use provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
     EntityScope, EntityStyle, Facet, FacetCap, FacetSource, InstancePath, InstanceStep, LayerState,
-    LayoutId, LayoutKind, LayoutPlot, LayoutState, Point3, ProvenanceStub, ProviderCaps,
-    ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype,
-    SourceLineweight, SourceTransform, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, Point3,
+    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour,
+    SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef,
+    ViewportClip, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,
@@ -168,7 +174,7 @@ pub use view::{
     select_layout,
 };
 pub use view_profile::{
-    ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerStateRule, LayerVisibility,
-    NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile, ViewProfileError, ViewReport,
-    ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
+    EntityPolicy, ExcludedEntity, Exclusion, InsertLayerRule, Knob, LayerOverride, LayerStateRule,
+    LayerVisibility, LeafPaint, NestedInsertPolicy, SpaceSelection, ViewOutcome, ViewProfile,
+    ViewProfileError, ViewReport, ViewedEntity, ViewportClipping, ViewportFreezeRule, XrefPolicy,
 };

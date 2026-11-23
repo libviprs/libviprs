@@ -524,6 +524,7 @@ fn the_readme_describes_the_clippy_gate_the_makefile_runs() {
         "fifteen",
         "sixteen",
         "seventeen",
+        "eighteen",
     ];
     let word = words
         .get(linted.len())

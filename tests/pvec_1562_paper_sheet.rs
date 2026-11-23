@@ -117,6 +117,7 @@ impl DwgProvider for Mock {
             frozen: false,
             locked: false,
             plottable,
+            ..LayerState::default()
         };
         Ok(vec![
             layer("0", true),
@@ -666,7 +667,7 @@ fn issue_1562_inches_and_a_quarter_turn_swap_the_sheet() {
     let s = report.sheet.unwrap();
     assert_eq!(s.unit, "Inches");
     assert!(
-        s.notes.iter().any(|n| n == "rotation-not-applied"),
+        !s.notes.iter().any(|n| n == "rotation-not-applied"),
         "{:?}",
         s.notes
     );
@@ -770,6 +771,7 @@ fn issue_1562_print_lineweights_false_drops_widths_from_the_line_style_stream() 
                 layer: false,
                 line_style: true,
                 provenance: false,
+                stroke_paint: false,
             })
         });
         let report = out.unwrap().report;

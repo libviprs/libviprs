@@ -93,6 +93,9 @@
 //! - **`pvec-convert`** — gates `pvec_convert`, the conversion API: a DWG, a view profile and
 //!   resource limits in, a published `.pvec` artifact and its conversion report out (issue
 //!   #1048). Joins `pvec-write` and `dwg-acadrust`; acadrust is the default provider.
+//! - **`pvec-raster-thumbnail`** — gates `pvec::thumbnail` and `PvecConversion::thumbnail`, which
+//!   draw the converted sheet as an 8-bit RGB PNG into `PvecConversionOutput::thumbnail` (issue
+//!   #1629). Joins `pvec-convert` and `svg`.
 //! - **`serde`** — adds public `Serialize` / `Deserialize` derives to the wire
 //!   and config types ([`PyramidPlan`], [`EngineConfig`], [`TileCoord`],
 //!   [`Layout`], and the rest) so an out-of-process caller can rebuild a job

@@ -55,15 +55,20 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 mod calibration;
 mod capability;
 mod georef;
 mod layouts;
+mod manifest;
+mod pdf_plot;
+pub use pdf_plot::{PdfPlot, PdfPlotOutput};
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+mod xref;
+pub use crate::pvec::LayerOverride;
 pub use crate::pvec::writer::recalibrate;
 pub use calibration::{
     Calibration, CalibrationError, ControlPoint, CrsDefinition, CrsKind, DefinitionFormat,
@@ -78,6 +83,13 @@ pub use georef::{
 pub use layouts::{
     LayoutSetError, LayoutSetOutput, PaperSheet, PvecLayoutSet, SheetOutcome, SheetSkip,
     paper_sheets,
+};
+pub use manifest::{
+    CadChoices, CadManifest, CadMode, CadText, LayerCounts, ManifestColour, ManifestFile,
+    ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace,
+    ManifestPaper, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility,
+    ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, apply_choices, cad_manifest,
+    resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
@@ -115,7 +127,7 @@ use crate::pvec::report::{
     ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, SheetViewport, UnresolvedXrefRow,
     ViewSummary, XrefSummary,
 };
-use crate::pvec::style::{LineStyleComponent, dwg_line_style, dwg_style_input};
+use crate::pvec::style::{DwgLineweight, LineStyleComponent, dwg_line_style, dwg_style_input};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
     CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, metres_per_unit,
@@ -124,10 +136,11 @@ use crate::pvec::writer::{
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
     LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
-    SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile, ViewProfileError,
-    ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule, select_layout,
+    SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile,
+    ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule,
+    select_layout,
 };
-use crate::pvec::{Normalized2DGeometry, ViewedEntity};
+use crate::pvec::{LeafPaint, Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
 use pvec_geometry::{Curve, Curve2d, CurveKind, Line, Point2, Polyline, Trimmed};
 
@@ -199,6 +212,10 @@ pub enum PvecConvertError {
         /// The INSERT chain the entity was reached through, spelled `block@HANDLE/...`.
         block_path: String,
     },
+    /// The thumbnail could not be drawn (#1629). The artifact was published.
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    #[error("the thumbnail could not be drawn")]
+    Thumbnail(#[source] crate::pvec::thumbnail::ThumbnailError),
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
     Cancelled,
@@ -218,6 +235,9 @@ pub struct PvecConversionOutput {
     /// The most outcomes that were waiting for the consumer at once. Never above the capacity set
     /// with [`PvecConversion::queue_capacity`].
     pub peak_queue_depth: u32,
+    /// The sheet as a PNG, when [`PvecConversion::thumbnail`] asked for one (#1629).
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    pub thumbnail: Option<Vec<u8>>,
 }
 
 /// One conversion, configured the way `EngineBuilder` configures a pyramid run.
@@ -235,8 +255,99 @@ pub struct PvecConversion<'a> {
     queue_capacity: usize,
     components: StreamSelection,
     regions: Option<RegionConfig>,
-    annotations: bool,
+    texts: bool,
+    fills: bool,
     element_rules: Option<ElementRules>,
+    plot_style: Option<acadrust::plot_style::PlotStyleTable>,
+    plot_settings: PlotSettings,
+    /// A paper sheet with nothing to stroke is a success with `written == 0` and no artifact,
+    /// for a caller (the PDF plot, #1636) that still wants the empty page.
+    empty_sheet_ok: bool,
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    thumbnail_width: Option<u32>,
+    xrefs: Vec<(String, CadSource<'a>)>,
+    xref_note: Arc<Mutex<xref::XrefNote>>,
+}
+
+/// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
+/// makes over the layout's own plot settings. [`Default`] is the layout as it stands, which is
+/// what a conversion does without this.
+///
+/// It only reaches a paper layout whose plot settings the drawing reports. Without them the frame
+/// is the extents whatever is asked, and the report notes `plot-settings-not-applied`.
+///
+/// The layout's own rotation (DXF `PLOTROTATION`) is always honoured, it is not a choice made here:
+/// 0 is portrait, 1 is landscape (the paper's sides swap), 2 is portrait upside-down (the content
+/// turns 180 degrees about the frame's centre) and 3 is landscape upside-down (both). `orientation`
+/// is applied after it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PlotSettings {
+    /// What to plot.
+    pub area: PlotArea,
+    /// Paper size in millimetres, width then height, before the layout's rotation. `None` is the
+    /// layout's own paper. An override clears the layout's margins, which belong to its paper.
+    pub paper_mm: Option<[f64; 2]>,
+    /// Portrait or landscape. `None` is the layout's own, after its rotation.
+    pub orientation: Option<Orientation>,
+    /// Scale the plot so what it covers fits the printable area of the paper. Under
+    /// [`PlotArea::Extents`] that is the sheet's extents. Under [`PlotArea::Layout`] it is the
+    /// layout's own printable area, which only changes anything with a paper override. The frame is
+    /// the part of the drawing the paper then shows; the calibration stays the plot scale, and the
+    /// fit ratio is a note in the report.
+    pub fit_to_paper: bool,
+    /// The plot scale in place of the layout's own: a preset and a custom scale are both a
+    /// [`PlotScale`]. `None` is the layout's own.
+    pub scale: Option<PlotScale>,
+    /// The plot offset in millimetres, in place of the layout's own plot origin. `None` is the
+    /// layout's own.
+    pub offset_mm: Option<[f64; 2]>,
+    /// Centre the extents on the printable area. The offset is then ignored. Only for
+    /// [`PlotArea::Extents`], as in AutoCAD; under `Layout` it is ignored and the report says so.
+    pub center: bool,
+    /// Lineweights print. `None` is the layout's own; `Some(false)` drops widths.
+    pub print_lineweights: Option<bool>,
+    /// Paper space draws after what the viewports show. `None` is the layout's own.
+    pub paperspace_last: Option<bool>,
+}
+
+/// A plot scale as the plot dialog's custom row gives it: `paper` paper units of `paper_unit` to
+/// `drawing` drawing units, each the size of the conversion's own unit. `1 inch = 50 units` is
+/// `{ paper: 1.0, paper_unit: Inches, drawing: 50.0 }`, whatever the sheet's own unit is. The
+/// calibration record carries `paper_unit` as its paper unit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PlotScale {
+    /// Paper units, in `paper_unit`.
+    pub paper: f64,
+    /// The unit the paper side is in.
+    pub paper_unit: SourceUnit,
+    /// Drawing units.
+    pub drawing: f64,
+}
+
+/// Portrait or landscape, the drawing orientation of the plot dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Orientation {
+    /// Taller than wide.
+    Portrait,
+    /// Wider than tall.
+    Landscape,
+}
+
+/// The part of a layout a plot covers.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[non_exhaustive]
+pub enum PlotArea {
+    /// The layout's own frame, the paper placed from its margins and origin.
+    #[default]
+    Layout,
+    /// The extents of what the sheet draws: its own kept geometry and the rectangles of its drawn
+    /// viewports. The paper is placed from the extents' lower left corner.
+    Extents,
+    /// The box `[x0, y0, x1, y1]` in paper-space units (the layout's paper units): the frame is
+    /// that box, and nothing else moves. A layout whose own plot type says window is framed the
+    /// same way when this is not asked for.
+    Window([f64; 4]),
 }
 
 impl<'a> PvecConversion<'a> {
@@ -257,20 +368,48 @@ impl<'a> PvecConversion<'a> {
             queue_capacity: DEFAULT_QUEUE_CAPACITY,
             components: StreamSelection::NONE,
             regions: None,
-            annotations: false,
+            texts: false,
+            fills: false,
             element_rules: None,
+            plot_style: None,
+            plot_settings: PlotSettings::default(),
+            empty_sheet_ok: false,
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            thumbnail_width: None,
+            xrefs: Vec::new(),
+            xref_note: Arc::default(),
         }
     }
 
-    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Off by
-    /// default, and it only takes effect with the line style stream selected
-    /// ([`components`](Self::components)): each text is anchored on a short polyline and each hatch
-    /// boundary is an entity of its own, and the line style stream is what marks those hidden, so
-    /// without it they would draw as stray lines. With it off, or without the line style stream,
-    /// these classes are counted as unmapped, as before.
+    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Shorthand
+    /// for [`texts`](Self::texts) and [`fills`](Self::fills) together, so a call to either after it
+    /// wins for its half. Off by default, and it only takes effect with the line style stream
+    /// selected ([`components`](Self::components)): each text is anchored on a short polyline and
+    /// each hatch boundary is an entity of its own, and the line style stream is what marks those
+    /// hidden, so without it they would draw as stray lines. With it off, or without the line style
+    /// stream, these classes are counted as unmapped, as before.
     #[must_use]
     pub fn annotations(mut self, on: bool) -> Self {
-        self.annotations = on;
+        self.texts = on;
+        self.fills = on;
+        self
+    }
+
+    /// Carry TEXT, MTEXT and ATTDEF in PVec's text stream (#1624), without HATCH and SOLID: those
+    /// stay unmapped, each with a warning saying fills are off, until [`fills`](Self::fills) is on.
+    /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    #[must_use]
+    pub fn texts(mut self, on: bool) -> Self {
+        self.texts = on;
+        self
+    }
+
+    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT and ATTDEF
+    /// stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
+    /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    #[must_use]
+    pub fn fills(mut self, on: bool) -> Self {
+        self.fills = on;
         self
     }
 
@@ -303,6 +442,14 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// The drawing an xref block stands for, matched to the host's xref block records by block name
+    /// (ASCII case ignored). The path stored in the host is never opened (#1631).
+    #[must_use]
+    pub fn xref(mut self, block_name: impl Into<String>, source: CadSource<'a>) -> Self {
+        self.xrefs.push((block_name.into(), source));
+        self
+    }
+
     /// The view profile (N3.3).
     #[must_use]
     pub fn view_profile(mut self, profile: ViewProfile) -> Self {
@@ -310,10 +457,35 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// The plot style table a print conversion applies to each stroke: colour (with the grayscale
+    /// policy), screening, lineweight and linetype, per ACI for a CTB and per named style for an
+    /// STB (#1630).
+    #[must_use]
+    pub fn plot_style_table(mut self, table: acadrust::plot_style::PlotStyleTable) -> Self {
+        self.plot_style = Some(table);
+        self
+    }
+
     /// The resource ceilings (N3.6), carried on the view profile.
     #[must_use]
     pub fn limits(mut self, limits: SourceLimits) -> Self {
         self.view_profile = self.view_profile.with_limits(limits);
+        self
+    }
+
+    /// Also draw the converted sheet as a PNG `width_px` wide, into
+    /// [`PvecConversionOutput::thumbnail`] (#1629). Strokes only, black on white.
+    #[cfg(feature = "pvec-raster-thumbnail")]
+    #[must_use]
+    pub fn thumbnail(mut self, width_px: u32) -> Self {
+        self.thumbnail_width = Some(width_px);
+        self
+    }
+
+    /// What a paper sheet plots: area, paper size, offset and centre, fit to paper (#1628).
+    #[must_use]
+    pub fn plot_settings(mut self, settings: PlotSettings) -> Self {
+        self.plot_settings = settings;
         self
     }
 
@@ -440,7 +612,11 @@ impl<'a> PvecConversion<'a> {
     /// [`convert_with`](Self::convert_with) would.
     pub fn probe_with<P: DwgProvider>(self) -> Result<FidelityReport, PvecConvertError> {
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-        let c = self.classify(&provider, self.unit)?;
+        let c = if self.xrefs.is_empty() {
+            self.classify(&provider, self.unit)?
+        } else {
+            self.classify(&self.with_xrefs(provider)?, self.unit)?
+        };
         c.tally
             .finish(c.encountered)
             .map_err(PvecConvertError::Tally)
@@ -454,6 +630,15 @@ impl<'a> PvecConversion<'a> {
     /// [`PvecConvertError`]. After any error the destination and its report are as they were.
     pub fn convert(self) -> Result<PvecConversionOutput, PvecConvertError> {
         let observer = self.observer.clone();
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        if self.thumbnail_width == Some(0) {
+            return report_failure(
+                observer.as_deref(),
+                Err(PvecConvertError::Thumbnail(
+                    crate::pvec::thumbnail::ThumbnailError::ZeroWidth,
+                )),
+            );
+        }
         let result = if self.cancel.is_cancelled() {
             Err(PvecConvertError::Cancelled)
         } else {
@@ -481,10 +666,28 @@ impl<'a> PvecConversion<'a> {
                 .ok_or(PvecConvertError::UnitRequired)
                 .and_then(|unit| {
                     let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
-                    self.run(&provider, unit)
+                    if self.xrefs.is_empty() {
+                        return self.run(&provider, unit);
+                    }
+                    let with = self.with_xrefs(provider)?;
+                    self.run(&with, unit)
                 })
         };
         report_failure(observer.as_deref(), result)
+    }
+
+    /// `host` with the xref drawings the caller supplied behind it (#1631).
+    fn with_xrefs<P: DwgProvider>(
+        &self,
+        host: P,
+    ) -> Result<xref::XrefProvider<P>, PvecConvertError> {
+        xref::attach(
+            host,
+            &self.xrefs,
+            self.view_profile.limits.max_block_depth,
+            self.xref_note.clone(),
+        )
+        .map_err(PvecConvertError::Open)
     }
 
     /// Everything a conversion decides about its entities, up to but not including the write.
@@ -506,9 +709,12 @@ impl<'a> PvecConversion<'a> {
             queue_capacity,
             components,
             regions,
-            annotations,
+            texts: want_texts,
+            fills: want_fills,
             element_rules,
             calibration: caller_calibration,
+            plot_style,
+            plot_settings,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -543,6 +749,8 @@ impl<'a> PvecConversion<'a> {
         // nothing (P-3), one refused with 508 for a view this slice cannot map, or one drawn
         // through its similarity onto the sheet and its rectangle.
         let mut windows: Vec<(ViewportEntity, Window)> = Vec::new();
+        // The layers an override froze in each of `windows`, by position (#1627).
+        let mut window_hidden: Vec<Vec<String>> = Vec::new();
         // The layers that do not plot. A viewport on one still draws what it shows; only its
         // border is hidden, as AutoCAD prints it (P-3, #1577).
         let no_plot: BTreeSet<String> = if layout.kind == LayoutKind::Paper
@@ -564,101 +772,87 @@ impl<'a> PvecConversion<'a> {
                 Err(ProviderError::CannotReport(_)) => Vec::new(),
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
-            for v in listed.into_iter().filter(|v| v.layout == layout.id) {
-                let finite = [v.width, v.height, v.view_height, v.center[0], v.center[1]]
-                    .into_iter()
-                    .chain(v.view_center)
-                    .chain(v.view_target)
-                    .all(f64::is_finite);
-                let window = if paper_view(&v) {
-                    Window::Paper
-                } else if !v.visible {
-                    Window::Dropped("off")
-                } else if v.hide_plot {
-                    Window::Dropped("hide-plot")
-                } else if !(v.view_direction[0] == 0.0
-                    && v.view_direction[1] == 0.0
-                    && v.view_direction[2] > 0.0)
+            for mut v in listed.into_iter().filter(|v| v.layout == layout.id) {
+                // The user's overrides edit this viewport's frozen list before anything is drawn
+                // (#1627): a Visible layer is thawed everywhere, a Hidden one that this layout's
+                // other viewports show is frozen here, then the viewport's own entries thaw or
+                // freeze it here only, the most specific word winning. `added` is what an
+                // override froze, so the report can say so.
+                let layers = &view_profile.layers;
+                v.frozen_layers.retain(|f| {
+                    !layers
+                        .overrides
+                        .iter()
+                        .any(|(n, o)| *o == LayerOverride::Visible && n.eq_ignore_ascii_case(f))
+                });
+                let mut added: Vec<String> = Vec::new();
+                for n in layers.hidden_but_shown_in_a_viewport(&layout.name) {
+                    added.push(n.to_owned());
+                    v.frozen_layers.push(n.to_owned());
+                }
+                let key = format!("{}/{:X}", layout.name, v.handle.get());
+                for (_, name, o) in layers
+                    .viewport_overrides
+                    .iter()
+                    .filter(|(k, ..)| k.eq_ignore_ascii_case(&key))
                 {
-                    Window::Refused("non-plan")
-                } else if v.perspective {
-                    Window::Refused("perspective")
-                } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
-                    Window::Refused("view-height")
-                } else if v.twist != 0.0 {
-                    // The twist sign is not measured against AutoCAD yet (the ADR's open item).
-                    Window::Refused("twist")
-                } else {
-                    // A rectangle, or a polygon with straight edges (#1565), whose vertices are
-                    // in paper units and cut what the viewport shows. A bulged edge or a curved
-                    // boundary is not cut yet.
-                    let polygon = match &v.clip {
-                        ViewportClip::Rectangle(_) => Ok(None),
-                        ViewportClip::Polygon(vs) if vs.iter().any(|q| q.bulge != 0.0) => {
-                            Err("clip-bulge")
-                        }
-                        ViewportClip::Polygon(vs)
-                            if vs.len() < 3
-                                || !vs.iter().all(|q| q.x.is_finite() && q.y.is_finite()) =>
-                        {
-                            Err("clip-polygon")
-                        }
-                        ViewportClip::Polygon(vs) => {
-                            Ok(Some(vs.iter().map(|q| [q.x, q.y]).collect::<Vec<_>>()))
-                        }
-                        ViewportClip::Circle(_) => Err("clip-circle"),
-                        ViewportClip::Ellipse(_) => Err("clip-ellipse"),
-                        ViewportClip::Spline(_) => Err("clip-spline"),
-                        _ => Err("clip-other"),
-                    };
-                    match polygon {
-                        Err(why) => Window::Refused(why),
-                        Ok(ring) => {
-                            // paper = centre + s * (model - target - view centre), for a plan view.
-                            // The view centre is in display coordinates, whose origin is the target
-                            // (DXF), so a target off the origin shifts the view (#1610).
-                            let s = v.height / v.view_height;
-                            let (hw, hh) = (v.width / 2.0, v.height / 2.0);
-                            let rect = match &ring {
-                                Some(r) => r.iter().fold(
+                    v.frozen_layers.retain(|f| !f.eq_ignore_ascii_case(name));
+                    added.retain(|f| !f.eq_ignore_ascii_case(name));
+                    if *o == LayerOverride::Hidden {
+                        added.push(name.clone());
+                        v.frozen_layers.push(name.clone());
+                    }
+                }
+                let window = match viewport_class(&v) {
+                    ViewportClass::Paper => Window::Paper,
+                    ViewportClass::Dropped(why) => Window::Dropped(why),
+                    ViewportClass::Refused(why) => Window::Refused(why),
+                    ViewportClass::Drawn(ring) => {
+                        // paper = centre + s * (model - target - view centre), for a plan view.
+                        // The view centre is in display coordinates, whose origin is the target
+                        // (DXF), so a target off the origin shifts the view (#1610).
+                        let s = v.height / v.view_height;
+                        let (hw, hh) = (v.width / 2.0, v.height / 2.0);
+                        let rect = match &ring {
+                            Some(r) => r.iter().fold(
+                                [
+                                    f64::INFINITY,
+                                    f64::INFINITY,
+                                    f64::NEG_INFINITY,
+                                    f64::NEG_INFINITY,
+                                ],
+                                |b, q| {
                                     [
-                                        f64::INFINITY,
-                                        f64::INFINITY,
-                                        f64::NEG_INFINITY,
-                                        f64::NEG_INFINITY,
-                                    ],
-                                    |b, q| {
-                                        [
-                                            b[0].min(q[0]),
-                                            b[1].min(q[1]),
-                                            b[2].max(q[0]),
-                                            b[3].max(q[1]),
-                                        ]
-                                    },
-                                ),
-                                None => [
-                                    v.center[0] - hw,
-                                    v.center[1] - hh,
-                                    v.center[0] + hw,
-                                    v.center[1] + hh,
-                                ],
-                            };
-                            Window::Drawn {
-                                map: [
-                                    s,
-                                    0.0,
-                                    0.0,
-                                    s,
-                                    v.center[0] - s * (v.view_center[0] + v.view_target[0]),
-                                    v.center[1] - s * (v.view_center[1] + v.view_target[1]),
-                                ],
-                                rect,
-                                ring,
-                            }
+                                        b[0].min(q[0]),
+                                        b[1].min(q[1]),
+                                        b[2].max(q[0]),
+                                        b[3].max(q[1]),
+                                    ]
+                                },
+                            ),
+                            None => [
+                                v.center[0] - hw,
+                                v.center[1] - hh,
+                                v.center[0] + hw,
+                                v.center[1] + hh,
+                            ],
+                        };
+                        Window::Drawn {
+                            map: [
+                                s,
+                                0.0,
+                                0.0,
+                                s,
+                                v.center[0] - s * (v.view_center[0] + v.view_target[0]),
+                                v.center[1] - s * (v.view_center[1] + v.view_target[1]),
+                            ],
+                            rect,
+                            ring,
                         }
                     }
                 };
                 windows.push((v, window));
+                window_hidden.push(added);
             }
         }
         // `1:N`, one paper unit to N model units, of a drawn viewport.
@@ -685,6 +879,8 @@ impl<'a> PvecConversion<'a> {
                 Err(e) => return Err(PvecConvertError::View(e.into())),
             };
             let text = |v: f64| format!("{v}");
+            // Only a CTB is applied: nothing says which named style an entity uses (#1630).
+            let stb = plot_style.as_ref().is_some_and(|t| t.is_stb);
             let mut summary = SheetSummary {
                 layout: layout.name.clone(),
                 frame: "extents".into(),
@@ -696,10 +892,16 @@ impl<'a> PvecConversion<'a> {
                 },
                 ..SheetSummary::default()
             };
+            if stb {
+                summary.notes.push("plot-style-stb-unsupported".into());
+            }
             let mut plot_unit = None;
             let mut frame_box = None;
             let mut drop_widths = false;
             let mut written = None;
+            let mut place = None;
+            let mut windowed = false;
+            let mut flip = false;
             match &fact {
                 SourceFact::Absent => summary.frame_reason = Some("plot-settings-absent".into()),
                 SourceFact::Present(p) => {
@@ -718,7 +920,11 @@ impl<'a> PvecConversion<'a> {
                         plot_plot_styles: p.plot_plot_styles,
                     });
                     let sized = |v: f64| v.is_finite() && v > 0.0;
-                    if !(sized(p.paper_width) && sized(p.paper_height)) {
+                    let fit = plot_settings.fit_to_paper;
+                    let [paper_w, paper_h] = plot_settings
+                        .paper_mm
+                        .unwrap_or([p.paper_width, p.paper_height]);
+                    if !(sized(paper_w) && sized(paper_h)) {
                         summary.frame_reason = Some("paper-size-zero".into());
                     } else {
                         let sheet_unit = match p.paper_units {
@@ -740,27 +946,112 @@ impl<'a> PvecConversion<'a> {
                             None => None,
                         };
                         let (w, h) = if matches!(p.rotation, 1 | 3) {
+                            (paper_h, paper_w)
+                        } else {
+                            (paper_w, paper_h)
+                        };
+                        // The orientation turns the paper to the shape asked for, after the
+                        // layout's rotation.
+                        let turned = match plot_settings.orientation {
+                            Some(Orientation::Portrait) if w > h => (h, w),
+                            Some(Orientation::Landscape) if h > w => (h, w),
+                            _ => (w, h),
+                        };
+                        if turned != (w, h) {
+                            summary.notes.push("plot-orientation".into());
+                        }
+                        let (w, h) = turned;
+                        // An override replaces the paper, so the margins that belong to the
+                        // layout's paper go with it.
+                        let margins = if plot_settings.paper_mm.is_some() {
+                            [0.0; 4]
+                        } else {
+                            p.margins
+                        };
+                        // The offset is the plot origin the dialog shows, so it replaces the
+                        // layout's own.
+                        let shift = plot_settings.offset_mm.unwrap_or(p.origin);
+                        // What the layout itself prints, for a fit under the Layout area: its
+                        // paper (after its rotation) less its own margins.
+                        let (lw, lh) = if matches!(p.rotation, 1 | 3) {
                             (p.paper_height, p.paper_width)
                         } else {
                             (p.paper_width, p.paper_height)
                         };
+                        let own = [
+                            lw - p.margins[0] - p.margins[2],
+                            lh - p.margins[1] - p.margins[3],
+                        ];
                         // UNMEASURED (the print profile ADR's open item): the paper's lower left
                         // is taken to sit at -(margin + plot origin) from the paper-space origin.
                         // No fixture with non-zero margins and origin has measured it, so the
                         // report says `position: unmeasured`.
-                        let placed = (
-                            to_unit(p.margins[0] + p.origin[0]),
-                            to_unit(p.margins[1] + p.origin[1]),
-                            to_unit(w),
-                            to_unit(h),
-                        );
-                        match placed {
-                            (Some(dx), Some(dy), Some(w), Some(h)) => {
-                                let (x0, y0) = (0.0 - dx, 0.0 - dy);
-                                frame_box = Some([x0, y0, x0 + w, y0 + h]);
+                        let su = |v: [f64; 2]| to_unit(v[0]).zip(to_unit(v[1]));
+                        // The window is paper-space units already, the unit of the frame.
+                        let window_box = match plot_settings.area {
+                            PlotArea::Window(w) => Some(w),
+                            PlotArea::Layout if p.plot_type == 4 => Some(p.window),
+                            _ => None,
+                        };
+                        let converted = su([margins[0], margins[1]])
+                            .zip(su([margins[2], margins[3]]))
+                            .zip(su([w, h]))
+                            .zip(su(own))
+                            // The margin and the shift added in millimetres, then converted once.
+                            .zip(su([margins[0] + shift[0], margins[1] + shift[1]]));
+                        if let Some(w) = window_box {
+                            if w.iter().all(|v| v.is_finite()) && w[2] > w[0] && w[3] > w[1] {
+                                frame_box = Some(w);
                                 plot_unit = sheet_unit;
+                                windowed = true;
+                            } else {
+                                summary.frame_reason = Some("plot-window-empty".into());
                             }
-                            _ => summary.frame_reason = Some("unit-not-declarable".into()),
+                        } else {
+                            match converted {
+                                Some((((((l, b), (r, t)), size), own), corner)) => {
+                                    let at = Place {
+                                        margin: [l, b, r, t],
+                                        size: [size.0, size.1],
+                                        corner: [corner.0, corner.1],
+                                    };
+                                    // Drawing units to a paper unit. Under the Layout area a fit
+                                    // fits the layout's own printable area to the new paper's.
+                                    let mut k = 1.0;
+                                    if fit && plot_settings.area == PlotArea::Layout {
+                                        let printable = [
+                                            (at.size[0] - l - r, own.0),
+                                            (at.size[1] - b - t, own.1),
+                                        ];
+                                        let tight = printable
+                                            .into_iter()
+                                            .filter(|(n, d)| sized(*n) && sized(*d))
+                                            .min_by(|x, y| (x.0 / x.1).total_cmp(&(y.0 / y.1)));
+                                        match tight {
+                                            Some((n, d)) if n != d => {
+                                                k = d / n;
+                                                summary.notes.push("plot-fit-to-paper".into());
+                                                summary.notes.push(format!("plot-fit-ratio 1:{k}"));
+                                            }
+                                            Some(_) => {
+                                                summary.notes.push("plot-fit-no-change".into())
+                                            }
+                                            None => summary.notes.push("plot-fit-skipped".into()),
+                                        }
+                                    }
+                                    if plot_settings.center
+                                        && plot_settings.area == PlotArea::Layout
+                                    {
+                                        summary.notes.push("plot-centre-not-applicable".into());
+                                    }
+                                    let (x0, y0) = (-at.corner[0] * k, -at.corner[1] * k);
+                                    frame_box =
+                                        Some([x0, y0, x0 + at.size[0] * k, y0 + at.size[1] * k]);
+                                    plot_unit = sheet_unit;
+                                    place = Some(at);
+                                }
+                                None => summary.frame_reason = Some("unit-not-declarable".into()),
+                            }
                         }
                     }
                     if let (Some(b), Some(sheet_unit)) = (frame_box, plot_unit) {
@@ -770,104 +1061,52 @@ impl<'a> PvecConversion<'a> {
                         if matches!(p.paper_units, 0 | 1) {
                             summary.unit_source = "plot-paper-units".into();
                         }
-                        drop_widths = !p.print_lineweights;
+                        drop_widths = !plot_settings
+                            .print_lineweights
+                            .unwrap_or(p.print_lineweights);
                         summary.widths_dropped = drop_widths;
-                        if p.plot_type != 5 {
+                        if plot_settings.print_lineweights.is_some() {
+                            summary.notes.push("plot-lineweights-overridden".into());
+                        }
+                        if plot_settings.paper_mm.is_some() {
+                            summary.notes.push("plot-paper-overridden".into());
+                        }
+                        if plot_settings.offset_mm.is_some()
+                            && !(plot_settings.center && plot_settings.area == PlotArea::Extents)
+                        {
+                            summary.notes.push("plot-offset".into());
+                        }
+                        if windowed {
+                            summary.notes.push("plot-area-window".into());
+                        } else if p.plot_type != 5 {
                             summary.notes.push("plot-type-not-applied".into());
                         }
-                        if p.rotation != 0 {
-                            summary.notes.push("rotation-not-applied".into());
+                        // Rotation 1 is the swap of the sides already made; 2 and 3 turn the
+                        // sheet's content about the frame's centre once the frame is known.
+                        flip = matches!(p.rotation, 2 | 3);
+                        let [n, d] = plot_settings
+                            .scale
+                            .map_or([p.scale_numerator, p.scale_denominator], |s| {
+                                [s.paper, s.drawing]
+                            });
+                        if plot_settings.scale.is_some() {
+                            summary.notes.push("plot-scale-overridden".into());
                         }
-                        // P-9: the plot scale is the calibration record, never applied to a
-                        // coordinate. A caller's calibration wins.
-                        let (n, d) = (p.scale_numerator, p.scale_denominator);
-                        if caller_calibration.is_some() {
-                            summary.notes.push("caller-calibration".into());
-                        } else if !(sized(n) && sized(d)) {
-                            summary.notes.push("scale-zero".into());
-                        } else {
-                            // Both sides integral after scaling by one power of ten up to 10^6
-                            // reduce exactly; anything else is rounded at 10^6 and the record
-                            // carries the rounding as its uncertainty. A side is integral at `k`
-                            // when its rounded multiple divided back by `k` is the stored value:
-                            // a decimal such as 2.01 is no binary fraction, so `2.01 * 100` is not
-                            // 201 in f64, but `201 / 100` is the f64 nearest 2.01, which is it.
-                            let integral = |v: f64| (1.0..9.0e15).contains(&v).then_some(v as u64);
-                            let at = |v: f64, k: f64| {
-                                let r = (v * k).round();
-                                if r / k == v { integral(r) } else { None }
-                            };
-                            let exact = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6]
-                                .into_iter()
-                                .find_map(|k| Some((at(n, k)?, at(d, k)?)));
-                            let uncertain = exact.is_none();
-                            let ratio = exact.or_else(|| {
-                                Some((integral((n * 1e6).round())?, integral((d * 1e6).round())?))
-                            });
-                            let reduced = ratio.and_then(|(a, b)| {
-                                let (mut x, mut y) = (a, b);
-                                while y != 0 {
-                                    (x, y) = (y, x % y);
-                                }
-                                Some((u32::try_from(a / x).ok()?, u32::try_from(b / x).ok()?))
-                            });
-                            let paper = metres_per_unit(sheet_unit).ok();
-                            // The scale is paper units to drawing units, so a paper unit is
-                            // `den / num` drawing units, each the size of the drawing's own unit.
-                            // Inches of model space on a millimetre sheet are not millimetres
-                            // (#1610). A drawing that names no length unit stands in the sheet's.
-                            let drawing = unit
-                                .filter(|u| u.is_physical())
-                                .and_then(|u| metres_per_unit(u).ok())
-                                .or(paper);
-                            let claim = reduced.zip(paper).map(|((num, den), paper)| {
-                                let raw = n / d;
-                                let mut note = if uncertain {
-                                    format!("plot scale {n}:{d} as stored, written as {num}:{den}")
-                                } else {
-                                    format!("plot scale {num}:{den}")
-                                };
-                                if let Some(one) = &single_scale {
-                                    note.push_str(&format!("; viewport {one}"));
-                                }
-                                ScaleClaim {
-                                    metres_per_source_unit: drawing.unwrap_or(paper)
-                                        * f64::from(den)
-                                        / f64::from(num),
-                                    provenance: ScaleProvenance::PlanScale {
-                                        numerator: num,
-                                        denominator: den,
-                                        paper_metres_per_unit: paper,
-                                    },
-                                    uncertainty: uncertain.then(|| {
-                                        (f64::from(num) / f64::from(den) - raw).abs() / raw
-                                    }),
-                                    note: if note.len() <= 255 {
-                                        note
-                                    } else {
-                                        format!("plot scale written as {num}:{den}")
-                                    },
-                                }
-                            });
-                            match claim.map(|c| Calibration::new(Some(c), None, None)) {
-                                Some(Ok(c)) => {
-                                    if uncertain {
-                                        summary.notes.push("scale-not-reduced".into());
-                                    }
-                                    summary.calibration = if uncertain {
-                                        "plot-scale-uncertain".into()
-                                    } else {
-                                        "plot-scale".into()
-                                    };
-                                    summary.scale = reduced.map(|(a, b)| format!("{a}:{b}"));
-                                    written = Some(c);
-                                }
-                                _ => summary.notes.push("scale-refused".into()),
-                            }
-                        }
+                        written = plot_scale_record(
+                            [n, d],
+                            plot_settings.scale.map_or(sheet_unit, |s| s.paper_unit),
+                            sheet_unit,
+                            unit,
+                            single_scale.as_deref(),
+                            caller_calibration.is_some(),
+                            &mut summary,
+                        );
                     }
                 }
                 _ => summary.frame_reason = Some("plot-settings-not-reportable".into()),
+            }
+            if frame_box.is_none() && *plot_settings != PlotSettings::default() {
+                summary.notes.push("plot-settings-not-applied".into());
             }
             summary.unit = plot_unit
                 .or(unit)
@@ -879,6 +1118,8 @@ impl<'a> PvecConversion<'a> {
                 unit: plot_unit,
                 calibration: written,
                 drop_widths,
+                place,
+                flip,
             });
         }
         let source_name = match *source {
@@ -898,8 +1139,19 @@ impl<'a> PvecConversion<'a> {
 
         // The leaves the profile kept. The view pass decides visibility and the flatten pass owns
         // the composed maps, so a flattened leaf is drawn when the view pass kept the same one.
-        let kept: BTreeSet<(Option<u64>, String, String)> =
-            view.included.iter().map(leaf_key).collect();
+        // Each is kept with its effective layer, which the layer stream names (#1633).
+        let mut kept: BTreeMap<(Option<u64>, String, String), String> = view
+            .included
+            .iter()
+            .map(|e| (leaf_key(e), e.effective_layer.clone()))
+            .collect();
+        // The colour each kept leaf is drawn in, found by the view pass (#1638); what a viewport
+        // shows is read from the model's own pass below.
+        let mut paints: BTreeMap<(Option<u64>, String, String), LeafPaint> = view
+            .included
+            .iter()
+            .map(|v| (leaf_key(v), v.paint))
+            .collect();
         drop(view.included);
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
@@ -910,7 +1162,7 @@ impl<'a> PvecConversion<'a> {
         let mut items: Vec<Item<'_>> = Vec::new();
         for f in &flat.entities {
             let p = &f.entity.provenance;
-            if kept.contains(&(
+            if kept.contains_key(&(
                 p.handle.map(|h| h.get()),
                 p.block_path.to_string(),
                 p.class_name.clone(),
@@ -920,7 +1172,7 @@ impl<'a> PvecConversion<'a> {
         }
         for u in &flat.unplaced {
             let p = &u.entity.provenance;
-            if kept.contains(&(
+            if kept.contains_key(&(
                 p.handle.map(|h| h.get()),
                 p.block_path.to_string(),
                 p.class_name.clone(),
@@ -928,7 +1180,6 @@ impl<'a> PvecConversion<'a> {
                 items.push(Item::Unplaced(u));
             }
         }
-        drop(kept);
         items.extend(view.excluded.iter().map(Item::Excluded));
         for s in &flat.skipped {
             if s.insert_handle
@@ -948,6 +1199,11 @@ impl<'a> PvecConversion<'a> {
             .and_then(|_| provider.layout_plot(layout.id).ok())
             .and_then(|f| f.present().map(|p| p.draw_viewports_first))
             .unwrap_or(false);
+        // Paper space last is viewports first; the caller's choice replaces the layout's.
+        let first = plot_settings
+            .paperspace_last
+            .filter(|_| sheet.is_some())
+            .unwrap_or(first);
         let drawn: Vec<usize> = windows
             .iter()
             .enumerate()
@@ -976,6 +1232,18 @@ impl<'a> PvecConversion<'a> {
             through_profile.space = SpaceSelection::Model;
             through_profile.viewport_clipping = ViewportClipping::Unsupported;
             through_profile.layers.frozen_in_viewport = ViewportFreezeRule::IgnoreAndReport;
+            // A layer hidden for the drawing that one viewport shows again stays in the model
+            // walk, and the other viewports freeze it (#1627).
+            let rescued: Vec<String> = view_profile
+                .layers
+                .hidden_but_shown_in_a_viewport(&layout.name)
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            through_profile
+                .layers
+                .overrides
+                .retain(|(n, _)| !rescued.iter().any(|r| r.eq_ignore_ascii_case(n)));
             model_view = Some(
                 through_profile
                     .apply(provider)
@@ -1033,6 +1301,9 @@ impl<'a> PvecConversion<'a> {
             }
         }
         // The effective layer of each kept model leaf, which a viewport freeze is matched against.
+        if let Some(v) = &model_view {
+            paints.extend(v.included.iter().map(|e| (leaf_key(e), e.paint)));
+        }
         let model_layers: BTreeMap<(Option<u64>, String, String), String> = model_view
             .as_ref()
             .map(|v| {
@@ -1087,6 +1358,9 @@ impl<'a> PvecConversion<'a> {
                 }
             }
         }
+        // The model leaves are keyed apart from the sheet's by handle and block path, so one map
+        // answers for both.
+        kept.extend(model_layers.iter().map(|(k, v)| (k.clone(), v.clone())));
         let once = u32::try_from(windows.len()).unwrap_or(u32::MAX - 2) + 1;
         if let (Some(mv), Some(mf)) = (&model_view, &model_flat) {
             let excluded: BTreeSet<u64> = mv
@@ -1160,7 +1434,7 @@ impl<'a> PvecConversion<'a> {
         let mut labels: Vec<RoomLabel> = Vec::new();
         // The texts and hatches carried in streams (#1609): the entity a text hangs on, the entities
         // a hatch lists, and how many of each class were mapped or not.
-        let annotate = *annotations && components.line_style;
+        let annotate = (*want_texts || *want_fills) && components.line_style;
         let mut texts: Vec<(EntityId, TextBody)> = Vec::new();
         let mut fills: Vec<(Vec<EntityId>, FillBody)> = Vec::new();
         let mut annotation_counts: BTreeMap<String, u64> = BTreeMap::new();
@@ -1260,8 +1534,120 @@ impl<'a> PvecConversion<'a> {
             }
             Some(pieces)
         }
+        // Plot area Extents places the paper from the extents of what the sheet draws: the paper's
+        // own kept geometry and the rectangles of its drawn viewports. Centre and fit to paper work
+        // on those extents too (#1628). The frame was the layout's own until now.
+        if let Some(sh) = sheet
+            .as_mut()
+            .filter(|_| plot_settings.area == PlotArea::Extents)
+            && let Some(pl) = sh.place
+        {
+            let mut ext: Option<[f64; 4]> = None;
+            let mut grow = |b: [f64; 4]| {
+                ext = Some(ext.map_or(b, |e| {
+                    [
+                        e[0].min(b[0]),
+                        e[1].min(b[1]),
+                        e[2].max(b[2]),
+                        e[3].max(b[3]),
+                    ]
+                }));
+            };
+            for (at, item) in items.iter().enumerate() {
+                let Item::Leaf(f) = item else { continue };
+                if via[at].1.is_some() || f.entity.provenance.class_name == "VIEWPORT" {
+                    continue;
+                }
+                if let Ok(done) = classify_item(item, &f.entity, gate, None)
+                    && let Some(b) = done.geometry.source_bounds()
+                {
+                    let (lo, hi) = (b.min(), b.max());
+                    grow([lo.x, lo.y, hi.x, hi.y]);
+                }
+            }
+            for (_, w) in &windows {
+                if let Window::Drawn { rect, .. } = w {
+                    grow(*rect);
+                }
+            }
+            sh.summary.notes.push("plot-area-extents".into());
+            if let Some(e) = ext {
+                let [ml, mb, mr, mt] = pl.margin;
+                let (printable_w, printable_h) = (pl.size[0] - ml - mr, pl.size[1] - mb - mt);
+                let (ew, eh) = (e[2] - e[0], e[3] - e[1]);
+                // Drawing units to a paper unit: the reciprocal of the fit ratio, one division.
+                let mut k = 1.0;
+                if plot_settings.fit_to_paper {
+                    let by_width = (printable_w / ew, printable_w, ew);
+                    let by_height = (printable_h / eh, printable_h, eh);
+                    let tight = [by_width, by_height]
+                        .into_iter()
+                        .filter(|r| r.0.is_finite() && r.0 > 0.0)
+                        .min_by(|a, b| a.0.total_cmp(&b.0));
+                    match tight {
+                        Some((_, n, d)) => {
+                            k = d / n;
+                            sh.summary.notes.push("plot-fit-to-paper".into());
+                            sh.summary.notes.push(format!("plot-fit-ratio 1:{k}"));
+                        }
+                        None => sh.summary.notes.push("plot-fit-skipped".into()),
+                    }
+                }
+                let (x0, y0) = if plot_settings.center {
+                    sh.summary.notes.push("plot-centered".into());
+                    (
+                        (e[0] + e[2]) / 2.0 - printable_w * k / 2.0 - ml * k,
+                        (e[1] + e[3]) / 2.0 - printable_h * k / 2.0 - mb * k,
+                    )
+                } else {
+                    (e[0] - pl.corner[0] * k, e[1] - pl.corner[1] * k)
+                };
+                let b = [x0, y0, x0 + pl.size[0] * k, y0 + pl.size[1] * k];
+                sh.frame = Some(b);
+                sh.summary.sheet_box = Some(b.map(|v| format!("{v}")));
+            } else {
+                sh.summary.notes.push("plot-extents-empty".into());
+            }
+        }
         let frame = sheet.as_ref().and_then(|s| s.frame);
+        // Plotting upside-down turns everything 180 degrees about the frame's centre, which
+        // leaves the frame where it is. The windows turn with it, so what is drawn through them
+        // and the rectangle it is cut to stay together.
+        let flip_map = sheet
+            .as_ref()
+            .filter(|s| s.flip)
+            .and_then(|s| s.frame)
+            .map(|b| [-1.0, 0.0, 0.0, -1.0, b[0] + b[2], b[1] + b[3]]);
+        if let Some(m) = flip_map {
+            for (_, w) in &mut windows {
+                if let Window::Drawn { map, rect, ring } = w {
+                    let [p, q, r, s, u, v] = m;
+                    let [a, b, c, d, tx, ty] = *map;
+                    *map = [
+                        p * a + q * c,
+                        p * b + q * d,
+                        r * a + s * c,
+                        r * b + s * d,
+                        p * tx + q * ty + u,
+                        r * tx + s * ty + v,
+                    ];
+                    *rect = [
+                        m[4] - rect[2],
+                        m[5] - rect[3],
+                        m[4] - rect[0],
+                        m[5] - rect[1],
+                    ];
+                    if let Some(points) = ring {
+                        for pt in points.iter_mut() {
+                            *pt = [m[4] - pt[0], m[5] - pt[1]];
+                        }
+                    }
+                }
+            }
+        }
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
+        // The plot style table a CTB gives, applied per ACI (#1630); an STB applies nothing.
+        let table = plot_style.as_ref().filter(|t| !t.is_stb);
         // What the sheet clip did: outside, crossing, cut and the pieces the cut ones became.
         let mut clipped = [0u64; 4];
         // Ids are dense over what is written to the report, so a cut entity's pieces each take one.
@@ -1285,6 +1671,11 @@ impl<'a> PvecConversion<'a> {
                 let item: &Item<'_> = match (window.map(|k| &windows[k].1), &items[at]) {
                     (Some(Window::Drawn { map, .. }), Item::Leaf(f)) => {
                         lifted_leaf = f.through(*map);
+                        lifted = Item::Leaf(&lifted_leaf);
+                        &lifted
+                    }
+                    (None, Item::Leaf(f)) if flip_map.is_some() => {
+                        lifted_leaf = f.through(flip_map.expect("checked in the guard"));
                         lifted = Item::Leaf(&lifted_leaf);
                         &lifted
                     }
@@ -1389,6 +1780,12 @@ impl<'a> PvecConversion<'a> {
                             .iter()
                             .any(|l| l.eq_ignore_ascii_case(layer))
                     };
+                    let by_override = |layer: &str| {
+                        window_hidden[k]
+                            .iter()
+                            .any(|l| l.eq_ignore_ascii_case(layer))
+                    };
+                    let mut overridden = false;
                     // The leaf's own effective layer, or that of any INSERT it is reached
                     // through: an INSERT on layer 0 takes its parent's (V1-2).
                     let mut parent = "0";
@@ -1399,23 +1796,36 @@ impl<'a> PvecConversion<'a> {
                                 parent = own;
                             }
                             through_cold |= cold(parent);
+                            overridden |= cold(parent) && by_override(parent);
                         }
                     }
                     let frozen = through_cold
                         || model_layers
                             .get(&flat_key(f))
                             .is_some_and(|layer| cold(layer));
+                    overridden |= model_layers
+                        .get(&flat_key(f))
+                        .is_some_and(|layer| cold(layer) && by_override(layer));
                     if frozen {
                         if view_profile.layers.frozen_in_viewport == ViewportFreezeRule::Apply {
                             frozen_here = true;
                             done = without_geometry(
                                 Classification::ignored_by_policy(
-                                    "layers.frozen_in_viewport",
+                                    if overridden {
+                                        PolicyReason::LayerOverridden.field()
+                                    } else {
+                                        "layers.frozen_in_viewport"
+                                    },
                                     raw.provenance.class_name.as_str(),
                                 ),
                                 vec![format!(
-                                    "{}: its layer is frozen in viewport {:X}",
-                                    PolicyReason::ViewportFrozen.code(),
+                                    "{}: its layer is {} in viewport {:X}",
+                                    if overridden {
+                                        PolicyReason::LayerOverridden.code()
+                                    } else {
+                                        PolicyReason::ViewportFrozen.code()
+                                    },
+                                    if overridden { "hidden" } else { "frozen" },
                                     v.handle.get()
                                 )],
                             );
@@ -1728,17 +2138,37 @@ impl<'a> PvecConversion<'a> {
                 }
                 // A text, a hatch or a SOLID goes in a stream when the provider can say what it
                 // draws, and is counted as unmapped otherwise (#1609). Its carriers are written
-                // hidden, so only the model space of a drawing with no sheet clip is mapped.
+                // hidden. On a sheet or through a viewport a text is kept line by line when its
+                // start is inside what it is cut to, and a fill is not carried at all.
                 let mut pending: Option<Body> = None;
+                // Texts and fills are two choices (#1624): a class whose choice is off stays
+                // unmapped and says so, so a caller that asked for one never gets the other.
+                let (text_class, fill_class) = (
+                    matches!(
+                        raw.provenance.class_name.as_str(),
+                        "TEXT" | "MTEXT" | "ATTDEF"
+                    ),
+                    matches!(raw.provenance.class_name.as_str(), "HATCH" | "SOLID"),
+                );
                 if annotate
-                    && window.is_none()
-                    && clip_box.is_none()
+                    && matches!(item, Item::Leaf(_))
+                    && matches!(raw.geometry, RawGeometry::Unmapped { .. })
+                    && ((text_class && !*want_texts)
+                        || (fill_class && !*want_fills && window.is_none() && clip_box.is_none()))
+                {
+                    let (class, choice) = (
+                        raw.provenance.class_name.as_str(),
+                        if text_class { "texts" } else { "fills" },
+                    );
+                    done.warnings
+                        .push(format!("{class}: not carried, {choice} are off"));
+                }
+                if annotate
+                    && !frozen_here
                     && let Item::Leaf(f) = item
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && matches!(
-                        raw.provenance.class_name.as_str(),
-                        "TEXT" | "MTEXT" | "ATTDEF" | "HATCH" | "SOLID"
-                    )
+                    && ((text_class && *want_texts)
+                        || (fill_class && *want_fills && window.is_none() && clip_box.is_none()))
                 {
                     let class = raw.provenance.class_name.as_str();
                     let made = raw
@@ -1751,7 +2181,28 @@ impl<'a> PvecConversion<'a> {
                             _ => provider.annotation(h),
                         })
                         .ok_or("it draws nothing the provider can report")
-                        .and_then(|a| annotation::map(f, a));
+                        .and_then(|a| {
+                            annotation::map(f, a, &|p| {
+                                clip_box.is_none_or(|b| {
+                                    p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
+                                }) && ring.is_none_or(|r| {
+                                    // Even-odd crossing count over the viewport's polygon.
+                                    let mut inside = false;
+                                    for (i, a) in r.iter().enumerate() {
+                                        let b = &r[(i + 1) % r.len()];
+                                        if (a[1] > p[1]) != (b[1] > p[1])
+                                            && p[0]
+                                                < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1])
+                                                    + a[0]
+                                        {
+                                            inside = !inside;
+                                        }
+                                    }
+                                    inside
+                                })
+                            })
+                        });
+                    let made_clipped = matches!(made, Err(annotation::CLIPPED));
                     let carried = match made {
                         Ok((carriers, body)) => carriers
                             .into_iter()
@@ -1763,6 +2214,7 @@ impl<'a> PvecConversion<'a> {
                                     .all(|d| d.geometry.geometry().is_some())
                                     .then_some((pieces, body))
                             }),
+                        Err(annotation::CLIPPED) => Ok(None),
                         Err(why) => {
                             done.warnings.push(format!("{class}: not carried, {why}"));
                             Ok(None)
@@ -1788,6 +2240,11 @@ impl<'a> PvecConversion<'a> {
                             let mut it = pieces.into_iter();
                             done = it.next().expect("a mapped annotation has a carrier");
                             more = it.collect();
+                        }
+                        Ok(None) if made_clipped => {
+                            *annotation_counts
+                                .entry(format!("{class}.clipped"))
+                                .or_default() += 1;
                         }
                         Ok(None) => {
                             *annotation_counts
@@ -1851,22 +2308,78 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
-                        let (style, colour, bad_style) = if pending.is_some() {
+                        // The ACI the stroke is drawn in, through BYLAYER and BYBLOCK; a true colour has none.
+                        let effective_aci = match paints.get(&leaf_key_of(&raw.provenance)) {
+                            Some(LeafPaint::Colour(SourceColour::Aci(i))) if table.is_some() => {
+                                Some(*i)
+                            }
+                            _ => None,
+                        };
+                        let (style, bad_style, own_colour) = if pending.is_some() {
                             // A carrier is never drawn: the stream record is what shows.
                             let c = LineStyleComponent::new(id, None, None, false).ok();
                             let bad = c.is_none();
-                            (c, false, bad)
+                            (c, bad, false)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
+                            // The table's lineweight and linetype for the stroke's ACI beat the
+                            // object's; an entry that says "object" leaves them (#1630).
+                            if let (Some(t), Some(aci)) = (table, effective_aci) {
+                                if let Some(mm) = t.resolve_lineweight(aci) {
+                                    input.lineweight = Some(DwgLineweight::Hundredths(
+                                        (f64::from(mm) * 100.0).round() as i16,
+                                    ));
+                                }
+                                // Pattern lengths are in millimetres like the table's lineweights,
+                                // `linepattern_size` long: 0 solid, 1 dashed, 2 dotted, 3 dash dot.
+                                let size =
+                                    f64::from(t.aci_entries[usize::from(aci)].linepattern_size);
+                                let pattern = match t.aci_entries[usize::from(aci)].linetype {
+                                    0 => Some(Vec::new()),
+                                    1 => Some(vec![size, -size / 2.0]),
+                                    2 => Some(vec![0.0, -size / 2.0]),
+                                    3 => Some(vec![size, -size / 4.0, 0.0, -size / 4.0]),
+                                    _ => None,
+                                };
+                                if let Some(p) = pattern {
+                                    input.linetype_scale = 1.0;
+                                    input.linetype_name = None;
+                                    input.linetype_elements = Some(p).filter(|p| !p.is_empty());
+                                }
+                            }
                             // P-8: a layout that does not print lineweights has none on its sheet.
                             if drop_widths {
                                 input.lineweight = None;
                             }
                             let c = dwg_line_style(id, &input).ok();
                             let bad = c.is_none();
-                            (c, input.colour_index.is_some(), bad)
+                            (c, bad, input.colour_index.is_some())
                         } else {
                             (None, false, false)
+                        };
+                        // A carrier is never drawn, so it has no colour either.
+                        let leaf_paint = if components.stroke_paint && pending.is_none() {
+                            paints.get(&leaf_key_of(&raw.provenance)).copied()
+                        } else {
+                            None
+                        };
+                        let paint = match leaf_paint {
+                            Some(LeafPaint::Colour(c)) => paint_word(c).map(|word| {
+                                let (Some(t), Some(aci)) = (table, effective_aci) else {
+                                    return word;
+                                };
+                                let [r, g, b, _] = word.to_be_bytes();
+                                let [r, g, b] = t.resolve_color(aci).map_or([r, g, b], |c| {
+                                    c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                                });
+                                // Screening is lighter ink on white paper, so it blends toward
+                                // white and the word stays opaque.
+                                let s = f64::from(t.resolve_screening(aci));
+                                let [r, g, b] = [r, g, b]
+                                    .map(|c| (255.0 - (255.0 - f64::from(c)) * s).round() as u8);
+                                u32::from_be_bytes([r, g, b, 255])
+                            }),
+                            _ => None,
                         };
                         Side {
                             // Only the handle, the layer and the outermost INSERT are read; the class name and
@@ -1881,10 +2394,27 @@ impl<'a> PvecConversion<'a> {
                                             .child(String::new(), s.insert_handle)
                                     },
                                 ),
-                                layer: raw.provenance.layer.clone(),
+                                layer: match item {
+                                    Item::Leaf(f) => kept.get(&flat_key(f)).cloned(),
+                                    _ => None,
+                                }
+                                .unwrap_or_else(|| raw.provenance.layer.clone()),
                             },
                             style,
-                            colour,
+                            paint,
+                            // A colour the drawing names and the walk cannot reach, or one with no
+                            // RGB behind it, is counted and not painted.
+                            // With the paint stream off nothing writes a colour, so every explicit colour
+                            // index is ignored, counted as before (read only with the line style stream on).
+                            colour_ignored: if !components.stroke_paint {
+                                own_colour
+                            } else {
+                                match leaf_paint {
+                                    Some(LeafPaint::Unresolved) => true,
+                                    Some(LeafPaint::Colour(_)) => paint.is_none(),
+                                    _ => false,
+                                }
+                            },
                             bad_style,
                             viewport: window.map(|k| windows[k].0.handle),
                         }
@@ -1909,7 +2439,7 @@ impl<'a> PvecConversion<'a> {
                     sent.fetch_add(1, Ordering::Release);
                 }
                 match pending {
-                    Some(Body::Text(t)) => texts.push((carried_ids[0], t)),
+                    Some(Body::Text(lines)) => texts.extend(carried_ids.into_iter().zip(lines)),
                     Some(Body::Fill(f)) => fills.push((carried_ids, f)),
                     None => {}
                 }
@@ -1965,6 +2495,10 @@ impl<'a> PvecConversion<'a> {
                 .collect();
             s
         });
+        let xref_note = self
+            .xref_note
+            .lock()
+            .expect("the xref note is not poisoned");
         let xrefs = XrefSummary {
             unresolved: flat
                 .skipped
@@ -1977,8 +2511,20 @@ impl<'a> PvecConversion<'a> {
                     path_refusal: None,
                 })
                 .collect(),
-            resolved: Vec::new(),
+            resolved: xref_note.resolved.iter().cloned().collect(),
+            unattached: xref_note.unattached.clone(),
+            notes: xref_note.notes.clone(),
         };
+        let mut diagnostics = consumed.diagnostics;
+        for name in &xref_note.unattached {
+            diagnostics.push(Diagnostic::new(
+                DiagnosticCode::XrefNotAttached,
+                "xref-not-attached",
+                format!(
+                    "a drawing was supplied for xref {name}, and no xref block of that name exists"
+                ),
+            ));
+        }
         // No rule named a wall, so the layer names carry no meaning here: the straight lines are
         // the walls, and the derivation drops the ones that join nothing (#1610).
         let wall_source = if walls.is_empty() && !lines.is_empty() {
@@ -1995,7 +2541,7 @@ impl<'a> PvecConversion<'a> {
             encountered,
             view: ViewSummary::from_report(&view.report),
             xrefs,
-            diagnostics: consumed.diagnostics,
+            diagnostics,
             peak_queue_depth: consumed.peak,
             sides: consumed.sides,
             walls,
@@ -2032,6 +2578,9 @@ impl<'a> PvecConversion<'a> {
             annotation_counts,
             sheet,
         } = self.classify(provider, Some(unit))?;
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let thumbnail_width = self.thumbnail_width;
+        let (ask_texts, ask_fills) = (self.texts, self.fills);
         let Self {
             dest,
             leaves,
@@ -2170,6 +2719,7 @@ impl<'a> PvecConversion<'a> {
                         stub: &s.stub,
                         style: s.style.as_ref(),
                         viewport: s.viewport,
+                        paint: s.paint,
                     })
                     .collect();
                 let built = build_streams(select, &open.source_ids, &layers, &rows)
@@ -2185,8 +2735,10 @@ impl<'a> PvecConversion<'a> {
                 let mut made = ComponentsSummary {
                     streams: built.names.iter().map(|n| (*n).to_owned()).collect(),
                     dropped: BTreeMap::new(),
-                    colours_ignored: kept_sides().filter(|s| s.colour).count() as u64,
+                    colours_ignored: kept_sides().filter(|s| s.colour_ignored).count() as u64,
                     annotations: annotation_counts.clone(),
+                    texts: ask_texts && select.line_style,
+                    fills: ask_fills && select.line_style,
                 };
                 let style_bad = kept_sides().filter(|s| s.bad_style).count() as u64;
                 for d in &built.dropped {
@@ -2253,8 +2805,19 @@ impl<'a> PvecConversion<'a> {
             StreamedPublishError::Publish(PublishError::Cancelled) => PvecConvertError::Cancelled,
             StreamedPublishError::Publish(other) => PvecConvertError::Publish(other),
         };
+        // A paper sheet with nothing to stroke (only text, say) still has a paper to show: a
+        // thumbnail of it is blank (#1629), and the PDF plot wants the empty page (#1636). Either way
+        // no artifact is written.
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let thumbnail_blank = thumbnail_width.is_some();
+        #[cfg(not(feature = "pvec-raster-thumbnail"))]
+        let thumbnail_blank = false;
+        let blank_paper = (thumbnail_blank || self.empty_sheet_ok) && area.is_some();
         let published = match &spill {
             None => match open(geometries, None, &mut on_chunk) {
+                Err(PvecConvertError::Write(WriteError::NoGeometry)) if blank_paper => {
+                    seal(None, &[], None, None).map(|(report, fidelity)| (report, fidelity, 0))
+                }
                 Err(PvecConvertError::Write(WriteError::AllRefused(refused))) => {
                     seal(None, &refused, None, None).and_then(|(report, fidelity)| {
                         Err(PvecConvertError::NothingStorable {
@@ -2324,13 +2887,42 @@ impl<'a> PvecConversion<'a> {
             .map_err(publish_error),
         };
         let (report, fidelity, written) = published?;
-        tell(EngineEvent::ConversionPublished);
+        if written > 0 || !blank_paper {
+            tell(EngineEvent::ConversionPublished);
+        }
+        // A paper frame fills the picture; a frame that is only the kept geometry's extent (model
+        // space, or a layout without plot settings) gets 2 percent of its longer side all round.
+        #[cfg(feature = "pvec-raster-thumbnail")]
+        let thumbnail = thumbnail_width
+            .map(|width| {
+                use crate::pvec::thumbnail::{ThumbnailError, draw};
+                let paper = report.sheet.as_ref().is_some_and(|s| s.frame == "paper");
+                let margin = if paper { 0.0 } else { 0.02 };
+                match area.filter(|_| written == 0) {
+                    Some([x0, y0, x1, y1]) => {
+                        draw([x0, y0], [x1, y1], std::iter::empty(), width, 0.0)
+                    }
+                    None => {
+                        let reader = crate::pvec::publish::open_published(dest)
+                            .map_err(|e| ThumbnailError::Artifact(e.to_string()))?;
+                        let curves = reader
+                            .entities()
+                            .map_err(|e| ThumbnailError::Artifact(e.to_string()))?;
+                        let b = reader.manifest().bounds;
+                        draw(b.min, b.max, curves.iter().map(|(_, c)| c), width, margin)
+                    }
+                }
+            })
+            .transpose()
+            .map_err(PvecConvertError::Thumbnail)?;
         Ok(PvecConversionOutput {
             artifact: dest.to_path_buf(),
             report,
             fidelity,
             written,
             peak_queue_depth,
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            thumbnail,
         })
     }
 }
@@ -2362,6 +2954,119 @@ struct Classified {
     sheet: Option<Sheet>,
 }
 
+/// The plot scale as the calibration record (P-9, #1562): `n` paper units to `d` drawing units,
+/// the paper unit being `sheet_unit`. It is never applied to a coordinate. A caller's calibration
+/// wins. The summary says what became of it.
+fn plot_scale_record(
+    [n, d]: [f64; 2],
+    paper_unit: SourceUnit,
+    sheet_unit: SourceUnit,
+    unit: Option<SourceUnit>,
+    single_scale: Option<&str>,
+    caller_calibration: bool,
+    summary: &mut SheetSummary,
+) -> Option<Calibration> {
+    let sized = |v: f64| v.is_finite() && v > 0.0;
+    let mut written = None;
+    // P-9: the plot scale is the calibration record, never applied to a
+    // coordinate. A caller's calibration wins.
+    if caller_calibration {
+        summary.notes.push("caller-calibration".into());
+    } else if !(sized(n) && sized(d)) {
+        summary.notes.push("scale-zero".into());
+    } else {
+        // Both sides integral after scaling by one power of ten up to 10^6
+        // reduce exactly; anything else is rounded at 10^6 and the record
+        // carries the rounding as its uncertainty. A side is integral at `k`
+        // when its rounded multiple divided back by `k` is the stored value:
+        // a decimal such as 2.01 is no binary fraction, so `2.01 * 100` is not
+        // 201 in f64, but `201 / 100` is the f64 nearest 2.01, which is it.
+        let integral = |v: f64| (1.0..9.0e15).contains(&v).then_some(v as u64);
+        let at = |v: f64, k: f64| {
+            let r = (v * k).round();
+            if r / k == v { integral(r) } else { None }
+        };
+        let exact = [1.0, 10.0, 100.0, 1e3, 1e4, 1e5, 1e6]
+            .into_iter()
+            .find_map(|k| Some((at(n, k)?, at(d, k)?)));
+        let uncertain = exact.is_none();
+        let ratio =
+            exact.or_else(|| Some((integral((n * 1e6).round())?, integral((d * 1e6).round())?)));
+        let reduced = ratio.and_then(|(a, b)| {
+            let (mut x, mut y) = (a, b);
+            while y != 0 {
+                (x, y) = (y, x % y);
+            }
+            Some((u32::try_from(a / x).ok()?, u32::try_from(b / x).ok()?))
+        });
+        let paper = metres_per_unit(paper_unit).ok();
+        // The coordinates are in the sheet's unit and the scale's paper side in `paper_unit`, so
+        // a coordinate unit is this many paper units.
+        let along = if paper_unit == sheet_unit {
+            Some(1.0)
+        } else {
+            paper
+                .zip(metres_per_unit(sheet_unit).ok())
+                .map(|(p, s)| s / p)
+        };
+        // The scale is paper units to drawing units, so a paper unit is
+        // `den / num` drawing units, each the size of the drawing's own unit.
+        // Inches of model space on a millimetre sheet are not millimetres
+        // (#1610). A drawing that names no length unit stands in the sheet's.
+        let drawing = unit
+            .filter(|u| u.is_physical())
+            .and_then(|u| metres_per_unit(u).ok())
+            .or(metres_per_unit(sheet_unit).ok());
+        let claim = reduced
+            .zip(paper)
+            .zip(along)
+            .map(|(((num, den), paper), along)| {
+                let raw = n / d;
+                let mut note = if uncertain {
+                    format!("plot scale {n}:{d} as stored, written as {num}:{den}")
+                } else {
+                    format!("plot scale {num}:{den}")
+                };
+                if let Some(one) = &single_scale {
+                    note.push_str(&format!("; viewport {one}"));
+                }
+                ScaleClaim {
+                    metres_per_source_unit: drawing.unwrap_or(paper * along) * f64::from(den)
+                        / f64::from(num)
+                        * along,
+                    provenance: ScaleProvenance::PlanScale {
+                        numerator: num,
+                        denominator: den,
+                        paper_metres_per_unit: paper,
+                    },
+                    uncertainty: uncertain
+                        .then(|| (f64::from(num) / f64::from(den) - raw).abs() / raw),
+                    note: if note.len() <= 255 {
+                        note
+                    } else {
+                        format!("plot scale written as {num}:{den}")
+                    },
+                }
+            });
+        match claim.map(|c| Calibration::new(Some(c), None, None)) {
+            Some(Ok(c)) => {
+                if uncertain {
+                    summary.notes.push("scale-not-reduced".into());
+                }
+                summary.calibration = if uncertain {
+                    "plot-scale-uncertain".into()
+                } else {
+                    "plot-scale".into()
+                };
+                summary.scale = reduced.map(|(a, b)| format!("{a}:{b}"));
+                written = Some(c);
+            }
+            _ => summary.notes.push("scale-refused".into()),
+        }
+    }
+    written
+}
+
 /// A paper sheet as `classify` worked it out (#1562): the report's section, the frame to clip to
 /// and to hand the writer, the unit the plot settings put the sheet in, the calibration the plot
 /// scale gives and whether widths print.
@@ -2372,14 +3077,34 @@ struct Sheet {
     unit: Option<SourceUnit>,
     calibration: Option<Calibration>,
     drop_widths: bool,
+    /// What the frame is placed from, for the extents pass (#1628). `None` when it is the extents.
+    place: Option<Place>,
+    /// The layout plots upside-down (rotation 2 or 3): the content turns 180 degrees about the
+    /// frame's centre (#1632).
+    flip: bool,
+}
+
+/// A paper sheet's placement in the sheet unit: what the frame is worked out from once the
+/// extents of what the sheet draws are known (#1628).
+#[derive(Clone, Copy)]
+struct Place {
+    /// Unprintable margins, left, bottom, right, top.
+    margin: [f64; 4],
+    /// The paper, after the layout's rotation and the chosen orientation.
+    size: [f64; 2],
+    /// The margin plus the shift, summed in millimetres and converted once, so that a sheet with
+    /// no override frames exactly as it did before the plot settings (#1584).
+    corner: [f64; 2],
 }
 
 /// What the component streams read off one written entity: where it came from and its line style.
 struct Side {
     stub: ProvenanceStub,
     style: Option<LineStyleComponent>,
-    /// The entity carries a DWG colour index (read only when the line style stream is on).
-    colour: bool,
+    /// The colour word, `0xRRGGBBAA`, when the drawing settles it (#1638).
+    paint: Option<u32>,
+    /// The paint stream is on and the colour could not be resolved (#1638).
+    colour_ignored: bool,
     /// The line style stream is on and the DWG facts could not make a component of this entity.
     bad_style: bool,
     /// The viewport a model entity was drawn through on a sheet (#1563).
@@ -2392,6 +3117,68 @@ struct Side {
 /// sheet test both decide it here (#1583).
 fn paper_view(v: &ViewportEntity) -> bool {
     v.id == 1 && v.center == v.view_center && v.height == v.view_height
+}
+
+/// What a viewport of a sheet comes to, decided from its record alone (#1563, #1626): the
+/// conversion and the manifest's listing both ask this, so the reason a viewport is refused is
+/// the same one before and after the conversion.
+enum ViewportClass {
+    /// The sheet's own paper view.
+    Paper,
+    /// Contributes nothing to a print: `off` or `hide-plot` (P-3).
+    Dropped(&'static str),
+    /// A view the print cannot map, and why.
+    Refused(&'static str),
+    /// Model space shows through it, cut by this polygon when it is clipped to one (#1565).
+    Drawn(Option<Vec<[f64; 2]>>),
+}
+
+fn viewport_class(v: &ViewportEntity) -> ViewportClass {
+    let finite = [v.width, v.height, v.view_height, v.center[0], v.center[1]]
+        .into_iter()
+        .chain(v.view_center)
+        .chain(v.view_target)
+        .all(f64::is_finite);
+    if paper_view(v) {
+        ViewportClass::Paper
+    } else if !v.visible {
+        ViewportClass::Dropped("off")
+    } else if v.hide_plot {
+        ViewportClass::Dropped("hide-plot")
+    } else if !(v.view_direction[0] == 0.0
+        && v.view_direction[1] == 0.0
+        && v.view_direction[2] > 0.0)
+    {
+        ViewportClass::Refused("non-plan")
+    } else if v.perspective {
+        ViewportClass::Refused("perspective")
+    } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
+        ViewportClass::Refused("view-height")
+    } else if v.twist != 0.0 {
+        // The twist sign is not measured against AutoCAD yet (the ADR's open item).
+        ViewportClass::Refused("twist")
+    } else {
+        // A rectangle, or a polygon with straight edges (#1565), whose vertices are in paper
+        // units and cut what the viewport shows. A bulged edge or a curved boundary is not cut yet.
+        match &v.clip {
+            ViewportClip::Rectangle(_) => ViewportClass::Drawn(None),
+            ViewportClip::Polygon(vs) if vs.iter().any(|q| q.bulge != 0.0) => {
+                ViewportClass::Refused("clip-bulge")
+            }
+            ViewportClip::Polygon(vs)
+                if vs.len() < 3 || !vs.iter().all(|q| q.x.is_finite() && q.y.is_finite()) =>
+            {
+                ViewportClass::Refused("clip-polygon")
+            }
+            ViewportClip::Polygon(vs) => {
+                ViewportClass::Drawn(Some(vs.iter().map(|q| [q.x, q.y]).collect()))
+            }
+            ViewportClip::Circle(_) => ViewportClass::Refused("clip-circle"),
+            ViewportClip::Ellipse(_) => ViewportClass::Refused("clip-ellipse"),
+            ViewportClip::Spline(_) => ViewportClass::Refused("clip-spline"),
+            _ => ViewportClass::Refused("clip-other"),
+        }
+    }
 }
 
 /// What the print profile makes of one viewport of a sheet (#1563).
@@ -2545,7 +3332,14 @@ struct Done {
 
 /// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
 fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
-    let p = &f.entity.provenance;
+    leaf_key_of(&f.entity.provenance)
+}
+
+fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
+    leaf_key_of(&v.entity.provenance)
+}
+
+fn leaf_key_of(p: &ProvenanceStub) -> (Option<u64>, String, String) {
     (
         p.handle.map(|h| h.get()),
         p.block_path.to_string(),
@@ -2553,13 +3347,17 @@ fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
     )
 }
 
-fn leaf_key(v: &ViewedEntity) -> (Option<u64>, String, String) {
-    let p = &v.entity.provenance;
-    (
-        p.handle.map(|h| h.get()),
-        p.block_path.to_string(),
-        p.class_name.clone(),
-    )
+/// The colour word of a resolved colour: its RGB with an opaque alpha. ACI 7 is white on a dark
+/// screen and black on paper, and a plot prints it black, so that is how it is written. An index
+/// with no RGB behind it has no word.
+fn paint_word(c: SourceColour) -> Option<u32> {
+    let (r, g, b) = match c {
+        SourceColour::Aci(7) => (0, 0, 0),
+        SourceColour::Aci(i) => acadrust::Color::Index(i).rgb()?,
+        SourceColour::True { r, g, b } => (r, g, b),
+        _ => return None,
+    };
+    Some(u32::from_be_bytes([r, g, b, 255]))
 }
 
 /// A stand-in `RawEntity` for something that has no geometry of its own, so it can be ordered and
@@ -2669,7 +3467,8 @@ fn classify_leaf(
 }
 
 /// Pushes `record` through the map flattening composed for its leaf, and checks it against the
-/// gate. A leaf a layout owns directly has the identity map, unless it is drawn through a viewport.
+/// gate. A leaf a layout owns directly has the identity map, unless it is drawn through a viewport
+/// or the sheet plots upside-down.
 fn promote_leaf(
     f: &FlatEntity,
     record: Normalized2DGeometry,
@@ -2688,7 +3487,16 @@ fn promote_leaf(
             block_name: "*VIEWPORT".into(),
             insert_handle: v,
         },
-        (None, None) => return gated(record, prov, gate),
+        (None, None) if f.matrix() == [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] => {
+            return gated(record, prov, gate);
+        }
+        // A sheet's own leaf turned about the frame's centre by a plot upside-down (#1632).
+        (None, None) => crate::pvec::InstanceStep {
+            block_name: "*PLOT_ROTATION".into(),
+            insert_handle: prov
+                .handle
+                .unwrap_or_else(|| crate::cad::ItemHandle::new(1)),
+        },
     };
     let composed = match ComposedTransform::identity().push_inner_coefficients(step, f.matrix()) {
         Ok(c) => c,
@@ -2920,6 +3728,8 @@ impl PvecConvertError {
                 out.block_path = Some(block_path.clone());
                 out
             }
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
         }
     }
