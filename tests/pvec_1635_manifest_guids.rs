@@ -37,11 +37,11 @@ fn drawing(guids: Option<(&str, &str)>, layouts: &[(&str, &str, &str)]) -> CadDo
         doc.add_entity_to_layout(acadrust::EntityType::Line(line), name)
             .expect("the line is added");
         for object in doc.objects.values_mut() {
-            if let ObjectType::Layout(l) = object {
-                if l.name == *name {
-                    l.plot_printer_name = (*printer).into();
-                    l.plot_style_sheet = (*style).into();
-                }
+            if let ObjectType::Layout(l) = object
+                && l.name == *name
+            {
+                l.plot_printer_name = (*printer).into();
+                l.plot_style_sheet = (*style).into();
             }
         }
     }
