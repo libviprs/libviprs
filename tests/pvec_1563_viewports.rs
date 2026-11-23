@@ -972,3 +972,52 @@ fn issue_1610_a_viewport_with_a_target_off_the_origin_draws_what_it_shows() {
     );
     let _ = fs::remove_dir_all(dir);
 }
+
+// A real drawing's plan viewport is not stored as exactly (0, 0, 1) and zero: a sheet of the Langara
+// master floor plan has view direction (5.8e-11, 0, 251705.56) and twist 1.57e-16 on its model-space
+// viewport. That is plan view and no twist, so it has to draw what it shows (#1660).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_a_plan_viewport_with_float_noise_in_its_direction_and_twist_is_drawn() {
+    let mut noisy = vp(0x60, 20, [210.0, 250.0], [40.0, 30.0], [5.0, 5.0], 3.0);
+    noisy.view_direction = [5.820766091346741e-11, 0.0, 251705.55886499453];
+    noisy.twist = 1.5700924586837754e-16;
+    let mut mock = drawing(false);
+    mock.paper.push(viewport_entity(0x60, &noisy.layer));
+    mock.viewports.push(noisy);
+    mock.model.push(line(0x61, "0", [4.0, 4.0], [6.0, 4.0]));
+    let (out, dir) = convert("1660-noise", mock, |c| c);
+    let report = out.expect("the sheet converts").report;
+    let row = sheet_row(&report, 0x60);
+    assert_eq!(
+        (row.status.as_str(), row.reason.as_deref()),
+        ("drawn", None)
+    );
+    // paper = centre + s * (model - view centre): s = 30 / 3 = 10, so (4, 4)..(6, 4) is (200, 240)..(220, 240).
+    assert_eq!(
+        ends(&curve_of(&report, &dir, 0x61, 0x60)),
+        [[200.0, 240.0], [220.0, 240.0]]
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+// The tolerance of #1660 must not turn a tilted or twisted view into a plan view.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_a_visibly_tilted_or_twisted_viewport_is_still_refused() {
+    let mut tilted = vp(0x62, 21, [210.0, 250.0], [40.0, 30.0], [5.0, 5.0], 3.0);
+    tilted.view_direction = [0.02, 0.0, 1.0];
+    let mut twisted = vp(0x63, 22, [210.0, 250.0], [40.0, 30.0], [5.0, 5.0], 3.0);
+    twisted.twist = 0.01;
+    let mut mock = drawing(false);
+    for v in [&tilted, &twisted] {
+        mock.paper.push(viewport_entity(v.handle.get(), &v.layer));
+    }
+    mock.viewports.extend([tilted, twisted]);
+    let (out, dir) = convert("1660-real", mock, |c| c);
+    let report = out.expect("the sheet converts").report;
+    let status = |h: u64| sheet_row(&report, h).reason.clone();
+    assert_eq!(status(0x62).as_deref(), Some("non-plan"));
+    assert_eq!(status(0x63).as_deref(), Some("twist"));
+    let _ = fs::remove_dir_all(dir);
+}
