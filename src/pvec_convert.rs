@@ -3145,16 +3145,19 @@ fn viewport_class(v: &ViewportEntity) -> ViewportClass {
         ViewportClass::Dropped("off")
     } else if v.hide_plot {
         ViewportClass::Dropped("hide-plot")
-    } else if !(v.view_direction[0] == 0.0
-        && v.view_direction[1] == 0.0
-        && v.view_direction[2] > 0.0)
-    {
+    } else if !{
+        // Plan view up to float noise (#1660): the unit direction leans under 1e-9 from +Z.
+        let [x, y, z] = v.view_direction;
+        let len = (x * x + y * y + z * z).sqrt();
+        z > 0.0 && len.is_finite() && x.abs() / len < 1e-9 && y.abs() / len < 1e-9
+    } {
         ViewportClass::Refused("non-plan")
     } else if v.perspective {
         ViewportClass::Refused("perspective")
     } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
         ViewportClass::Refused("view-height")
-    } else if v.twist != 0.0 {
+    } else if v.twist.is_nan() || v.twist.abs() >= 1e-9 {
+        // Under 1e-9 rad is float noise (#1660).
         // The twist sign is not measured against AutoCAD yet (the ADR's open item).
         ViewportClass::Refused("twist")
     } else {
