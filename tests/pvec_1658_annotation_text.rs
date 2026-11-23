@@ -60,6 +60,7 @@ struct Record {
     x: f64,
     y: f64,
     height: f64,
+    rotation: f64,
     advance: f64,
 }
 
@@ -109,6 +110,7 @@ fn convert(tag: &str, bytes: &[u8], texts: bool, fills: bool) -> Run {
                 x: r.x,
                 y: r.y,
                 height: r.height,
+                rotation: r.rotation,
                 advance,
             }
         })
@@ -192,18 +194,22 @@ fn block<'a>(doc: &'a CadDocument, name: &str) -> Vec<&'a EntityType> {
         .collect()
 }
 
-/// A middle-centre text record of height `h` sits half its run left of `at` and its baseline a
-/// little under it.
-fn centred_on(r: &Record, at: [f64; 2], h: f64) -> bool {
-    (r.x + r.advance / 2.0 - at[0]).abs() < h && (r.y - at[1]).abs() < h
+/// A middle-centre text record of height `h` is centred on `at`: half its block (its run, or the
+/// MTEXT's reference width when that is wider) along its baseline from where it starts lands
+/// within a text height and a half of `at`, the baseline sitting a little under the middle.
+fn centred_on(r: &Record, at: [f64; 2], h: f64, width: f64) -> bool {
+    let half = r.advance.max(width) / 2.0;
+    let (sin, cos) = r.rotation.sin_cos();
+    (r.x + cos * half - at[0]).hypot(r.y + sin * half - at[1]) < 1.5 * h
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1658_every_dimension_block_text_is_a_text_record() {
     let doc = read("cad/sample_AC1018.dwg");
-    // Every printed line of every MTEXT in each model space DIMENSION's block, where it sits.
-    let mut expected: Vec<(String, [f64; 2], f64)> = Vec::new();
+    // Every printed line of every MTEXT in each model space DIMENSION's block, where it sits, its
+    // height and its reference width.
+    let mut expected: Vec<(String, [f64; 2], f64, f64)> = Vec::new();
     let mut dimensions = 0;
     for e in model(&doc) {
         let EntityType::Dimension(d) = e else {
@@ -213,7 +219,12 @@ fn issue_1658_every_dimension_block_text_is_a_text_record() {
         for inner in block(&doc, &d.base().block_name) {
             if let EntityType::MText(m) = inner {
                 for line in shown(&m.value) {
-                    expected.push((line, [m.insertion_point.x, m.insertion_point.y], m.height));
+                    expected.push((
+                        line,
+                        [m.insertion_point.x, m.insertion_point.y],
+                        m.height,
+                        m.rectangle_width,
+                    ));
                 }
             }
         }
@@ -223,15 +234,22 @@ fn issue_1658_every_dimension_block_text_is_a_text_record() {
 
     let run = convert_fixture("dim-block-text", "cad/sample_AC1018.dwg", true, false);
     let mut used = vec![false; run.records.len()];
-    for (text, at, h) in &expected {
+    for (text, at, h, width) in &expected {
         let hit = run
             .records
             .iter()
             .enumerate()
-            .position(|(i, r)| !used[i] && r.text == *text && centred_on(r, *at, *h));
+            .position(|(i, r)| !used[i] && r.text == *text && centred_on(r, *at, *h, *width));
         match hit {
             Some(i) => used[i] = true,
-            None => panic!("no record {text:?} centred on {at:?} in {:?}", texts(&run)),
+            None => panic!(
+                "no record {text:?} centred on {at:?} (height {h}, width {width}): {:?}",
+                run.records
+                    .iter()
+                    .filter(|r| r.text == *text)
+                    .map(|r| (r.x, r.y, r.height, r.rotation, r.advance))
+                    .collect::<Vec<_>>()
+            ),
         }
     }
 }
@@ -349,7 +367,12 @@ fn issue_1658_a_dimension_without_its_block_carries_its_measurement() {
         r.height
     );
     assert!(
-        centred_on(r, [b.text_middle_point.x, b.text_middle_point.y], r.height),
+        centred_on(
+            r,
+            [b.text_middle_point.x, b.text_middle_point.y],
+            r.height,
+            0.0
+        ),
         "at ({}, {})",
         r.x,
         r.y
@@ -423,7 +446,10 @@ fn issue_1658_a_dimension_without_its_block_prints_what_its_block_would_have() {
     let mut used = vec![false; run.records.len()];
     for (text, at, h) in &expected {
         let hit = run.records.iter().enumerate().position(|(i, r)| {
-            !used[i] && r.text == *text && (r.height - h).abs() < 1e-9 && centred_on(r, *at, *h)
+            !used[i]
+                && r.text == *text
+                && (r.height - h).abs() < 1e-9
+                && centred_on(r, *at, *h, 0.0)
         });
         match hit {
             Some(i) => used[i] = true,
@@ -575,19 +601,28 @@ fn issue_1658_tolerance_text_is_a_text_record_without_codes() {
             r.text
         );
     }
-    // The insertion point is the left end of the frame, at (4, 6) for the model space ones.
+    // The insertion point is the left end of the frame and the middle of its rows, at (4, 6) for
+    // the one model space draws directly (the others go through scaled INSERTs).
     assert!(
-        run.records
-            .iter()
-            .filter(|r| r.text.starts_with('⌖'))
-            .filter(|r| (r.x - 4.0).abs() < 1e-6)
-            .count()
-            >= 2,
+        run.records.iter().any(|r| r.text.starts_with('⌖')
+            && (r.x - 4.0).abs() < 1e-6
+            && (r.y - 6.0).abs() < r.height),
         "{:?}",
         run.records.iter().map(|r| (r.x, r.y)).collect::<Vec<_>>()
     );
+    // The one with a tilted normal is refused as any text off the Z axis is; the carried ones say
+    // what they leave out.
     assert_eq!(count(&run, "TOLERANCE.mapped"), 3);
-    for row in rows(&run, "TOLERANCE") {
+    let carried: Vec<_> = rows(&run, "TOLERANCE")
+        .into_iter()
+        .filter(|r| {
+            r.warnings
+                .iter()
+                .any(|w| w.contains("carried in a PVec stream"))
+        })
+        .collect();
+    assert_eq!(carried.len(), run.records.len(), "a row per printed row");
+    for row in carried {
         assert!(
             row.warnings
                 .iter()
@@ -601,7 +636,8 @@ fn issue_1658_tolerance_text_is_a_text_record_without_codes() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1658_with_texts_off_they_stay_unmapped_and_say_so() {
-    let run = convert_fixture("texts-off", "cad/sample_AC1018.dwg", false, false);
+    // Fills on, texts off: with neither choice nothing is annotated at all (#1624).
+    let run = convert_fixture("texts-off", "cad/sample_AC1018.dwg", false, true);
     assert!(run.records.is_empty(), "{:?}", texts(&run));
     for class in ["MULTILEADER", "TOLERANCE"] {
         for row in rows(&run, class) {

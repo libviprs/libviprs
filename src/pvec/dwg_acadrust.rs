@@ -13,6 +13,7 @@
 //!   entity invisible flag  ->  EntityFacts      (own flag, and the provider's own answer)
 //!   Layout plot settings   ->  LayoutPlot       (paper, units, scale, margins, CTB name, flags)
 //!   paper-space viewports  ->  ViewportEntity   (visibility, view, plot flags, clip by kind, frozen layers)
+//!   DIMENSION              ->  RawGeometry::Insert of its anonymous block, class name kept (#1658)
 //! ```
 //!
 //! # Where the facts come from
@@ -24,9 +25,14 @@
 //!
 //! # What this provider does not do
 //!
-//! It does not expand INSERTs, apply layer visibility, or flatten a curve. A spline
-//! with no control points (a fit-point spline) is [`RawGeometry::Unmapped`], and so
-//! is every class with no mapping yet: counted, with the class name, never dropped.
+//! It does not expand INSERTs, apply layer visibility, or flatten a curve. A DIMENSION is an INSERT
+//! here: AutoCAD draws one from the anonymous block it names (lines, arrowheads and the printed
+//! value as an MTEXT), so the cursor reports it as an INSERT of that block, as the block stands,
+//! with its `DIMENSION_*` class name. One whose block is missing, or that sits in another
+//! dimension's block, is [`RawGeometry::Unmapped`] with the reason, and
+//! [`annotation`](DwgProvider::annotation) rebuilds the first one's text from its measurement.
+//! A spline with no control points (a fit-point spline) is [`RawGeometry::Unmapped`], and so is
+//! every class with no mapping yet: counted, with the class name, never dropped.
 //! A reader panic on a hostile file is caught and reported as
 //! [`ProviderError::Open`], because the open failure is the thing Gate 0 counts.
 //!
@@ -56,7 +62,7 @@ use acadrust as acr;
 use acr::objects::ObjectType;
 use acr::{DwgReader, DxfReader, EntityType};
 
-use crate::cad::{CadSource, Fill, ItemHandle, decode_escapes, display_text};
+use crate::cad::{CadSource, Fill, ItemHandle, decode_escapes, display_text, gdt_text};
 use crate::pvec::provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
     EntityScope, EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayerStateMask,
@@ -545,12 +551,14 @@ impl AcadrustProvider {
                     out.skipped.push("its block content is not drawn".into());
                 }
             }
+            // The frame's text with its GD&T symbols and cells read (#1658), so it is already the
+            // shown string.
             EntityType::Tolerance(t) => out.texts.push(TextFact {
                 position: p3(t.insertion_point),
                 height: t.text_height,
                 rotation: angle_of(t.direction, 0.0),
-                content: t.text.clone(),
-                multiline: true,
+                content: gdt_text(&t.text),
+                multiline: false,
                 normal: p3(t.normal),
                 attachment: None,
             }),
@@ -636,17 +644,6 @@ impl AcadrustProvider {
                 attachment: None,
             })
             .collect()
-    }
-
-    /// The anonymous block a DIMENSION entity draws itself from, which holds its lines and text.
-    #[must_use]
-    pub fn dimension_block(&self, handle: ItemHandle) -> Option<String> {
-        match self.doc.get_entity(acr::Handle::new(handle.get()))? {
-            EntityType::Dimension(d) if !d.base().block_name.is_empty() => {
-                Some(d.base().block_name.clone())
-            }
-            _ => None,
-        }
     }
 
     /// The colour a fill is drawn in, as red, green, blue and alpha: its own colour, or its layer's
@@ -1147,6 +1144,177 @@ impl DwgProvider for AcadrustProvider {
                     } else {
                         &a.tag
                     }),
+                    lay,
+                )
+            }
+            // A MULTILEADER's text is an MTEXT at its text location, which is the top of the text at
+            // its left, centre or right (#1658). Its leader lines are not text and are not drawn.
+            EntityType::MultiLeader(m) => {
+                use acr::entities::TextAttachmentPointType as P;
+                let c = &m.context;
+                if !c.has_text_contents {
+                    return None;
+                }
+                let across = match c.text_attachment_point {
+                    P::Left => 0.0,
+                    P::Center => 0.5,
+                    P::Right => 1.0,
+                };
+                text(
+                    c.text_location,
+                    c.text_height,
+                    angle_of(c.text_direction, c.text_rotation),
+                    c.text_normal,
+                    decode_escapes(&display_text(&c.text_string).text),
+                    Layout {
+                        width_factor: 1.0,
+                        anchor: (across, TextAnchorV::Top),
+                        fit: None,
+                        block_width: c.text_width,
+                        line_spacing: c.line_spacing_factor,
+                    },
+                )
+            }
+            // A TOLERANCE is the text of its feature control frame, one line per row, from the
+            // frame's left end and centred on it (#1658). The frame is not drawn.
+            EntityType::Tolerance(t) => {
+                let mut lay = Layout::plain();
+                lay.anchor = (0.0, TextAnchorV::Middle);
+                text(
+                    t.insertion_point,
+                    t.text_height,
+                    angle_of(t.direction, 0.0),
+                    t.normal,
+                    decode_escapes(&gdt_text(&t.text)),
+                    lay,
+                )
+            }
+            // A DIMENSION is drawn from its block (the cursor reports it as an INSERT of it), so this
+            // answers only for one whose block is missing (#1658). Its text is then rebuilt from the
+            // measurement and the dimension style: decimal units and decimal degrees only, since any
+            // other format would be a guess, and not when the entity overrides its style (the ACAD
+            // application's DSTYLE list), which is not read.
+            EntityType::Dimension(d) => {
+                use acr::entities::{AttachmentPointType as A, Dimension as K};
+                let d: &K = d;
+                let b = d.base();
+                if self.doc.block_records.get(&b.block_name).is_some() {
+                    return None;
+                }
+                let style = self.doc.dim_styles.get(&b.style_name).or_else(|| {
+                    self.doc
+                        .dim_styles
+                        .iter()
+                        .find(|s| s.name.eq_ignore_ascii_case(&b.style_name))
+                })?;
+                let overridden = b.common.extended_data.get_record("ACAD").is_some_and(|r| {
+                    r.values.iter().any(|v| {
+                        matches!(v, acr::xdata::XDataValue::String(s) if s.eq_ignore_ascii_case("DSTYLE"))
+                    })
+                });
+                if overridden {
+                    return None;
+                }
+                // The number, its decimals, its zero suppression as DIMZIN bits (4 leading, 8
+                // trailing; DIMAZIN keeps them in bits 1 and 2), and what goes either side of it.
+                let (value, decimals, zeros, prefix, suffix) =
+                    if matches!(d, K::Angular2Ln(_) | K::Angular3Pt(_)) {
+                        if style.dimaunit != 0 {
+                            return None;
+                        }
+                        (
+                            b.actual_measurement.to_degrees(),
+                            if style.dimadec < 0 {
+                                style.dimdec
+                            } else {
+                                style.dimadec
+                            },
+                            (style.dimazin & 3) * 4,
+                            "",
+                            "\u{b0}",
+                        )
+                    } else {
+                        if style.dimlunit != 2 {
+                            return None;
+                        }
+                        let factor = if style.dimlfac == 0.0 {
+                            1.0
+                        } else {
+                            style.dimlfac.abs()
+                        };
+                        let mut value = b.actual_measurement * factor;
+                        if style.dimrnd > 0.0 {
+                            value = (value / style.dimrnd).round() * style.dimrnd;
+                        }
+                        let prefix = match d {
+                            K::Radius(_) | K::LargeRadial(_) => "R",
+                            K::Diameter(_) => "%%c",
+                            _ => "",
+                        };
+                        (value, style.dimdec, style.dimzin, prefix, "")
+                    };
+                if !value.is_finite() {
+                    return None;
+                }
+                let decimals = usize::try_from(decimals).unwrap_or(0).min(8);
+                let mut number = format!("{value:.decimals$}");
+                if zeros & 8 != 0 && number.contains('.') {
+                    number = number
+                        .trim_end_matches('0')
+                        .trim_end_matches('.')
+                        .to_owned();
+                }
+                if zeros & 4 != 0 {
+                    if let Some(rest) = number.strip_prefix("0.") {
+                        number = format!(".{rest}");
+                    } else if let Some(rest) = number.strip_prefix("-0.") {
+                        number = format!("-.{rest}");
+                    }
+                }
+                let separator = u8::try_from(style.dimdsep)
+                    .ok()
+                    .filter(u8::is_ascii_graphic)
+                    .map_or('.', char::from);
+                let number = number.replace('.', &separator.to_string());
+                let measured = format!("{prefix}{number}{suffix}");
+                let measured = if style.dimpost.contains("<>") {
+                    style.dimpost.replace("<>", &measured)
+                } else {
+                    format!("{measured}{}", style.dimpost)
+                };
+                let own = b
+                    .user_text
+                    .as_deref()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or(&b.text);
+                let shown = if own.is_empty() {
+                    measured
+                } else {
+                    own.replace("<>", &measured)
+                };
+                let across = match b.attachment_point {
+                    A::TopLeft | A::MiddleLeft | A::BottomLeft => 0.0,
+                    A::TopRight | A::MiddleRight | A::BottomRight => 1.0,
+                    _ => 0.5,
+                };
+                let down = match b.attachment_point {
+                    A::TopLeft | A::TopCenter | A::TopRight => TextAnchorV::Top,
+                    A::BottomLeft | A::BottomCenter | A::BottomRight => TextAnchorV::Bottom,
+                    _ => TextAnchorV::Middle,
+                };
+                let mut lay = Layout::plain();
+                lay.anchor = (across, down);
+                text(
+                    b.text_middle_point,
+                    style.dimtxt
+                        * if style.dimscale > 0.0 {
+                            style.dimscale
+                        } else {
+                            1.0
+                        },
+                    b.text_rotation,
+                    b.normal,
+                    decode_escapes(&display_text(&shown).text),
                     lay,
                 )
             }
@@ -1753,6 +1921,41 @@ impl AcadrustCursor<'_> {
                     img.size.y,
                     img.is_visible(),
                 ))
+            }
+            // A DIMENSION is drawn from the anonymous block it names: its lines, its arrowheads and
+            // the text AutoCAD printed, as an MTEXT (#1658). So it is reported as an INSERT of that
+            // block, placed as the block stands (the block holds the dimension in its own
+            // coordinates), and the view pass, the flatten walk and the viewport layer map follow it
+            // like any other INSERT. One reached through another dimension's block is not followed,
+            // so a chain of dimension blocks cannot run away.
+            EntityType::Dimension(d) => {
+                let block = &d.base().block_name;
+                let nested = self.path.steps().iter().any(|s| {
+                    matches!(
+                        self.doc.get_entity(acr::Handle::new(s.insert_handle.get())),
+                        Some(EntityType::Dimension(_))
+                    )
+                });
+                if nested {
+                    unmapped("a dimension inside a dimension's block is not expanded".into())
+                } else if block.is_empty() {
+                    unmapped("it names no block".into())
+                } else if self.doc.block_records.get(block).is_none() {
+                    unmapped(format!("its block {block} is not in the drawing"))
+                } else {
+                    let base = self.base_point(block);
+                    match SourceTransform::new([1.0, 0.0, 0.0, 1.0, -base[0], -base[1]]) {
+                        Ok(transform) => RawGeometry::Insert(BlockRef {
+                            block_name: block.clone(),
+                            transform,
+                            normal: p3(d.base().normal),
+                            grid: ArrayGrid::SINGLE,
+                            elevation: -base[2],
+                            z_scale: 1.0,
+                        }),
+                        Err(err) => unmapped(format!("the block {block} of a dimension: {err}")),
+                    }
+                }
             }
             _ => unmapped(format!("no mapping for {class_name}")),
         };

@@ -768,7 +768,8 @@ pub enum RawGeometry {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum Annotation {
-    /// One run of text: `TEXT`, `MTEXT` or a visible `ATTDEF`.
+    /// One run of text: `TEXT`, `MTEXT`, a visible `ATTDEF`, a `MULTILEADER`'s text, a
+    /// `TOLERANCE`'s frame text, or the measurement of a DIMENSION whose block is missing (#1658).
     Text {
         /// The insertion point.
         position: Point3,
@@ -1389,7 +1390,9 @@ pub trait DwgProvider {
 
     /// What the `TEXT`, `MTEXT`, `ATTDEF`, `HATCH` or `SOLID` entity with this handle draws, or
     /// `None` for any other entity, for one that is not drawn (an invisible attribute definition)
-    /// or when the provider has nothing to give (#1609). The default has none.
+    /// or when the provider has nothing to give (#1609). A `MULTILEADER` answers with its text and
+    /// a `TOLERANCE` with its frame's text, and a DIMENSION the provider could not report as an
+    /// INSERT of its block may answer with its measurement (#1658). The default has none.
     fn annotation(&self, handle: ItemHandle) -> Option<Annotation> {
         let _ = handle;
         None

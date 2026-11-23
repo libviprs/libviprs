@@ -381,7 +381,8 @@ impl<'a> PvecConversion<'a> {
         }
     }
 
-    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Shorthand
+    /// Carry TEXT, MTEXT, ATTDEF, MULTILEADER and TOLERANCE text, HATCH and SOLID in PVec's text and
+    /// hatch streams (#1609, #1658). Shorthand
     /// for [`texts`](Self::texts) and [`fills`](Self::fills) together, so a call to either after it
     /// wins for its half. Off by default, and it only takes effect with the line style stream
     /// selected ([`components`](Self::components)): each text is anchored on a short polyline and
@@ -398,14 +399,20 @@ impl<'a> PvecConversion<'a> {
     /// Carry TEXT, MTEXT and ATTDEF in PVec's text stream (#1624), without HATCH and SOLID: those
     /// stay unmapped, each with a warning saying fills are off, until [`fills`](Self::fills) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    ///
+    /// A MULTILEADER's text and a TOLERANCE's frame text are carried the same way, each row saying
+    /// its leader lines or its frame are not drawn (#1658). A DIMENSION needs neither option: the
+    /// provider reports it as an INSERT of its anonymous block, so its lines are geometry and its
+    /// printed value is an MTEXT in that block. Only a dimension whose block is missing comes here,
+    /// with its text rebuilt from the measurement and its style (decimal units only).
     #[must_use]
     pub fn texts(mut self, on: bool) -> Self {
         self.texts = on;
         self
     }
 
-    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT and ATTDEF
-    /// stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
+    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT, ATTDEF,
+    /// MULTILEADER and TOLERANCE stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
     #[must_use]
     pub fn fills(mut self, on: bool) -> Self {
@@ -2142,13 +2149,19 @@ impl<'a> PvecConversion<'a> {
                 // start is inside what it is cut to, and a fill is not carried at all.
                 let mut pending: Option<Body> = None;
                 // Texts and fills are two choices (#1624): a class whose choice is off stays
-                // unmapped and says so, so a caller that asked for one never gets the other.
+                // unmapped and says so, so a caller that asked for one never gets the other. A
+                // MULTILEADER's or TOLERANCE's text is a text too, and so is a DIMENSION's when it
+                // reaches here, which is only when its block could not be followed (#1658).
+                let class_name = raw.provenance.class_name.as_str();
+                let dimension = class_name.starts_with("DIMENSION_")
+                    || matches!(class_name, "ARC_DIMENSION" | "LARGE_RADIAL_DIMENSION");
                 let (text_class, fill_class) = (
-                    matches!(
-                        raw.provenance.class_name.as_str(),
-                        "TEXT" | "MTEXT" | "ATTDEF"
-                    ),
-                    matches!(raw.provenance.class_name.as_str(), "HATCH" | "SOLID"),
+                    dimension
+                        || matches!(
+                            class_name,
+                            "TEXT" | "MTEXT" | "ATTDEF" | "MULTILEADER" | "TOLERANCE"
+                        ),
+                    matches!(class_name, "HATCH" | "SOLID"),
                 );
                 if annotate
                     && matches!(item, Item::Leaf(_))
@@ -2216,6 +2229,12 @@ impl<'a> PvecConversion<'a> {
                             }),
                         Err(annotation::CLIPPED) => Ok(None),
                         Err(why) => {
+                            // A dimension the provider has no text for says why its block was not
+                            // followed, which is the part worth knowing.
+                            let why = match &raw.geometry {
+                                RawGeometry::Unmapped { reason } if dimension => reason.as_str(),
+                                _ => why,
+                            };
                             done.warnings.push(format!("{class}: not carried, {why}"));
                             Ok(None)
                         }
@@ -2226,12 +2245,24 @@ impl<'a> PvecConversion<'a> {
                             break;
                         }
                         Ok(Some((mut pieces, body))) => {
+                            // What the stream does not carry of the entity (#1658).
+                            let left_out = match class {
+                                "MULTILEADER" => Some("its leader lines are not drawn"),
+                                "TOLERANCE" => Some("its frame is not drawn"),
+                                _ if dimension => Some(
+                                    "its block is missing, so its text is rebuilt from the measurement and nothing else is drawn",
+                                ),
+                                _ => None,
+                            };
                             for piece in &mut pieces {
                                 piece.classification =
                                     Classification::supported(Basis::Equivalent, class);
                                 piece.warnings.push(format!(
                                     "{class}: carried in a PVec stream, on hidden geometry"
                                 ));
+                                if let Some(why) = left_out {
+                                    piece.warnings.push(format!("{class}: {why}"));
+                                }
                             }
                             *annotation_counts
                                 .entry(format!("{class}.mapped"))
