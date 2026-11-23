@@ -6,12 +6,15 @@
 
 #![cfg(feature = "pvec-convert")]
 
+use std::io::Cursor;
+
 use acadrust::entities::{Line, Text, Viewport};
 use acadrust::objects::ObjectType;
 use acadrust::tables::Layer;
 use acadrust::types::{Handle, Vector3};
-use acadrust::{CadDocument, DxfWriter, EntityType, LayerStateMask};
+use acadrust::{CadDocument, DwgWriter, DxfWriter, EntityType, LayerStateMask};
 use libviprs::cad::CadSource;
+use libviprs::pvec::DwgProvider;
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
 use libviprs::pvec_convert::{
     CadChoices, CadManifest, ManifestLayer, ManifestLayout, PlotsVisibility, Visibility,
@@ -524,4 +527,42 @@ fn a_chosen_state_applies_under_its_mask_to_what_the_reader_gave() {
         Visibility::Hidden,
         "LOCKED is not in the state"
     );
+}
+
+// A model window the way a real sheet stores it: plan view with float noise in its direction and
+// twist (#1660). It goes through a DWG, which keeps the bits, so the manifest sees what the file says.
+#[test]
+fn issue_1660_the_manifest_lists_a_noisy_plan_window_as_drawn() {
+    let (direction, twist) = (
+        [5.820766091346741e-11, 0.0, 251705.55886499453],
+        1.5700924586837754e-16,
+    );
+    let mut doc = CadDocument::new();
+    doc.add_layout("NOISY").expect("the layout is added");
+    let mut v = window(2, &[]);
+    v.view_direction = Vector3::new(direction[0], direction[1], direction[2]);
+    v.twist_angle = twist;
+    put(&mut doc, "NOISY", EntityType::Viewport(Box::new(v)));
+    set_plot(&mut doc, "NOISY", 420.0, 297.0, 0);
+    let mut bytes = Vec::new();
+    DwgWriter::write_to_writer(Cursor::new(&mut bytes), &doc).expect("the DWG writes");
+
+    let read = AcadrustProvider::open(CadSource::Bytes(&bytes))
+        .expect("opens")
+        .viewports()
+        .expect("viewports");
+    let noisy = read.iter().find(|v| v.id == 2).expect("the window is read");
+    assert_eq!(
+        noisy.view_direction.map(f64::to_bits),
+        direction.map(f64::to_bits)
+    );
+    assert_eq!(noisy.twist.to_bits(), twist.to_bits());
+
+    let m = cad_manifest::<AcadrustProvider>(CadSource::Bytes(&bytes)).expect("the drawing lists");
+    let status: Vec<_> = layout(&m, "NOISY")
+        .viewports
+        .iter()
+        .map(|v| (v.status.as_str(), v.reason.as_deref()))
+        .collect();
+    assert_eq!(status.last(), Some(&("drawn", None)), "{status:?}");
 }

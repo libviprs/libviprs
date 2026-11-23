@@ -362,3 +362,31 @@ fn a_polyline_boundary_keeps_its_bulges() {
     let bulges: Vec<f64> = vertices.iter().map(|q| q.bulge).collect();
     assert_eq!(bulges, vec![0.0, 0.5, 0.0]);
 }
+
+// The reader hands over a view's float noise as stored: snapping it is the converter's call (one
+// tolerance, in `viewport_class`), so every provider is judged the same way (#1660).
+#[test]
+fn issue_1660_the_reader_hands_over_view_noise_as_stored() {
+    let (direction, twist) = (
+        [5.820766091346741e-11, 0.0, 251705.55886499453],
+        1.5700924586837754e-16,
+    );
+    let mut doc = CadDocument::new();
+    doc.add_layout("Sheet A").expect("layout");
+    let mut vp = Viewport::with_size(Vector3::new(100.0, 80.0, 0.0), 120.0, 90.0);
+    vp.id = 2;
+    vp.view_direction = Vector3::new(direction[0], direction[1], direction[2]);
+    vp.twist_angle = twist;
+    let handle = doc
+        .add_entity_to_layout(EntityType::Viewport(Box::new(vp)), "Sheet A")
+        .expect("viewport")
+        .value();
+    let mut bytes = Vec::new();
+    DwgWriter::write_to_writer(Cursor::new(&mut bytes), &doc).expect("write");
+    let v = viewport(&open(&bytes), handle);
+    assert_eq!(
+        v.view_direction.map(f64::to_bits),
+        direction.map(f64::to_bits)
+    );
+    assert_eq!(v.twist.to_bits(), twist.to_bits());
+}
