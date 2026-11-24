@@ -27,8 +27,8 @@
 //!
 //! It does not expand INSERTs, apply layer visibility, or flatten a curve. A DIMENSION is an INSERT
 //! here: AutoCAD draws one from the anonymous block it names (lines, arrowheads and the printed
-//! value as an MTEXT), so the cursor reports it as an INSERT of that block, as the block stands,
-//! with its `DIMENSION_*` class name. One whose block is missing, or that sits in another
+//! value as an MTEXT), so the cursor reports it as an INSERT of that block, placed by the
+//! dimension's insertion point, rotation, scale and normal, with its `DIMENSION_*` class name. One whose block is missing, or that sits in another
 //! dimension's block, is [`RawGeometry::Unmapped`] with the reason, and
 //! [`annotation`](DwgProvider::annotation) rebuilds the first one's text from its measurement.
 //! A spline with no control points (a fit-point spline) is [`RawGeometry::Unmapped`], and so is
@@ -1924,9 +1924,8 @@ impl AcadrustCursor<'_> {
             }
             // A DIMENSION is drawn from the anonymous block it names: its lines, its arrowheads and
             // the text AutoCAD printed, as an MTEXT (#1658). So it is reported as an INSERT of that
-            // block, placed as the block stands (the block holds the dimension in its own
-            // coordinates), and the view pass, the flatten walk and the viewport layer map follow it
-            // like any other INSERT. One reached through another dimension's block is not followed,
+            // block, and the view pass, the flatten walk and the viewport layer map follow it like
+            // any other INSERT. One reached through another dimension's block is not followed,
             // so a chain of dimension blocks cannot run away.
             EntityType::Dimension(d) => {
                 let block = &d.base().block_name;
@@ -1943,15 +1942,25 @@ impl AcadrustCursor<'_> {
                 } else if self.doc.block_records.get(block).is_none() {
                     unmapped(format!("its block {block} is not in the drawing"))
                 } else {
+                    // The block is placed the way an INSERT places its own: at the dimension's
+                    // insertion point (in its OCS), turned by its insertion rotation and scaled
+                    // by its insertion scale, about the block's base point. A dimension AutoCAD
+                    // wrote leaves all four at their defaults, which is the identity.
+                    let b = d.base();
                     let base = self.base_point(block);
-                    match SourceTransform::new([1.0, 0.0, 0.0, 1.0, -base[0], -base[1]]) {
+                    let (sin, cos) = b.insertion_rotation.sin_cos();
+                    let (sx, sy) = (b.insertion_scale.x, b.insertion_scale.y);
+                    let (m00, m01, m10, m11) = (cos * sx, -sin * sy, sin * sx, cos * sy);
+                    let tx = b.insertion_point.x - (m00 * base[0] + m01 * base[1]);
+                    let ty = b.insertion_point.y - (m10 * base[0] + m11 * base[1]);
+                    match SourceTransform::new([m00, m01, m10, m11, tx, ty]) {
                         Ok(transform) => RawGeometry::Insert(BlockRef {
                             block_name: block.clone(),
                             transform,
-                            normal: p3(d.base().normal),
+                            normal: p3(b.normal),
                             grid: ArrayGrid::SINGLE,
-                            elevation: -base[2],
-                            z_scale: 1.0,
+                            elevation: b.insertion_point.z - b.insertion_scale.z * base[2],
+                            z_scale: b.insertion_scale.z,
                         }),
                         Err(err) => unmapped(format!("the block {block} of a dimension: {err}")),
                     }

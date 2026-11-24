@@ -1160,6 +1160,14 @@ impl<'a> PvecConversion<'a> {
             .map(|v| (leaf_key(v), v.paint))
             .collect();
         drop(view.included);
+        // A DIMENSION the view pass expanded as an INSERT of its block has no row of its own
+        // (#1658), so the report counts them under `DIMENSION.expanded`.
+        let dimensions_expanded: u64 = view
+            .expanded_classes
+            .iter()
+            .filter(|(class, _)| is_dimension_class(class))
+            .map(|(_, n)| n)
+            .sum();
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
             .iter()
@@ -1445,6 +1453,9 @@ impl<'a> PvecConversion<'a> {
         let mut texts: Vec<(EntityId, TextBody)> = Vec::new();
         let mut fills: Vec<(Vec<EntityId>, FillBody)> = Vec::new();
         let mut annotation_counts: BTreeMap<String, u64> = BTreeMap::new();
+        if dimensions_expanded > 0 {
+            annotation_counts.insert("DIMENSION.expanded".into(), dimensions_expanded);
+        }
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         /// The pieces of a line or straight polyline inside the sheet `b`, `[min x, min y, max x,
@@ -2153,8 +2164,7 @@ impl<'a> PvecConversion<'a> {
                 // MULTILEADER's or TOLERANCE's text is a text too, and so is a DIMENSION's when it
                 // reaches here, which is only when its block could not be followed (#1658).
                 let class_name = raw.provenance.class_name.as_str();
-                let dimension = class_name.starts_with("DIMENSION_")
-                    || matches!(class_name, "ARC_DIMENSION" | "LARGE_RADIAL_DIMENSION");
+                let dimension = is_dimension_class(class_name);
                 let (text_class, fill_class) = (
                     dimension
                         || matches!(
@@ -3566,6 +3576,13 @@ fn promote_leaf(
             vec![format!("{class}: {e:?}")],
         )),
     }
+}
+
+/// Whether a source class is one of acadrust's dimension classes (`DIMENSION_LINEAR` and the rest,
+/// `ARC_DIMENSION`, `LARGE_RADIAL_DIMENSION`), which the provider reports as INSERTs of their blocks
+/// (#1658).
+fn is_dimension_class(class: &str) -> bool {
+    class.starts_with("DIMENSION_") || matches!(class, "ARC_DIMENSION" | "LARGE_RADIAL_DIMENSION")
 }
 
 /// A leaf the basic extractor does not take: a SPLINE goes through the exact spline extractor

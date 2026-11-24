@@ -316,6 +316,8 @@ fn issue_1658_no_dimension_with_a_block_is_reported_unmapped() {
         .map(|r| (&r.source_class, r.source_handle))
         .collect();
     assert!(unmapped.is_empty(), "{unmapped:?}");
+    // They have no rows of their own now, so the report counts them (#1658 B2).
+    assert_eq!(count(&run, "DIMENSION.expanded"), 11);
 }
 
 #[test]
@@ -325,6 +327,7 @@ fn issue_1658_a_dimension_reached_through_a_dimension_is_not_expanded() {
     let run = convert_fixture("dim-deep", "cad/g13/g13_dimension_deep.dwg", true, false);
     assert!(run.took < Duration::from_secs(20), "took {:?}", run.took);
     assert_eq!(texts(&run), ["10"], "only the outer dimension is drawn");
+    assert_eq!(count(&run, "DIMENSION.expanded"), 1);
     let dims: Vec<_> = run
         .report
         .entities
@@ -762,4 +765,59 @@ fn issue_1658_the_cursor_reports_a_dimension_as_an_insert_of_its_block() {
         RawGeometry::Unmapped { reason } => assert!(reason.contains("*U0"), "{reason}"),
         other => panic!("{other:?}"),
     }
+}
+
+/// g13_dimension written back with acadrust after `edit` changes its dimension.
+fn edited_dimension(edit: impl Fn(&mut acadrust::entities::DimensionBase)) -> Vec<u8> {
+    let mut doc = read("cad/g13/g13_dimension.dwg");
+    let handle = model(&doc)
+        .into_iter()
+        .find(|e| matches!(e, EntityType::Dimension(_)))
+        .map(|e| e.common().handle)
+        .unwrap();
+    if let Some(EntityType::Dimension(d)) = doc.get_entity_mut(handle) {
+        edit(d.base_mut());
+    }
+    DwgWriter::write_to_vec(&doc).unwrap()
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1658_a_dimension_off_its_default_placement_draws_where_it_is_placed() {
+    // Where the middle of the one "10" run lands.
+    let middle = |run: &Run| {
+        let found: Vec<_> = run.records.iter().filter(|r| r.text == "10").collect();
+        assert_eq!(found.len(), 1, "{:?}", texts(run));
+        let (sin, cos) = found[0].rotation.sin_cos();
+        let half = found[0].advance / 2.0;
+        [found[0].x + cos * half, found[0].y + sin * half]
+    };
+    let plain = middle(&convert(
+        "dim-plain",
+        &edited_dimension(|_| {}),
+        true,
+        false,
+    ));
+    // The insertion point carries the whole block with it, as an INSERT's does.
+    let moved = middle(&convert(
+        "dim-moved",
+        &edited_dimension(|b| b.insertion_point = Vector3::new(100.0, 50.0, 0.0)),
+        true,
+        false,
+    ));
+    assert!(
+        (moved[0] - plain[0] - 100.0).abs() < 1e-6 && (moved[1] - plain[1] - 50.0).abs() < 1e-6,
+        "{plain:?} moved to {moved:?}"
+    );
+    // A -Z normal mirrors the block across the Y axis, as it does an INSERT's.
+    let flipped = middle(&convert(
+        "dim-flipped",
+        &edited_dimension(|b| b.normal = Vector3::new(0.0, 0.0, -1.0)),
+        true,
+        false,
+    ));
+    assert!(
+        (flipped[0] + plain[0]).abs() < 1e-6 && (flipped[1] - plain[1]).abs() < 1e-6,
+        "{plain:?} flipped to {flipped:?}"
+    );
 }
