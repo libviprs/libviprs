@@ -807,7 +807,7 @@ pub fn extract_page_paths_from_bytes(
         stroke: PdfStrokeParams::default(),
         colour_operators: std::collections::BTreeMap::new(),
         text: TextReport::default(),
-        tracker: TextTracker::new(),
+        tracker: TextTracker::new(limits),
         font: TextFontOutcome::Unresolved,
         fill: [0, 0, 0],
         stroke_colour: [0, 0, 0],
@@ -1132,7 +1132,7 @@ fn stream_error(page: usize, detail: impl Into<String>) -> PdfVectorError {
 /// Only `FlateDecode` is decoded here, either alone or as the last stage after
 /// `ASCIIHexDecode`/`ASCII85Decode` (which can only shrink). Another filter would be
 /// an expansion this function cannot bound, so it is refused, not guessed at.
-fn stream_bytes(
+pub(super) fn stream_bytes(
     stream: &lopdf::Stream,
     page: usize,
     limits: &PdfVectorLimits,
@@ -1742,7 +1742,7 @@ impl Run<'_> {
                     sequence: self.out.len() as u64,
                     active_clips: &self.clips,
                 },
-            );
+            )?;
             if self.hidden > 0 {
                 self.tracker.runs.truncate(runs_before);
             }

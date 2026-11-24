@@ -1624,3 +1624,4 @@ annotated   not-detected tests/plot_files_1673.rs::issue_1673_bytes_that_are_no_
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_every_refusal_has_its_own_stable_code
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_the_device_facts_are_paper_printable_area_raster_limit_and_text_mode
 annotated   fs-detected  tests/pvec_1668_pdf_decodeparms.rs::the_owners_plan_converts_on_the_pages_that_stopped
+annotated   fs-detected  tests/pvec_1687_cid_truetype_text.rs::a_real_plan_with_cid_truetype_labels_gives_text
