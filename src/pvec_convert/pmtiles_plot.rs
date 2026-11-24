@@ -17,6 +17,8 @@ use crate::pvec::{DwgProvider, SourceUnit, ViewProfile};
 pub struct RasterLimits {
     /// Longest page side, in points.
     pub max_page_pts: f64,
+    /// Most pixels in the rendered page.
+    pub max_pixels: u64,
     /// Most zoom levels in one archive.
     pub max_zoom_levels: u32,
     /// Most tiles in one archive.
@@ -27,6 +29,7 @@ impl Default for RasterLimits {
     fn default() -> Self {
         Self {
             max_page_pts: 14_400.0,
+            max_pixels: 1 << 28,
             max_zoom_levels: 16,
             max_tiles: 100_000,
         }
@@ -84,6 +87,16 @@ pub enum PmTilesPlotError {
     /// The dpi is outside what is allowed.
     #[error("dpi {0} is outside 36 to 600")]
     DpiOutOfRange(u32),
+    /// The rendered page would have too many pixels.
+    #[error("{layout} would be {pixels} pixels, the limit is {max}")]
+    TooManyPixels {
+        /// The layout.
+        layout: String,
+        /// Pixels it would have.
+        pixels: u64,
+        /// The limit.
+        max: u64,
+    },
     /// Too many zoom levels.
     #[error("{layout} needs {levels} zoom levels, the limit is {max}")]
     TooManyZoomLevels {

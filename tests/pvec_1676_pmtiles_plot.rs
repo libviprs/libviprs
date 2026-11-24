@@ -313,6 +313,26 @@ fn issue_1676_a_page_longer_than_the_limit_is_refused_before_anything_is_drawn()
 
 #[test]
 #[cfg_attr(miri, ignore)]
+fn issue_1676_a_page_that_renders_to_too_many_pixels_is_refused_before_it_is_rendered() {
+    // 100 x 50 mm at 600 dpi is 2362 x 1181 px, about 2.8 million pixels.
+    let (out, dir) = plot_tiles("pixels-limit", horizontal(), |p| {
+        p.dpi(600).limits(RasterLimits {
+            max_pixels: 1_000_000,
+            ..RasterLimits::default()
+        })
+    });
+    let err = out.unwrap_err();
+    assert!(
+        matches!(err, PmTilesPlotError::TooManyPixels { max: 1_000_000, .. }),
+        "{err:?}"
+    );
+    assert_eq!(err.code(), "PLOT_PIXELS");
+    assert!(files(&dir).is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1676_a_dpi_outside_the_range_is_refused() {
     for dpi in [0, 35, 601, u32::MAX] {
         let (out, dir) = plot_tiles("dpi", horizontal(), |p| p.dpi(dpi));

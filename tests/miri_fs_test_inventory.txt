@@ -930,6 +930,7 @@ annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_with_n
 annotated   fs-detected  tests/pvec_1676_pmtiles_plot.rs::issue_1676_a_cancelled_plot_writes_nothing
 annotated   fs-detected  tests/pvec_1676_pmtiles_plot.rs::issue_1676_a_dpi_outside_the_range_is_refused
 annotated   fs-detected  tests/pvec_1676_pmtiles_plot.rs::issue_1676_a_page_longer_than_the_limit_is_refused_before_anything_is_drawn
+annotated   fs-detected  tests/pvec_1676_pmtiles_plot.rs::issue_1676_a_page_that_renders_to_too_many_pixels_is_refused_before_it_is_rendered
 annotated   fs-detected  tests/pvec_1676_pmtiles_plot.rs::issue_1676_a_sample_tile_has_the_line_where_the_sheet_puts_it
 annotated   fs-detected  tests/pvec_1676_pmtiles_plot.rs::issue_1676_a_spent_deadline_writes_nothing
 annotated   fs-detected  tests/pvec_1676_pmtiles_plot.rs::issue_1676_an_unknown_layout_is_the_plots_own_refusal
