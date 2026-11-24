@@ -152,14 +152,19 @@ fn inflation_within_bound(bytes: &[u8]) -> Result<(), PlotFileError> {
 #[cfg(feature = "dwg-acadrust")]
 #[must_use]
 pub fn default_plot_style() -> PlotStyleTable {
-    todo!("issue #1670")
+    let mut table = PlotStyleTable::identity("libviprs-monochrome.ctb");
+    for entry in table.aci_entries.iter_mut().skip(1) {
+        entry.color = Some([0, 0, 0]);
+        entry.lineweight = 9;
+    }
+    table
 }
 
 /// The built-in PDF PC3, the JSON kind: the PDF device, text kept as text, a raster limit of 400 dpi
 /// and a full bleed ISO A3 page, which only fills a layout that has no paper of its own (issue #1670).
 #[must_use]
 pub fn default_pc3() -> Pc3 {
-    todo!("issue #1670")
+    Pc3::parse(include_bytes!("default-pdf.pc3")).expect("the built-in PC3 is a JSON PC3")
 }
 
 /// What a PC3 says about the device that plots: the paper, the area of it the device prints, and
