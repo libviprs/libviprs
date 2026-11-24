@@ -163,12 +163,34 @@ pub enum LimitError {
     },
 }
 
+impl Limit {
+    /// A stable, upper snake code for this limit (#1674): `LIMIT_ENTITIES`, `LIMIT_BLOCK_DEPTH`...
+    /// Unlike [`name`](Self::name) it names no field, so renaming one does not change it.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::BlockDepth => "LIMIT_BLOCK_DEPTH",
+            Self::Entities => "LIMIT_ENTITIES",
+            Self::PolylineVertices => "LIMIT_POLYLINE_VERTICES",
+            Self::SplineControlPoints => "LIMIT_SPLINE_CONTROL_POINTS",
+            Self::SplineKnots => "LIMIT_SPLINE_KNOTS",
+            Self::SplineWeights => "LIMIT_SPLINE_WEIGHTS",
+            Self::InsertGrid => "LIMIT_INSERT_GRID",
+            Self::ExpandedInstances => "LIMIT_EXPANDED_INSTANCES",
+            Self::AllocationBytes => "LIMIT_ALLOCATION_BYTES",
+            Self::NameBytes => "LIMIT_NAME_BYTES",
+        }
+    }
+}
+
 impl LimitError {
-    /// A stable, upper snake code for this refusal (#1674): `LIMIT_ENTITIES` and the like, or
-    /// `BLOCK_CYCLE`.
+    /// A stable, upper snake code for this refusal (#1674): the limit's own code, or `BLOCK_CYCLE`.
     #[must_use]
     pub fn code(&self) -> &'static str {
-        ""
+        match self {
+            Self::Exceeded { limit, .. } => limit.code(),
+            Self::BlockCycle { .. } => "BLOCK_CYCLE",
+        }
     }
 }
 

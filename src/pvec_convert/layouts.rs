@@ -26,12 +26,14 @@
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use thiserror::Error;
 
 use super::{PvecConversion, PvecConversionOutput, PvecConvertError, report_failure};
 use crate::cad::CadSource;
+use crate::observe::EngineEvent;
 use crate::pvec::dwg_acadrust::AcadrustProvider;
 use crate::pvec::publish::{PublishError, report_path};
 use crate::pvec::report::SheetSummary;
@@ -78,18 +80,33 @@ pub enum LayoutSetError {
 }
 
 impl LayoutSetError {
-    /// A stable, upper snake code for this failure (#1674).
+    /// A stable, upper snake code for this failure (#1674), for a caller that has to tell one from
+    /// another without reading the message.
     #[must_use]
     pub fn code(&self) -> &'static str {
-        ""
+        match self {
+            Self::NotADirectory(_) => "NOT_A_DIRECTORY",
+            Self::StemRequired => "STEM_REQUIRED",
+            Self::Open(_) => "OPEN_FAILED",
+            Self::Layouts(_) => "LAYOUTS_FAILED",
+            Self::LayoutNotFound { .. } => "LAYOUT_NOT_FOUND",
+            Self::Index(_) => "INDEX_FAILED",
+            Self::Cancelled => "CANCELLED",
+            Self::Deadline => "DEADLINE",
+        }
     }
 }
 
 impl SheetSkip {
-    /// A stable, upper snake code for why this sheet has no file (#1674).
+    /// A stable, upper snake code for why this sheet has no file (#1674): `EMPTY`,
+    /// `EMPTY_AFTER_VIEW`, or the code of the conversion error that failed it.
     #[must_use]
     pub fn code(&self) -> &'static str {
-        ""
+        match self {
+            Self::Empty => "EMPTY",
+            Self::EmptyAfterView => "EMPTY_AFTER_VIEW",
+            Self::Failed(e) => e.code(),
+        }
     }
 }
 
@@ -149,6 +166,7 @@ pub struct PvecLayoutSet<'a> {
     select: Option<Vec<String>>,
     #[allow(clippy::type_complexity)]
     sheet: Box<dyn for<'s> Fn(PvecConversion<'s>) -> PvecConversion<'s> + 'a>,
+    deadline: Option<Duration>,
 }
 
 impl<'a> PvecLayoutSet<'a> {
@@ -161,6 +179,7 @@ impl<'a> PvecLayoutSet<'a> {
             stem: None,
             select: None,
             sheet: Box::new(|c| c),
+            deadline: None,
         }
     }
 
@@ -179,9 +198,13 @@ impl<'a> PvecLayoutSet<'a> {
         self
     }
 
-    /// A wall-clock bound on the whole set (#1674).
+    /// A wall-clock bound on the whole set, counted from `convert` or `convert_with` (#1674). When
+    /// it passes the set stops with [`LayoutSetError::Deadline`]: sheets already published stay, the
+    /// rest never start and no index is written. A deadline a sheet's own options set (with
+    /// [`PvecConversion::deadline`]) bounds that sheet only, and fails it with the code `DEADLINE`.
     #[must_use]
-    pub fn deadline(self, _within: std::time::Duration) -> Self {
+    pub fn deadline(mut self, within: std::time::Duration) -> Self {
+        self.deadline = Some(within);
         self
     }
 
@@ -205,10 +228,11 @@ impl<'a> PvecLayoutSet<'a> {
     ///
     /// [`LayoutSetError`]: only for what stops the whole set.
     pub fn convert(self) -> Result<LayoutSetOutput, LayoutSetError> {
+        let at = self.deadline.and_then(|d| Instant::now().checked_add(d));
         self.check().and_then(|stem| {
             let provider = AcadrustProvider::open(self.source).map_err(LayoutSetError::Open)?;
             let unit = provider.source_unit();
-            self.run(&provider, Some(unit), &stem)
+            self.run(&provider, Some(unit), &stem, at)
         })
     }
 
@@ -219,9 +243,10 @@ impl<'a> PvecLayoutSet<'a> {
     ///
     /// As [`convert`](Self::convert).
     pub fn convert_with<P: DwgProvider>(self) -> Result<LayoutSetOutput, LayoutSetError> {
+        let at = self.deadline.and_then(|d| Instant::now().checked_add(d));
         self.check().and_then(|stem| {
             let provider = P::open(self.source).map_err(LayoutSetError::Open)?;
-            self.run(&provider, None, &stem)
+            self.run(&provider, None, &stem, at)
         })
     }
 
@@ -243,6 +268,7 @@ impl<'a> PvecLayoutSet<'a> {
         provider: &P,
         header_unit: Option<SourceUnit>,
         stem: &str,
+        at: Option<Instant>,
     ) -> Result<LayoutSetOutput, LayoutSetError> {
         /// An error and its sources, for the index.
         fn chain(e: &dyn std::error::Error) -> String {
@@ -316,6 +342,8 @@ impl<'a> PvecLayoutSet<'a> {
 
         let mut sheets = Vec::new();
         let mut rows = Vec::new();
+        let total = wanted.iter().filter(|w| **w).count() as u32;
+        let mut started = 0u32;
         for (n, layout) in paper.iter().enumerate().filter(|(n, _)| wanted[*n]) {
             let nn = format!("{:0width$}", n + 1);
             let name = format!("{stem}.{nn}-{}.pvec", slug(&layout.name));
@@ -325,10 +353,37 @@ impl<'a> PvecLayoutSet<'a> {
                     .view_profile(ViewProfile::print_profile(layout.name.as_str())),
             );
             c.view_profile.space = SpaceSelection::PaperLayout(layout.name.clone());
+            if let Some(at) = at {
+                c.cancel = c.cancel.with_deadline(at);
+            }
             if c.cancel.is_cancelled() {
-                return Err(LayoutSetError::Cancelled);
+                return Err(if c.cancel.deadline_passed() {
+                    LayoutSetError::Deadline
+                } else {
+                    LayoutSetError::Cancelled
+                });
             }
             let observer = c.observer.clone();
+            started += 1;
+            let tell = |event: EngineEvent| {
+                if let Some(o) = &observer {
+                    o.on_event(event);
+                }
+            };
+            tell(EngineEvent::ConversionSheetStarted {
+                index: started,
+                total,
+                layout: layout.name.clone(),
+            });
+            let finish = |status: &str, code: Option<&str>| {
+                tell(EngineEvent::ConversionSheetFinished {
+                    index: started,
+                    total,
+                    layout: layout.name.clone(),
+                    status: status.to_owned(),
+                    code: code.map(str::to_owned),
+                });
+            };
             let result = match sheet_skip(provider, layout, &viewports) {
                 Ok(Some(skipped)) => Ok(Err(skipped)),
                 Err(e) => Err(PvecConvertError::View(e.into())),
@@ -339,7 +394,15 @@ impl<'a> PvecLayoutSet<'a> {
             };
             let mut outcome = match report_failure(observer.as_deref(), result) {
                 Ok(done) => done,
-                Err(PvecConvertError::Cancelled) => return Err(LayoutSetError::Cancelled),
+                Err(PvecConvertError::Cancelled) => {
+                    finish("cancelled", Some("CANCELLED"));
+                    return Err(LayoutSetError::Cancelled);
+                }
+                // The set's own deadline ends the set. One a sheet's options set only fails that sheet.
+                Err(PvecConvertError::Deadline) if at.is_some_and(|at| Instant::now() >= at) => {
+                    finish("deadline", Some("DEADLINE"));
+                    return Err(LayoutSetError::Deadline);
+                }
                 Err(
                     PvecConvertError::NothingStorable { .. }
                     | PvecConvertError::Write(WriteError::NoGeometry),
@@ -361,6 +424,13 @@ impl<'a> PvecLayoutSet<'a> {
                 Err(SheetSkip::EmptyAfterView) => ("empty-after-view", None, None),
                 Err(SheetSkip::Failed(e)) => ("failed", Some(chain(e)), None),
             };
+            finish(
+                status,
+                match &outcome {
+                    Err(SheetSkip::Failed(e)) => Some(e.code()),
+                    _ => None,
+                },
+            );
             let sheet = outcome.as_ref().ok().and_then(|o| o.report.sheet.clone());
             rows.push(IndexRow {
                 layout: layout.name.clone(),
