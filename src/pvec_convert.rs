@@ -2334,12 +2334,53 @@ impl<'a> PvecConversion<'a> {
                         }
                     }
                 }
+                // The ACI the stroke is drawn in, through BYLAYER and BYBLOCK; a true colour has none.
+                let effective_aci = match paints.get(&leaf_key_of(&raw.provenance)) {
+                    Some(LeafPaint::Colour(SourceColour::Aci(i))) if table.is_some() => Some(*i),
+                    _ => None,
+                };
+                // The entity's style input as the drawing gives it, with the linetype scale taken to the
+                // output and the table's lineweight and linetype for the stroke's ACI laid over it.
+                let base_input = || {
+                    let mut input = dwg_style_input(&raw.style, true);
+                    input.linetype_scale *= ltscale
+                        * match window.map(|k| &windows[k].1) {
+                            Some(Window::Drawn { map, .. }) if !paper_dashes => {
+                                map[0].hypot(map[1])
+                            }
+                            _ => dash_k,
+                        };
+                    // The table's lineweight and linetype for the stroke's ACI beat the
+                    // object's; an entry that says "object" leaves them (#1630).
+                    if let (Some(t), Some(aci)) = (table, effective_aci) {
+                        if let Some(mm) = t.resolve_lineweight(aci) {
+                            input.lineweight = Some(DwgLineweight::Hundredths(
+                                (f64::from(mm) * 100.0).round() as i16,
+                            ));
+                        }
+                        // Pattern lengths are in millimetres like the table's lineweights,
+                        // `linepattern_size` long: 0 solid, 1 dashed, 2 dotted, 3 dash dot.
+                        let size = f64::from(t.aci_entries[usize::from(aci)].linepattern_size);
+                        let pattern = match t.aci_entries[usize::from(aci)].linetype {
+                            0 => Some(Vec::new()),
+                            1 => Some(vec![size, -size / 2.0]),
+                            2 => Some(vec![0.0, -size / 2.0]),
+                            3 => Some(vec![size, -size / 4.0, 0.0, -size / 4.0]),
+                            _ => None,
+                        };
+                        if let Some(p) = pattern {
+                            input.linetype_scale = 1.0;
+                            input.linetype_name = None;
+                            input.linetype_elements = Some(p).filter(|p| !p.is_empty());
+                        }
+                    }
+                    input
+                };
                 // PLINEGEN off (#1691): a polyline's pattern starts anew on every side, so each side
                 // is a record of its own with the entity's style and provenance, the way a piece cut
                 // at an edge is. Only a polyline that has a pattern is split. A solid one, or one
                 // with PLINEGEN on, stays whole, and the flag is the entity's own: the header's
                 // PLINEGEN only seeds the polylines drawn after it.
-                let mut fit_sides = false;
                 if components.line_style
                     && !frozen_here
                     && matches!(raw.geometry, RawGeometry::Polyline { .. })
@@ -2356,9 +2397,91 @@ impl<'a> PvecConversion<'a> {
                         .handle
                         .is_some_and(|h| !provider.polyline_linetype_generation(h))
                 {
-                    // Each side of an uncut polyline is also fitted: its pattern is stretched so the side
-                    // ends on a dash (#1694), where the style is built below.
-                    fit_sides = uncut;
+                    // Each side of an uncut polyline also has its pattern centred (#1699). The pattern as it
+                    // is drawn, every element in the output's unit and on the alternating slots a dash
+                    // pattern takes (a gap first gets a zero dash before it), the way `dwg_line_style`
+                    // writes it. Only a pattern of whole dash and gap pairs that starts on a dash and whose
+                    // last dash is not a dot is centred.
+                    let centre: Option<Vec<f64>> = if uncut {
+                        let input = base_input();
+                        let mut pattern: Vec<f64> = Vec::new();
+                        for e in input.linetype_elements.iter().flatten() {
+                            let pen_down = *e >= 0.0 || e.is_nan();
+                            if pen_down != pattern.len().is_multiple_of(2) {
+                                pattern.push(0.0);
+                            }
+                            pattern.push(e.abs() * input.linetype_scale);
+                        }
+                        let n = pattern.len();
+                        let period: f64 = pattern.iter().sum();
+                        (n >= 2
+                            && n.is_multiple_of(2)
+                            && pattern[0] > 0.0
+                            && pattern[n - 2] > 0.0
+                            && period.is_finite()
+                            && period > 0.0)
+                            .then_some(pattern)
+                    } else {
+                        None
+                    };
+                    // A side of two points whose pattern fits n >= 1 times is written as three records that
+                    // join end to end (#1699). PVec's line style is one cyclic dash array and a phase per
+                    // record, and a phase can start inside a dash but not lengthen one, so the first and
+                    // the last dash, each d + r / 2 long, cannot be one cyclic pattern. With the pattern's
+                    // extent e = n p - g, its period p and its last gap g, and r = L - e: a solid lead of
+                    // r / 2, the pattern at its own period over e, and a solid tail of r / 2.
+                    let centred = |piece: Done| -> Result<Vec<Done>, PvecConvertError> {
+                        let Some(pattern) = &centre else {
+                            return Ok(vec![piece]);
+                        };
+                        let Some(Curve::Polyline(pl)) = piece.geometry.geometry() else {
+                            return Ok(vec![piece]);
+                        };
+                        let [a, b] = pl.vertices() else {
+                            return Ok(vec![piece]);
+                        };
+                        let side = (b.x - a.x).hypot(b.y - a.y);
+                        let period: f64 = pattern.iter().sum();
+                        let gap = pattern[pattern.len() - 1];
+                        let periods = ((side + gap) / period + 1e-9).floor();
+                        let half = (side - (periods * period - gap)) / 2.0;
+                        if !(side.is_finite() && periods >= 1.0 && half > 1e-9 * side.max(1.0)) {
+                            return Ok(vec![piece]);
+                        }
+                        let t = half / side;
+                        let at = |t: f64| {
+                            let mut q = a.clone();
+                            q.x = a.x + (b.x - a.x) * t;
+                            q.y = a.y + (b.y - a.y) * t;
+                            q
+                        };
+                        let fidelity = piece.geometry.fidelity();
+                        let parts: Option<Vec<Normalized2DGeometry>> =
+                            [(0.0, t), (t, 1.0 - t), (1.0 - t, 1.0)]
+                                .into_iter()
+                                .map(|(from, to)| {
+                                    let line = Polyline::new(vec![at(from), at(to)]).ok()?;
+                                    Normalized2DGeometry::from_curve(
+                                        Curve::Polyline(line),
+                                        fidelity,
+                                    )
+                                    .ok()
+                                })
+                                .collect();
+                        let Some(parts) = parts else {
+                            return Ok(vec![piece]);
+                        };
+                        let mut out = Vec::with_capacity(3);
+                        for (k, part) in parts.into_iter().enumerate() {
+                            let mut one = gated(part, &raw.provenance, gate)?;
+                            one.solid = k != 1;
+                            if k == 0 {
+                                one.warnings.extend(piece.warnings.clone());
+                            }
+                            out.push(one);
+                        }
+                        Ok(out)
+                    };
                     let mut restarted: Vec<Done> = Vec::new();
                     for d in std::iter::once(done).chain(std::mem::take(&mut more)) {
                         let sides: Vec<Curve> = match d.geometry.geometry() {
@@ -2396,7 +2519,13 @@ impl<'a> PvecConversion<'a> {
                                             if k == 0 {
                                                 piece.warnings.extend(d.warnings.clone());
                                             }
-                                            restarted.push(piece);
+                                            match centred(piece) {
+                                                Ok(v) => restarted.extend(v),
+                                                Err(e) => {
+                                                    failure = Some(e);
+                                                    break;
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             failure = Some(e);
@@ -2408,7 +2537,13 @@ impl<'a> PvecConversion<'a> {
                                     break;
                                 }
                             }
-                            _ => restarted.push(d),
+                            _ => match centred(d) {
+                                Ok(v) => restarted.extend(v),
+                                Err(e) => {
+                                    failure = Some(e);
+                                    break;
+                                }
+                            },
                         }
                     }
                     if failure.is_some() {
@@ -2653,84 +2788,16 @@ impl<'a> PvecConversion<'a> {
                         && done.geometry.geometry().is_some())
                     .then(|| {
                         // Counted per kept entity in `open`, once the writer has said which it kept.
-                        // The ACI the stroke is drawn in, through BYLAYER and BYBLOCK; a true colour has none.
-                        let effective_aci = match paints.get(&leaf_key_of(&raw.provenance)) {
-                            Some(LeafPaint::Colour(SourceColour::Aci(i))) if table.is_some() => {
-                                Some(*i)
-                            }
-                            _ => None,
-                        };
                         let (style, bad_style, own_colour) = if pending.is_some() {
                             // A carrier is never drawn: the stream record is what shows.
                             let c = LineStyleComponent::new(id, None, None, false).ok();
                             let bad = c.is_none();
                             (c, bad, false)
                         } else if components.line_style {
-                            let mut input = dwg_style_input(&raw.style, true);
-                            input.linetype_scale *= ltscale
-                                * match window.map(|k| &windows[k].1) {
-                                    Some(Window::Drawn { map, .. }) if !paper_dashes => {
-                                        map[0].hypot(map[1])
-                                    }
-                                    _ => dash_k,
-                                };
-                            // The table's lineweight and linetype for the stroke's ACI beat the
-                            // object's; an entry that says "object" leaves them (#1630).
-                            if let (Some(t), Some(aci)) = (table, effective_aci) {
-                                if let Some(mm) = t.resolve_lineweight(aci) {
-                                    input.lineweight = Some(DwgLineweight::Hundredths(
-                                        (f64::from(mm) * 100.0).round() as i16,
-                                    ));
-                                }
-                                // Pattern lengths are in millimetres like the table's lineweights,
-                                // `linepattern_size` long: 0 solid, 1 dashed, 2 dotted, 3 dash dot.
-                                let size =
-                                    f64::from(t.aci_entries[usize::from(aci)].linepattern_size);
-                                let pattern = match t.aci_entries[usize::from(aci)].linetype {
-                                    0 => Some(Vec::new()),
-                                    1 => Some(vec![size, -size / 2.0]),
-                                    2 => Some(vec![0.0, -size / 2.0]),
-                                    3 => Some(vec![size, -size / 4.0, 0.0, -size / 4.0]),
-                                    _ => None,
-                                };
-                                if let Some(p) = pattern {
-                                    input.linetype_scale = 1.0;
-                                    input.linetype_name = None;
-                                    input.linetype_elements = Some(p).filter(|p| !p.is_empty());
-                                }
-                            }
-                            // #1694: a restarted side starts on a dash and is stretched, every element by
-                            // the same factor, so it ends on one too. With the first dash d and the
-                            // period p, a side of length L holds n = floor((L - d) / p) periods and the
-                            // pattern grows by L / (n p + d). A side that is already d plus whole
-                            // periods, or shorter than d, or a pattern that does not start on a dash and
-                            // close on a gap, is left as it is.
-                            if fit_sides
-                                && let Some(Curve::Polyline(p)) = done.geometry.geometry()
-                                && let [a, b] = p.vertices()
-                                && let Some(elements) = &input.linetype_elements
-                            {
-                                let mut pattern: Vec<f64> = Vec::with_capacity(elements.len());
-                                for e in elements {
-                                    let pen_down = *e >= 0.0 || e.is_nan();
-                                    if pen_down != pattern.len().is_multiple_of(2) {
-                                        pattern.push(0.0);
-                                    }
-                                    pattern.push(e.abs() * input.linetype_scale);
-                                }
-                                let side = (b.x - a.x).hypot(b.y - a.y);
-                                let period: f64 = pattern.iter().sum();
-                                let dash = pattern[0];
-                                if pattern.len().is_multiple_of(2)
-                                    && dash > 0.0
-                                    && period.is_finite()
-                                    && period > 0.0
-                                    && side.is_finite()
-                                    && side > dash
-                                {
-                                    let n = ((side - dash) / period + 1e-9).floor();
-                                    input.linetype_scale *= side / (n * period + dash);
-                                }
+                            let mut input = base_input();
+                            // A solid stub of a centred side (#1699) is drawn without a pattern.
+                            if done.solid {
+                                input.linetype_elements = Some(Vec::new());
                             }
                             // P-8: a layout that does not print lineweights has none on its sheet.
                             if drop_widths {
@@ -3768,6 +3835,9 @@ struct Done {
     classification: Classification,
     geometry: Normalized2DGeometry,
     warnings: Vec<String>,
+    /// A solid stub at an end of a polyline side whose pattern is centred (#1699): its style carries no
+    /// dash array.
+    solid: bool,
 }
 
 /// The lines a LEADER, MULTILEADER or TOLERANCE leaf draws (#1671), each as a leaf of its own with
@@ -3876,6 +3946,7 @@ fn without_geometry(classification: Classification, warnings: Vec<String>) -> Do
         classification,
         geometry,
         warnings,
+        solid: false,
     }
 }
 
@@ -4114,6 +4185,7 @@ fn gated(
         classification: Classification::supported(basis, class),
         geometry: record,
         warnings: Vec::new(),
+        solid: false,
     })
 }
 
