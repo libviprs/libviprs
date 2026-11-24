@@ -824,6 +824,12 @@ annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_fill_behind_a
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1692_a_ctb_lineweight_is_one_more_than_the_index_of_the_list
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_transparent_fill_is_thinned_toward_the_paper
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_fill_crossing_the_viewport_edge_is_cut_to_it
+annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_a_two_line_custom_pattern_is_drawn_inside_its_boundary
+annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_a_dashed_pattern_line_is_cut_into_dashes
+annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_an_ansi_style_pattern_is_45_degree_lines_at_its_spacing
+annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_pattern_lines_stop_at_an_island
+annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_a_pattern_too_dense_to_draw_is_refused_and_the_hatch_is_filled
+annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_a_tiny_dash_is_refused_too
 annotated   fs-detected  tests/pvec_1670_owner_layouts.rs::issue_1670_owner_layouts_match_the_plotted_pdf
 annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_a_layout_at_1_to_1_keeps_its_patterns_as_drawn
 annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_dash_and_dash_dot_periods_are_paper_millimetres_at_1_to_0_04
