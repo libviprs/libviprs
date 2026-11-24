@@ -285,6 +285,25 @@ pub enum EngineEvent {
     /// A conversion published its artifact and report. The last event of a successful run.
     ConversionPublished,
 
+    /// A set of sheets (a layout set or a PDF plot) started sheet `index` of `total` (#1674). `index`
+    /// counts from 1 over the sheets the run was asked for, so "sheet 12 of 64" is `index: 12, total: 64`.
+    ConversionSheetStarted {
+        index: u32,
+        total: u32,
+        layout: String,
+    },
+
+    /// Sheet `index` of `total` is done (#1674). `status` is `written`, `empty`, `empty-after-view`,
+    /// `failed`, `cancelled` or `deadline`; `code` is the stable error code of a failed, cancelled or
+    /// timed out sheet and `None` otherwise.
+    ConversionSheetFinished {
+        index: u32,
+        total: u32,
+        layout: String,
+        status: String,
+        code: Option<String>,
+    },
+
     /// A conversion made a diagnostic about one entity or about the run (issue #1416).
     ///
     /// Emitted by `pvec_convert` for each entity that did not become geometry, as it is
@@ -379,6 +398,8 @@ impl EngineEvent {
             Self::ConversionChunkWritten { .. } => "conversion_chunk_written",
             Self::ConversionSpoolSpilled { .. } => "conversion_spool_spilled",
             Self::ConversionPublished => "conversion_published",
+            Self::ConversionSheetStarted { .. } => "conversion_sheet_started",
+            Self::ConversionSheetFinished { .. } => "conversion_sheet_finished",
             Self::ConversionDiagnostic { .. } => "conversion_diagnostic",
             Self::PipelineComplete => "pipeline_complete",
         }

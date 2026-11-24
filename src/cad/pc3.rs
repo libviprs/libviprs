@@ -48,6 +48,22 @@ pub enum Pc3Error {
     NotFinite(&'static str),
 }
 
+impl Pc3Error {
+    /// A stable, upper snake code for this refusal (#1674).
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Pc3Error::TooLarge(_) => "PC3_TOO_LARGE",
+            Pc3Error::TooDeep => "PC3_TOO_DEEP",
+            Pc3Error::Unrecognised => "PC3_UNRECOGNISED",
+            Pc3Error::Syntax(..) => "PC3_SYNTAX",
+            Pc3Error::BinaryNotEditable(_) => "PC3_BINARY_NOT_EDITABLE",
+            Pc3Error::Missing(_) => "PC3_MISSING",
+            Pc3Error::NotFinite(_) => "PC3_NOT_FINITE",
+        }
+    }
+}
+
 impl fmt::Display for Pc3Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
