@@ -1661,6 +1661,12 @@ annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_an_open_polylin
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_every_side_keeps_the_entitys_linetype_and_a_line_is_untouched
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_the_entitys_flag_wins_over_the_headers
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_the_same_polyline_with_plinegen_on_keeps_its_one_continuous_pattern
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_style_one_is_the_first_entry_of_the_list
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_style_255_keeps_the_objects_lineweight_even_with_a_list_that_long
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_style_two_is_the_second_entry
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_the_last_entry_is_reachable_by_its_number
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_a_first_entry_of_zero_is_the_thinnest_line
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_zero_and_a_number_past_the_list_keep_the_objects_lineweight
 annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_line_that_really_leaves_the_plane_is_still_geometry_3d
 annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_line_whose_z_differs_by_float_noise_converts
 annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_line_with_the_same_tiny_z_at_both_ends_converts

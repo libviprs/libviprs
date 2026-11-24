@@ -926,8 +926,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1691 adds 8: the eight `tests/pvec_1691_plinegen.rs` cells that write a drawing with acadrust and convert it into a temp dir. It said 1407 before this line moved.
 /// #1694 adds 9: the nine `tests/pvec_1694_pattern_fit.rs` cells that write a drawing with acadrust and convert it into a temp dir. It said 1415 before this line moved.
 /// #1695 adds 11: the `tests/pvec_1695_float_noise_z.rs` cells that write a drawing with acadrust and convert it into a temp dir. It said 1424 before this line moved.
-/// #1676 adds 12: the `tests/pvec_1676_pmtiles_plot.rs` cells that plot a mock drawing into a temp dir and read the archives back. It said 1435 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1447;
+/// #1692 adds 6: the `tests/pvec_1692_ctb_lineweight.rs` cells that write a drawing and convert it into a temp dir. It said 1435 before this line moved.
+/// #1676 adds 12: the `tests/pvec_1676_pmtiles_plot.rs` cells that plot a mock drawing into a temp dir and read the archives back. It said 1441 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1453;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
