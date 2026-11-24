@@ -483,7 +483,8 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1365 adds 1: `tests/dependency_policy.rs::jbig2_adds_the_decoder_and_its_ccitt_crate_and_never_the_simd_one`, which runs `cargo tree`. It said 56 before this line moved.
 /// #1475 adds 1: `tests/pvec_drift.rs::n_1471_the_example_prints_both_reports_and_fails_on_drift`, which runs the `pvec_drift` example. It said 57 before this line moved.
 /// #1515 adds 1: `tests/pvec_bounded_memory_bench.rs::bounded_memory_stages_bench`, which runs its children. It said 58 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 59;
+/// #1670 adds 2: the two `tests/pvec_1670_owner_layouts.rs` cells, which run `tools/plot_recall.py` (and are inert without the owner's files). It said 59 before this line moved.
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 61;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
@@ -928,8 +929,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1695 adds 11: the `tests/pvec_1695_float_noise_z.rs` cells that write a drawing with acadrust and convert it into a temp dir. It said 1424 before this line moved.
 /// #1692 adds 6: the `tests/pvec_1692_ctb_lineweight.rs` cells that write a drawing and convert it into a temp dir. It said 1435 before this line moved.
 /// #1676 adds 14: the `tests/pvec_1676_pmtiles_plot.rs` cells that plot a mock drawing into a temp dir and read the archives back. It said 1441 before this line moved.
-/// #1670 adds 35: the `tests/pvec_1670_plot_pdf.rs` cells that plot a drawing written in memory into a temp dir and read the PDF back, and the owner-only `tests/pvec_1670_owner_layouts.rs`. It said 1455 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1490;
+/// #1670 adds 41: the `tests/pvec_1670_plot_pdf.rs` cells that plot a drawing written in memory into a temp dir and read the PDF back, and the owner-only `tests/pvec_1670_owner_layouts.rs`. It said 1455 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1496;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

@@ -829,6 +829,11 @@ annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_text_is_sized_s
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_sloped_line_is_drawn_as_it_looks_from_above
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_fill_takes_the_plot_style_tables_colour_for_its_aci
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_strokes_thinner_than_the_hairline_limit_are_drawn_at_0_w
+annotated   fs-detected  tests/pvec_1670_plot_safety.rs::issue_1670_a_directory_the_plot_did_not_make_is_never_removed
+annotated   fs-detected  tests/pvec_1670_plot_safety.rs::issue_1670_a_failed_plot_leaves_an_existing_output_alone
+annotated   fs-detected  tests/pvec_1670_plot_safety.rs::issue_1670_a_good_plot_replaces_an_existing_output
+annotated   fs-detected  tests/pvec_1670_plot_safety.rs::issue_1670_a_page_over_the_pdf_limit_is_refused
+annotated   fs-detected  tests/pvec_1670_font.rs::issue_1670_the_faces_names_carry_no_reserved_name
 annotated   fs-detected  tests/pvec_1670_font.rs::issue_1670_the_text_is_set_in_an_embedded_true_type_face
 annotated   fs-detected  tests/pvec_1670_font.rs::issue_1670_the_advance_widths_are_arials
 annotated   fs-detected  tests/pvec_1670_font.rs::issue_1670_the_text_is_selectable
@@ -840,7 +845,8 @@ annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_an_ansi_s
 annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_pattern_lines_stop_at_an_island
 annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_a_pattern_too_dense_to_draw_is_refused_and_the_hatch_is_filled
 annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_a_tiny_dash_is_refused_too
-annotated   fs-detected  tests/pvec_1670_owner_layouts.rs::issue_1670_owner_layouts_match_the_plotted_pdf
+annotated   fs-detected  tests/pvec_1670_owner_layouts.rs::issue_1670_owner_layouts_match_the_plotted_pdf_with_the_default_rules
+annotated   fs-detected  tests/pvec_1670_owner_layouts.rs::issue_1670_owner_layouts_match_the_plotted_pdf_with_the_owner_knob
 annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_a_layout_at_1_to_1_keeps_its_patterns_as_drawn
 annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_dash_and_dash_dot_periods_are_paper_millimetres_at_1_to_0_04
 annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_a_callers_plot_scale_carries_the_origin_too
