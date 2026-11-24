@@ -212,7 +212,7 @@ fn stroke(points: &[Point3], closed: bool) -> Option<RawGeometry> {
 /// to draw or no direction to point in (#1671).
 fn arrowhead(tip: Point3, toward: Point3, size: f64) -> Option<RawGeometry> {
     let (dx, dy) = (toward[0] - tip[0], toward[1] - tip[1]);
-    let len = dx.hypot(dy);
+    let len = (dx * dx + dy * dy).sqrt();
     if !(size.is_finite() && size > 0.0 && len > 0.0) {
         return None;
     }
