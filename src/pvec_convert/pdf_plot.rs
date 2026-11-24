@@ -298,7 +298,8 @@ impl<'a> PdfPlot<'a> {
                     let page = if out.written == 0 {
                         blank_page(sheet.as_ref(), unit)
                     } else {
-                        read_page(&file, rotation).map_err(PvecConvertError::Publish)?
+                        read_page(&file, rotation, paper_frame(sheet.as_ref(), unit))
+                            .map_err(PvecConvertError::Publish)?
                     };
                     Ok((page, sheet.map(|s| s.notes).unwrap_or_default()))
                 });
@@ -360,7 +361,11 @@ enum Seg {
 type Runs = Vec<Seg>;
 
 /// Reads a scratch artifact into a page: the frame is the paper, the curves are the strokes.
-fn read_page(artifact: &Path, rotation: i16) -> Result<Page, crate::pvec::publish::PublishError> {
+fn read_page(
+    artifact: &Path,
+    rotation: i16,
+    frame: Option<([f64; 2], [f64; 2])>,
+) -> Result<Page, crate::pvec::publish::PublishError> {
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
     const DEFAULT_WIDTH_MM: f64 = 0.25;
     let other = |e: &dyn std::fmt::Display| {
@@ -368,7 +373,15 @@ fn read_page(artifact: &Path, rotation: i16) -> Result<Page, crate::pvec::publis
     };
     let reader = open_published(artifact).map_err(|e| other(&e))?;
     let manifest = reader.manifest();
-    let (lo, hi) = (manifest.bounds.min, manifest.bounds.max);
+    // The page is the paper, even when a text or fill carrier reaches past its edge and widens what
+    // the artifact holds.
+    let (lo, hi) = match frame {
+        Some((lo, hi)) => (
+            lo.map(|v| v / manifest.metres_per_unit),
+            hi.map(|v| v / manifest.metres_per_unit),
+        ),
+        None => (manifest.bounds.min, manifest.bounds.max),
+    };
     let k = manifest.metres_per_unit * POINTS_PER_METRE;
     let size = [(hi[0] - lo[0]) * k, (hi[1] - lo[1]) * k];
     let to_pt = |x: f64, y: f64| ((x - lo[0]) * k, (y - lo[1]) * k);
@@ -427,6 +440,10 @@ fn read_page(artifact: &Path, rotation: i16) -> Result<Page, crate::pvec::publis
             let at = s.assignments.iter().find(|(e, _)| e == id)?.1;
             s.styles.get(at as usize)
         });
+        // A style that is not visible is a text's or fill's carrier: the record draws, not the curve.
+        if def.is_some_and(|d| !d.visible) {
+            continue;
+        }
         // Stroke widths are in millimetres, as a lineweight is.
         let mm = match def.and_then(|d| d.width) {
             Some(StrokeWidth::Width(w)) => w,
@@ -537,6 +554,18 @@ fn push_path(content: &mut String, runs: &Runs, close: bool) {
     if close {
         content.push_str("h\n");
     }
+}
+
+/// The paper frame of a sheet whose frame is the paper, as [min, max] corners in metres.
+fn paper_frame(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> Option<([f64; 2], [f64; 2])> {
+    let s = sheet.filter(|s| s.frame == "paper")?;
+    let b = s.sheet_box.as_ref()?;
+    let unit = [SourceUnit::Inches, SourceUnit::Millimeters, drawing]
+        .into_iter()
+        .find(|u| u.name() == s.unit)?;
+    let k = metres_per_unit(unit).ok()?;
+    let v = |i: usize| b[i].parse::<f64>().ok().map(|x| x * k);
+    Some(([v(0)?, v(1)?], [v(2)?, v(3)?]))
 }
 
 /// A paper with nothing on it: the sheet's box in its unit, which is inches, millimetres or the
