@@ -51,6 +51,7 @@ pub(crate) fn map(
     leaf: &FlatEntity,
     annotation: Annotation,
     keep: &dyn Fn([f64; 2]) -> bool,
+    clip: Option<[f64; 4]>,
 ) -> Result<(Vec<RawEntity>, Body), &'static str> {
     /// How far below its baseline a line's descenders reach, in text heights. Capitals stand one text
     /// height above the baseline.
@@ -243,17 +244,82 @@ pub(crate) fn map(
                         .collect()
                 })
             }
-            // A fill is carried whole or not at all: one with a corner outside the sheet is not.
-            if !rings
-                .iter()
-                .flatten()
-                .all(|v| keep(leaf.map_point(to_block(v.x, v.y))))
-            {
-                return Err(CLIPPED);
-            }
+            // A ring wholly inside what it is seen through is carried as it is, one wholly outside is
+            // left out, and one that crosses the edge of a rectangle is cut to it (Sutherland and
+            // Hodgman, in the drawing's space, then mapped back into the entity's plane). A ring
+            // seen through a polygon is carried or left out whole.
+            let [ma, mb, mc, md, mx, my] = leaf.matrix();
+            let det = ma * md - mb * mc;
+            let cut = |vertices: Vec<RawVertex>| -> Option<Vec<RawVertex>> {
+                let seen: Vec<[f64; 2]> = vertices
+                    .iter()
+                    .map(|v| leaf.map_point(to_block(v.x, v.y)))
+                    .collect();
+                if seen.iter().all(|p| keep(*p)) {
+                    return Some(vertices);
+                }
+                let b = clip?;
+                if det == 0.0 || !det.is_finite() {
+                    return None;
+                }
+                let mut ring = seen;
+                for edge in 0..4 {
+                    let inside = |p: [f64; 2]| match edge {
+                        0 => p[0] >= b[0],
+                        1 => p[0] <= b[2],
+                        2 => p[1] >= b[1],
+                        _ => p[1] <= b[3],
+                    };
+                    let cross = |p: [f64; 2], q: [f64; 2]| {
+                        let (axis, at) = match edge {
+                            0 => (0, b[0]),
+                            1 => (0, b[2]),
+                            2 => (1, b[1]),
+                            _ => (1, b[3]),
+                        };
+                        let t = (at - p[axis]) / (q[axis] - p[axis]);
+                        let mut r = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+                        r[axis] = at;
+                        r
+                    };
+                    let mut next: Vec<[f64; 2]> = Vec::new();
+                    for (i, p) in ring.iter().enumerate() {
+                        let q = ring[(i + 1) % ring.len()];
+                        match (inside(*p), inside(q)) {
+                            (true, true) => next.push(q),
+                            (true, false) => next.push(cross(*p, q)),
+                            (false, true) => {
+                                next.push(cross(*p, q));
+                                next.push(q);
+                            }
+                            (false, false) => {}
+                        }
+                    }
+                    if next.len() < 3 {
+                        return None;
+                    }
+                    ring = next;
+                }
+                // Back to the entity's plane: the inverse of the leaf's map, then the plane's flip.
+                Some(
+                    ring.iter()
+                        .map(|p| {
+                            let (px, py) = (p[0] - mx, p[1] - my);
+                            let bx = (md * px - mb * py) / det;
+                            let by = (-mc * px + ma * py) / det;
+                            RawVertex {
+                                x: if flip { -bx } else { bx },
+                                y: by,
+                                bulge: 0.0,
+                            }
+                        })
+                        .collect(),
+                )
+            };
             let carriers: Vec<RawEntity> = rings
                 .iter()
                 .filter_map(|ring| straight(ring))
+                .filter_map(cut)
                 .map(|vertices| {
                     carrier(RawGeometry::Polyline {
                         vertices,
@@ -264,6 +330,10 @@ pub(crate) fn map(
                 })
                 .collect();
             if carriers.is_empty() {
+                // Rings that had an area and none of it in view are outside, not flat.
+                if rings.iter().any(|r| straight(r).is_some()) {
+                    return Err(CLIPPED);
+                }
                 return Err("its corners are on one line, so there is no area to fill");
             }
             Ok((carriers, Body::Fill(FillBody { pattern, rgba })))

@@ -376,7 +376,8 @@ mod rendered {
             .lineweights
             .iter()
             .position(|w| (*w - 1.0).abs() < 1e-6)
-            .expect("a 1.00 mm pen") as u8;
+            .expect("a 1.00 mm pen") as u8
+            + 1; // a style's lineweight is one more than the list's index (#1692)
         table.aci_entries[1].color = Some([0, 0, 255]);
         table.aci_entries[1].lineweight = pen;
         table

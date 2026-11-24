@@ -506,6 +506,17 @@ fn read_page(
         }
     }
 
+    // Lookups by entity, so a page of hundreds of thousands of curves is not a quadratic scan.
+    let curve_at: std::collections::HashMap<_, _> = entities
+        .iter()
+        .enumerate()
+        .map(|(n, (id, _))| (*id, n))
+        .collect();
+    let style_at: std::collections::HashMap<_, _> = style
+        .iter()
+        .flat_map(|s| s.assignments.iter().map(|(e, n)| (*e, *n)))
+        .collect();
+
     // Fills first, under the strokes.
     for record in hatches.iter().flat_map(|h| &h.records) {
         let Fill::Solid { rgba } = &record.fill else {
@@ -513,15 +524,15 @@ fn read_page(
         };
         let mut runs: Runs = Vec::new();
         for id in &record.boundary {
-            if let Some((_, curve)) = entities.iter().find(|(e, _)| e == id) {
-                runs.extend(segments(curve, &to_pt));
+            if let Some(n) = curve_at.get(id) {
+                runs.extend(segments(&entities[*n].1, &to_pt));
             }
         }
-        let word = record
-            .boundary
-            .first()
-            .and_then(|id| paint.as_ref()?.colour_of(*id))
-            .unwrap_or(*rgba);
+        // The hatch's own colour, not its boundary's stroke colour, thinned toward the white paper
+        // by its transparency.
+        let [r, g, b, a] = rgba.to_be_bytes();
+        let thin = |c: u8| (255.0 - (255.0 - f64::from(c)) * f64::from(a) / 255.0).round() as u8;
+        let word = u32::from_be_bytes([thin(r), thin(g), thin(b), 255]);
         content.push_str(&format!("{} rg\n", rgb(word)));
         push_path(&mut content, &runs, true);
         content.push_str("f*\n");
@@ -532,7 +543,7 @@ fn read_page(
             continue;
         }
         let def = style.as_ref().and_then(|s| {
-            let at = s.assignments.iter().find(|(e, _)| e == id)?.1;
+            let at = *style_at.get(id)?;
             s.styles.get(at as usize)
         });
         // A style that is not visible is a text's or fill's carrier: the record draws, not the curve.

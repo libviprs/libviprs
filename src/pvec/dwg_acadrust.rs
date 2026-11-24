@@ -796,25 +796,33 @@ impl AcadrustProvider {
             .collect()
     }
 
-    /// The colour a fill is drawn in, as red, green, blue and alpha: its own colour, or its layer's
+    /// The colour a fill is drawn in, as red, green, blue and opacity: its own colour, or its layer's
     /// for BYLAYER. A fill whose colour is BYBLOCK (the INSERT's, which the provider cannot see)
     /// or has none is black.
     fn fill_rgba(&self, common: &acr::entities::EntityCommon) -> u32 {
-        let layer_colour = || {
-            let found = self.doc.layers.get(&common.layer).or_else(|| {
+        let layer = || {
+            self.doc.layers.get(&common.layer).or_else(|| {
                 self.doc
                     .layers
                     .iter()
                     .find(|l| l.name.eq_ignore_ascii_case(&common.layer))
-            });
-            found.map(|l| l.color)
+            })
         };
+        let layer_colour = || layer().map(|l| l.color);
         let colour = match common.color {
             acr::Color::ByLayer => layer_colour().unwrap_or(acr::Color::None),
             c => c,
         };
         let (r, g, b) = colour.rgb().unwrap_or((0, 0, 0));
-        u32::from_be_bytes([r, g, b, 255])
+        // The fill's own transparency, or its layer's for BYLAYER, as an amount (0 opaque, 255
+        // clear); the word carries the opacity that is left.
+        let amount = match common.transparency {
+            acr::types::Transparency::ByLayer => layer()
+                .and_then(|l| l.transparency.explicit_alpha())
+                .unwrap_or(0),
+            t => t.explicit_alpha().unwrap_or(0),
+        };
+        u32::from_be_bytes([r, g, b, 255 - amount])
     }
 
     fn capabilities() -> ProviderCaps {

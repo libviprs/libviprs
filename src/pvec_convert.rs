@@ -2378,25 +2378,30 @@ impl<'a> PvecConversion<'a> {
                         })
                         .ok_or("it draws nothing the provider can report")
                         .and_then(|a| {
-                            annotation::map(f, a, &|p| {
-                                clip_box.is_none_or(|b| {
-                                    p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
-                                }) && ring.is_none_or(|r| {
-                                    // Even-odd crossing count over the viewport's polygon.
-                                    let mut inside = false;
-                                    for (i, a) in r.iter().enumerate() {
-                                        let b = &r[(i + 1) % r.len()];
-                                        if (a[1] > p[1]) != (b[1] > p[1])
-                                            && p[0]
-                                                < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1])
-                                                    + a[0]
-                                        {
-                                            inside = !inside;
+                            annotation::map(
+                                f,
+                                a,
+                                &|p| {
+                                    clip_box.is_none_or(|b| {
+                                        p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
+                                    }) && ring.is_none_or(|r| {
+                                        // Even-odd crossing count over the viewport's polygon.
+                                        let mut inside = false;
+                                        for (i, a) in r.iter().enumerate() {
+                                            let b = &r[(i + 1) % r.len()];
+                                            if (a[1] > p[1]) != (b[1] > p[1])
+                                                && p[0]
+                                                    < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1])
+                                                        + a[0]
+                                            {
+                                                inside = !inside;
+                                            }
                                         }
-                                    }
-                                    inside
-                                })
-                            })
+                                        inside
+                                    })
+                                },
+                                if ring.is_none() { clip_box } else { None },
+                            )
                         });
                     let made_clipped = matches!(made, Err(annotation::CLIPPED));
                     let carried = match made {
@@ -2586,7 +2591,20 @@ impl<'a> PvecConversion<'a> {
                             // The table's lineweight and linetype for the stroke's ACI beat the
                             // object's; an entry that says "object" leaves them (#1630).
                             if let (Some(t), Some(aci)) = (table, effective_aci) {
-                                if let Some(mm) = t.resolve_lineweight(aci) {
+                                // A style's lineweight is one more than the list's index: the editor's
+                                // list is "use the object's" and then the table from its first entry
+                                // (#1692, acadrust#73), so 0 and 255 leave the object's and N is entry N - 1.
+                                let style = t.aci_entries[usize::from(aci)].lineweight;
+                                let entry = usize::from(style).checked_sub(1);
+                                if let Some(mm) = entry
+                                    .filter(|_| style != 255)
+                                    .and_then(|i| t.lineweights.get(i))
+                                {
+                                    let mm = if t.apply_factor {
+                                        mm * t.scale_factor.max(0.0)
+                                    } else {
+                                        *mm
+                                    };
                                     input.lineweight = Some(DwgLineweight::Hundredths(
                                         (f64::from(mm) * 100.0).round() as i16,
                                     ));
