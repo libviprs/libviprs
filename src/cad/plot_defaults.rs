@@ -14,6 +14,7 @@ use std::fmt;
 use std::fs;
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::plot_files::{
     MAX_PLOT_FILE_BYTES, Pc3File, PlotDevice, PlotFileError, load_pc3, load_plot_style,
@@ -181,14 +182,30 @@ pub fn store(dir: &Path, which: PlotDefaultFile, bytes: &[u8]) -> Result<(), Plo
         plot_dir(dir, true)?.ok_or_else(|| PlotDefaultsError::Io("no plot directory".into()))?;
     let target = plot.join(file_name(which));
     regular_file(&target)?;
-    let scratch = plot.join(format!(".{}.{}.tmp", file_name(which), std::process::id()));
+    // A name no other thread or earlier run is using: the process id, then a counter. A name that is
+    // already there is skipped and left alone; only a scratch file this call made is ever removed.
+    static ATTEMPT: AtomicU64 = AtomicU64::new(0);
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
-    let written = options
-        .open(&scratch)
-        .and_then(|mut f| f.write_all(bytes).and_then(|()| f.sync_all()))
+    let mut tries = 0;
+    let (scratch, mut file) = loop {
+        let scratch = plot.join(format!(
+            ".{}.{}.{}.tmp",
+            file_name(which),
+            std::process::id(),
+            ATTEMPT.fetch_add(1, Ordering::Relaxed)
+        ));
+        match options.open(&scratch) {
+            Ok(file) => break (scratch, file),
+            Err(e) if e.kind() == ErrorKind::AlreadyExists && tries < 16 => tries += 1,
+            Err(e) => return Err(io(&target, &e)),
+        }
+    };
+    let written = file
+        .write_all(bytes)
+        .and_then(|()| file.sync_all())
         .and_then(|()| fs::rename(&scratch, &target));
     if let Err(e) = written {
         let _ = fs::remove_file(&scratch);
@@ -223,6 +240,17 @@ pub fn load(dir: &Path, which: PlotDefaultFile) -> Result<Option<Vec<u8>>, PlotD
     let mut bytes = Vec::new();
     fs::File::open(&path)
         .and_then(|f| {
+            // The path was a plain file a moment ago; a link swapped in since is a different file.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let opened = f.metadata()?;
+                if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) {
+                    return Err(std::io::Error::other(
+                        "the file changed while it was opened",
+                    ));
+                }
+            }
             f.take(MAX_PLOT_FILE_BYTES as u64 + 1)
                 .read_to_end(&mut bytes)
         })

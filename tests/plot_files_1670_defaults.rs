@@ -43,8 +43,7 @@ fn issue_1670_the_default_ctb_loads_and_writes_back_byte_for_byte() {
 fn issue_1670_the_default_ctb_has_255_black_entries_at_lineweight_9() {
     let table = default_plot_style();
     assert_eq!(table.aci_entries.len(), 256);
-    for aci in 1..=255usize {
-        let e = &table.aci_entries[aci];
+    for (aci, e) in table.aci_entries.iter().enumerate().skip(1) {
         assert_eq!(e.color, Some([0, 0, 0]), "ACI {aci} is not black");
         assert_eq!(e.screening, 100, "ACI {aci} is screened");
         assert_eq!(e.lineweight, 9, "ACI {aci} is not lineweight 9");
@@ -58,8 +57,7 @@ fn issue_1670_the_default_ctb_has_255_black_entries_at_lineweight_9() {
 fn issue_1670_the_default_ctb_survives_the_loader_with_its_entries() {
     let bytes = default_plot_style().to_bytes().unwrap();
     let loaded = load_plot_style("libviprs-monochrome.ctb", &bytes).unwrap();
-    for aci in 1..=255usize {
-        let e = &loaded.aci_entries[aci];
+    for (aci, e) in loaded.aci_entries.iter().enumerate().skip(1) {
         assert_eq!((e.color, e.lineweight), (Some([0, 0, 0]), 9), "ACI {aci}");
     }
 }
