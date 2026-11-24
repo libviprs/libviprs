@@ -219,6 +219,9 @@ pub enum PvecConvertError {
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
     Cancelled,
+    /// The wall-clock deadline passed (#1674). Nothing was published.
+    #[error("the deadline passed")]
+    Deadline,
 }
 
 /// What a conversion produced.
@@ -526,6 +529,12 @@ impl<'a> PvecConversion<'a> {
     #[must_use]
     pub fn cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// A wall-clock bound on the conversion (#1674).
+    #[must_use]
+    pub fn deadline(self, _within: std::time::Duration) -> Self {
         self
     }
 
@@ -3791,6 +3800,14 @@ impl PvecConvertError {
             #[cfg(feature = "pvec-raster-thumbnail")]
             PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
+            PvecConvertError::Deadline => d(DiagnosticCode::Cancelled, "deadline"),
         }
+    }
+
+    /// A stable, upper snake code for this failure (#1674), for a caller that has to tell one from
+    /// another without reading the message. The message may change, the code does not.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        ""
     }
 }

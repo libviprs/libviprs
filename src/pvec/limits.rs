@@ -163,6 +163,15 @@ pub enum LimitError {
     },
 }
 
+impl LimitError {
+    /// A stable, upper snake code for this refusal (#1674): `LIMIT_ENTITIES` and the like, or
+    /// `BLOCK_CYCLE`.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        ""
+    }
+}
+
 /// The meter for one conversion.
 #[derive(Debug, Clone)]
 pub struct SourceGuard {

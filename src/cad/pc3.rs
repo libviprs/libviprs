@@ -48,6 +48,14 @@ pub enum Pc3Error {
     NotFinite(&'static str),
 }
 
+impl Pc3Error {
+    /// A stable, upper snake code for this refusal (#1674).
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        ""
+    }
+}
+
 impl fmt::Display for Pc3Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

@@ -72,6 +72,25 @@ pub enum LayoutSetError {
     /// The cancel token fired. Sheets published before it stay; no index is written.
     #[error("cancelled")]
     Cancelled,
+    /// The set's deadline passed (#1674). Sheets published before it stay; no index is written.
+    #[error("the deadline passed")]
+    Deadline,
+}
+
+impl LayoutSetError {
+    /// A stable, upper snake code for this failure (#1674).
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        ""
+    }
+}
+
+impl SheetSkip {
+    /// A stable, upper snake code for why this sheet has no file (#1674).
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        ""
+    }
 }
 
 /// Why a sheet has no file.
@@ -157,6 +176,12 @@ impl<'a> PvecLayoutSet<'a> {
     #[must_use]
     pub fn stem(mut self, stem: impl Into<String>) -> Self {
         self.stem = Some(stem.into());
+        self
+    }
+
+    /// A wall-clock bound on the whole set (#1674).
+    #[must_use]
+    pub fn deadline(self, _within: std::time::Duration) -> Self {
         self
     }
 

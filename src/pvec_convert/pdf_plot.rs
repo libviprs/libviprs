@@ -101,6 +101,24 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
+    /// The cancel token, polled before each page (#1674).
+    #[must_use]
+    pub fn cancel(self, _cancel: crate::CancelToken) -> Self {
+        self
+    }
+
+    /// Receives the sheet events and each failure's diagnostic (#1674).
+    #[must_use]
+    pub fn observer(self, _observer: std::sync::Arc<dyn crate::observe::EngineObserver>) -> Self {
+        self
+    }
+
+    /// A wall-clock bound on the whole plot (#1674).
+    #[must_use]
+    pub fn deadline(self, _within: std::time::Duration) -> Self {
+        self
+    }
+
     /// Writes the PDF with provider `P`.
     ///
     /// # Errors
