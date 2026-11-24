@@ -2374,8 +2374,8 @@ impl<'a> PvecConversion<'a> {
                         // list is "use the object's" and then the table from its first entry
                         // (#1692, acadrust#73), so 0 and 255 leave the object's and N is entry N - 1.
                         let style = t.aci_entries[usize::from(aci)].lineweight;
-                        let entry = usize::from(style).checked_sub(1);
-                        if let Some(mm) = entry
+                        if let Some(mm) = usize::from(style)
+                            .checked_sub(1)
                             .filter(|_| style != 255)
                             .and_then(|i| t.lineweights.get(i))
                         {
