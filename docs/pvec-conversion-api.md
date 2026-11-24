@@ -19,21 +19,21 @@ writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the tr
 
 ## Plot settings
 
-`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`.
+`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`. `PlotSettings::device` (#1673) carries the `PlotDevice` of a PC3 (`PlotDevice::from_pc3`, files loaded with `cad::plot_files::{load_pc3, load_plot_style}`): it fills a paper of no size and missing margins under the layout, never over it, and the notes `plot-device-paper` and `plot-device-margins` say when it did.
 
 | field | effect |
 |---|---|
 | `area` | `PlotArea::Layout` (default) frames the paper from its margins and origin. `PlotArea::Extents` places the paper at the lower left of the extents: the sheet's kept geometry plus the rectangles of its drawn viewports. |
 | `paper_mm` | Paper size in millimetres, width then height, before the layout's rotation. It replaces the layout's paper and clears the layout's margins. A size that is zero, negative or not finite is refused as `paper-size-zero` and the frame is the extents. |
 | `orientation` | `Orientation::Portrait` or `Landscape`: turns the paper, after the layout's rotation, to the shape asked for. `None` is the layout's own. |
-| `scale` | A `PlotScale { paper, paper_unit, drawing }` in place of the layout's plot scale: `paper` paper units of `paper_unit` to `drawing` drawing units (the conversion's own unit), as the dialog's custom row and its presets give it. `1 inch = 50 units` is `{ 1, Inches, 50 }` on a sheet of any unit. It is the calibration record, with `paper_unit` as its paper unit. |
+| `scale` | A `PlotScale { paper, paper_unit, drawing }` in place of the layout's plot scale: `paper` paper units of `paper_unit` to `drawing` drawing units (the conversion's own unit), as the dialog's custom row and its presets give it. `1 inch = 50 units` is `{ 1, Inches, 50 }` on a sheet of any unit. It is the calibration record, with `paper_unit` as its paper unit, and the sheet's linework is drawn at it, as at the layout's own (#1665). |
 | `offset_mm` | The plot offset, in place of the layout's own plot origin (the dialog shows one value). `None` is the layout's own. |
 | `center` | Centres the extents on the printable area (the paper less its margins); the offset is then ignored. Plot area Extents only: under Layout it is ignored with `plot-centre-not-applicable`. |
 | `fit_to_paper` | Scales what the plot covers into the printable area, the tighter side binding. Under Extents that is the extents. Under Layout it is the layout's own printable area, which only changes anything with a paper override (otherwise `plot-fit-no-change`). The frame is the window of the drawing the paper then shows, so the report's box is not the paper: read the paper size from the report's plot fields. The calibration stays the plot scale, and the fit ratio is the note `plot-fit-ratio 1:N`. |
 | `print_lineweights` | Lineweights print. `Some(false)` drops widths. `None` is the layout's own. |
 | `paperspace_last` | Paper space draws after what the viewports show. `None` is the layout's own. |
 
-Rotation 180 and the plot Window area are reported, not applied. The report's `sheet.notes` carry `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-centre-not-applicable`, `plot-paper-overridden`, `plot-orientation`, `plot-scale-overridden`, `plot-lineweights-overridden`, `plot-fit-to-paper`, `plot-fit-ratio 1:N`, `plot-fit-no-change` and `plot-fit-skipped`.
+The sheet's linework, its viewport windows, its extents and a plot window are drawn at the plot scale, so the box and the unit are paper whatever the scale (#1665); a sheet at 1:1 is unchanged. The report's `sheet.notes` carry `plot-scale-applied`, `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-centre-not-applicable`, `plot-paper-overridden`, `plot-orientation`, `plot-scale-overridden`, `plot-lineweights-overridden`, `plot-fit-to-paper`, `plot-fit-ratio 1:N`, `plot-fit-no-change` and `plot-fit-skipped`.
 
 ## Thumbnail
 
@@ -62,10 +62,21 @@ depth. `PvecConvertError` keeps every lower error as `source()`: open, view, fla
 (a deprecated control point that is not finite), capability not allowed, cancelled. After any error the destination and its report are as they
 were.
 
+Every error type here has a `code()`, a stable upper snake string a caller can match on without reading the message: `PvecConvertError`,
+`LayoutSetError`, `SheetSkip`, `LimitError` and `Pc3Error` (#1674). A limit is named by its own code (`LIMIT_ENTITIES`, `LIMIT_BLOCK_DEPTH`...),
+a missing layout is `LAYOUT_NOT_FOUND`, and `CANCELLED` and `DEADLINE` are different on purpose.
+
 ## Progress, cancellation, backpressure
 
 The classifier and its consumer meet in a bounded queue (default 64, `queue_capacity`), the observer hears the stages as `EngineEvent`s, and the
 cancel token is polled once per batch of 256 entities and during the write. A cancel that fires during a spool flush stops the write there (#1463).
+
+`PvecLayoutSet` and `PdfPlot` also send `ConversionSheetStarted { index, total, layout }` and `ConversionSheetFinished { index, total, layout, status, code }`
+for each sheet (`index` counts from 1 over the sheets asked for; `status` is `written`, `empty`, `empty-after-view`, `failed`, `cancelled` or `deadline`).
+`PdfPlot` takes `cancel` and `observer` like a conversion does. `deadline(Duration)` on `PvecConversion`, `PvecLayoutSet` and `PdfPlot` bounds the
+wall-clock time from the call to `convert`, polled where the cancel token is. Past it the run fails with `Deadline` and publishes nothing, and the caller's
+token is untouched; a cancel by the caller wins when both happened. On a set it bounds the whole set (sheets already published stay, no index); set in a
+sheet's own options it fails that sheet only (#1674).
 
 ## What it writes
 
@@ -100,6 +111,8 @@ switches from `choices.text`, the layer overrides (`LayerVisibility::overrides`)
 layer state folded in where it changes the answer. A user's entry for a layer wins over the state's, and a state's `visible` never thaws a viewport.
 A layer a state only freezes goes in `state_frozen`, a frozen flag like the file's own, so it answers to `frozen` and `frozen_text` and its notes
 follow `frozenLayers`. An entity a layer override hides is counted as `layers.overrides` (`Exclusion::LayerOverridden`, code `LAYER_HIDDEN`).
+
+`check_layer_state(&manifest, &choices)` (#1675) says whether the layer state `choices` names is one the drawing stores (ASCII case-insensitive). When it isn't, it returns `LayerStateNotFound` (`code()` is `LAYER_STATE_NOT_FOUND`) with the name asked for and the states there are, without the ones AutoCAD hides. `apply_choices` itself still falls back to the file's table for an unknown name, so run the check first. In model mode `apply_choices` leaves `viewport_overrides` empty, since those overrides belong to sheets.
 
 ## Every sheet of a drawing
 

@@ -85,11 +85,11 @@ pub use layouts::{
     paper_sheets,
 };
 pub use manifest::{
-    CadChoices, CadManifest, CadMode, CadText, LayerCounts, ManifestColour, ManifestFile,
-    ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace,
-    ManifestPaper, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility,
-    ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, apply_choices, cad_manifest,
-    resolve_visibility,
+    CadChoices, CadManifest, CadMode, CadText, LayerCounts, LayerStateNotFound, ManifestColour,
+    ManifestFile, ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask,
+    ManifestModelSpace, ManifestPaper, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount,
+    PlotsVisibility, ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, apply_choices,
+    cad_manifest, check_layer_state, resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
@@ -219,6 +219,9 @@ pub enum PvecConvertError {
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
     Cancelled,
+    /// The wall-clock deadline passed (#1674). Nothing was published.
+    #[error("the deadline passed")]
+    Deadline,
 }
 
 /// What a conversion produced.
@@ -260,6 +263,8 @@ pub struct PvecConversion<'a> {
     element_rules: Option<ElementRules>,
     plot_style: Option<acadrust::plot_style::PlotStyleTable>,
     plot_settings: PlotSettings,
+    /// The wall-clock bound set with [`deadline`](Self::deadline), until the run starts its clock.
+    deadline: Option<std::time::Duration>,
     /// A paper sheet with nothing to stroke is a success with `written == 0` and no artifact,
     /// for a caller (the PDF plot, #1636) that still wants the empty page.
     empty_sheet_ok: bool,
@@ -308,6 +313,9 @@ pub struct PlotSettings {
     pub print_lineweights: Option<bool>,
     /// Paper space draws after what the viewports show. `None` is the layout's own.
     pub paperspace_last: Option<bool>,
+    /// The device a PC3 describes. It fills what the layout's own page setup leaves empty (a zero
+    /// paper, no margins) and never replaces what the layout says (issue #1673). `None` is no PC3.
+    pub device: Option<crate::cad::plot_files::PlotDevice>,
 }
 
 /// A plot scale as the plot dialog's custom row gives it: `paper` paper units of `paper_unit` to
@@ -344,8 +352,9 @@ pub enum PlotArea {
     /// The extents of what the sheet draws: its own kept geometry and the rectangles of its drawn
     /// viewports. The paper is placed from the extents' lower left corner.
     Extents,
-    /// The box `[x0, y0, x1, y1]` in paper-space units (the layout's paper units): the frame is
-    /// that box, and nothing else moves. A layout whose own plot type says window is framed the
+    /// The box `[x0, y0, x1, y1]` in paper-space drawing units, as it is picked on the layout:
+    /// the frame is that box drawn at the plot scale, as the linework is (#1665), and nothing else
+    /// moves. A layout whose own plot type says window is framed the
     /// same way when this is not asked for.
     Window([f64; 4]),
 }
@@ -373,6 +382,7 @@ impl<'a> PvecConversion<'a> {
             element_rules: None,
             plot_style: None,
             plot_settings: PlotSettings::default(),
+            deadline: None,
             empty_sheet_ok: false,
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail_width: None,
@@ -381,7 +391,8 @@ impl<'a> PvecConversion<'a> {
         }
     }
 
-    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Shorthand
+    /// Carry TEXT, MTEXT, ATTDEF, MULTILEADER and TOLERANCE text, HATCH and SOLID in PVec's text and
+    /// hatch streams (#1609, #1658). Shorthand
     /// for [`texts`](Self::texts) and [`fills`](Self::fills) together, so a call to either after it
     /// wins for its half. Off by default, and it only takes effect with the line style stream
     /// selected ([`components`](Self::components)): each text is anchored on a short polyline and
@@ -398,14 +409,20 @@ impl<'a> PvecConversion<'a> {
     /// Carry TEXT, MTEXT and ATTDEF in PVec's text stream (#1624), without HATCH and SOLID: those
     /// stay unmapped, each with a warning saying fills are off, until [`fills`](Self::fills) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    ///
+    /// A MULTILEADER's text and a TOLERANCE's frame text are carried the same way, each row saying
+    /// its leader lines or its frame are not drawn (#1658). A DIMENSION needs neither option: the
+    /// provider reports it as an INSERT of its anonymous block, so its lines are geometry and its
+    /// printed value is an MTEXT in that block. Only a dimension whose block is missing comes here,
+    /// with its text rebuilt from the measurement and its style (decimal units only).
     #[must_use]
     pub fn texts(mut self, on: bool) -> Self {
         self.texts = on;
         self
     }
 
-    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT and ATTDEF
-    /// stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
+    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT, ATTDEF,
+    /// MULTILEADER and TOLERANCE stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
     #[must_use]
     pub fn fills(mut self, on: bool) -> Self {
@@ -522,6 +539,29 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// A wall-clock bound on the conversion (#1674), counted from the moment `convert` or
+    /// `convert_with` is called. It is polled where the cancel token is: before the source is read
+    /// further, and every batch of entities while they are classified. Past it the conversion fails
+    /// with [`PvecConvertError::Deadline`] and publishes nothing, and the cancel token you gave stays
+    /// as it was. A cancel from the caller wins when both happened.
+    #[must_use]
+    pub fn deadline(mut self, within: std::time::Duration) -> Self {
+        self.deadline = Some(within);
+        self
+    }
+
+    /// Starts the deadline's clock, once: the cancel token this conversion polls is a copy that also
+    /// reads as cancelled when the time is up.
+    fn arm(&mut self) {
+        if let Some(at) = self
+            .deadline
+            .take()
+            .and_then(|d| std::time::Instant::now().checked_add(d))
+        {
+            self.cancel = self.cancel.with_deadline(at);
+        }
+    }
+
     /// Receives each diagnostic as it is made (`EngineEvent::ConversionDiagnostic`), and the one
     /// the run fails with. Without one, a drawing that converts cleanly makes no diagnostic at all.
     #[must_use]
@@ -628,7 +668,8 @@ impl<'a> PvecConversion<'a> {
     /// # Errors
     ///
     /// [`PvecConvertError`]. After any error the destination and its report are as they were.
-    pub fn convert(self) -> Result<PvecConversionOutput, PvecConvertError> {
+    pub fn convert(mut self) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
         let observer = self.observer.clone();
         #[cfg(feature = "pvec-raster-thumbnail")]
         if self.thumbnail_width == Some(0) {
@@ -640,7 +681,7 @@ impl<'a> PvecConversion<'a> {
             );
         }
         let result = if self.cancel.is_cancelled() {
-            Err(PvecConvertError::Cancelled)
+            Err(PvecConvertError::Cancelled.settled(&self.cancel))
         } else {
             AcadrustProvider::open(self.source)
                 .map_err(PvecConvertError::Open)
@@ -657,10 +698,13 @@ impl<'a> PvecConversion<'a> {
     /// # Errors
     ///
     /// [`PvecConvertError::UnitRequired`] without a unit, otherwise as [`convert`](Self::convert).
-    pub fn convert_with<P: DwgProvider>(self) -> Result<PvecConversionOutput, PvecConvertError> {
+    pub fn convert_with<P: DwgProvider>(
+        mut self,
+    ) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
         let observer = self.observer.clone();
         let result = if self.cancel.is_cancelled() {
-            Err(PvecConvertError::Cancelled)
+            Err(PvecConvertError::Cancelled.settled(&self.cancel))
         } else {
             self.unit
                 .ok_or(PvecConvertError::UnitRequired)
@@ -902,6 +946,7 @@ impl<'a> PvecConversion<'a> {
             let mut place = None;
             let mut windowed = false;
             let mut flip = false;
+            let mut per_unit = 1.0;
             match &fact {
                 SourceFact::Absent => summary.frame_reason = Some("plot-settings-absent".into()),
                 SourceFact::Present(p) => {
@@ -921,12 +966,51 @@ impl<'a> PvecConversion<'a> {
                     });
                     let sized = |v: f64| v.is_finite() && v > 0.0;
                     let fit = plot_settings.fit_to_paper;
-                    let [paper_w, paper_h] = plot_settings
-                        .paper_mm
-                        .unwrap_or([p.paper_width, p.paper_height]);
+                    // The plot scale, the caller's or the layout's own: `n` paper units to `d`
+                    // paper-space drawing units. The sheet's linework is drawn at it (#1665), so one
+                    // drawing unit is `drawn_at(sheet unit)` units of paper in the sheet unit. A
+                    // scale that is zero or has no physical paper unit draws 1:1, and the record
+                    // says why.
+                    let [n, d] = plot_settings
+                        .scale
+                        .map_or([p.scale_numerator, p.scale_denominator], |s| {
+                            [s.paper, s.drawing]
+                        });
+                    let drawn_at = |sheet: SourceUnit| {
+                        let paper = plot_settings.scale.map_or(sheet, |s| s.paper_unit);
+                        let along = if paper == sheet {
+                            Some(1.0)
+                        } else {
+                            metres_per_unit(paper)
+                                .ok()
+                                .zip(metres_per_unit(sheet).ok())
+                                .map(|(pm, sm)| pm / sm)
+                        };
+                        match along {
+                            Some(a) if sized(n) && sized(d) => n / d * a,
+                            _ => 1.0,
+                        }
+                    };
+                    // The PC3 fills what the layout leaves empty and never replaces what it says
+                    // (#1673): a paper of no size takes the device's.
+                    let device = plot_settings.device.as_ref();
+                    let layout_paper = if sized(p.paper_width) && sized(p.paper_height) {
+                        [p.paper_width, p.paper_height]
+                    } else {
+                        device
+                            .map(|d| d.paper_mm)
+                            .filter(|d| sized(d[0]) && sized(d[1]))
+                            .unwrap_or([p.paper_width, p.paper_height])
+                    };
+                    let [paper_w, paper_h] = plot_settings.paper_mm.unwrap_or(layout_paper);
                     if !(sized(paper_w) && sized(paper_h)) {
                         summary.frame_reason = Some("paper-size-zero".into());
                     } else {
+                        if plot_settings.paper_mm.is_none()
+                            && layout_paper != [p.paper_width, p.paper_height]
+                        {
+                            summary.notes.push("plot-device-paper".into());
+                        }
                         let sheet_unit = match p.paper_units {
                             0 => Some(SourceUnit::Inches),
                             1 => Some(SourceUnit::Millimeters),
@@ -963,10 +1047,26 @@ impl<'a> PvecConversion<'a> {
                         let (w, h) = turned;
                         // An override replaces the paper, so the margins that belong to the
                         // layout's paper go with it.
+                        let layout_margins = device
+                            .filter(|d| {
+                                p.margins == [0.0; 4]
+                                    && (d.paper_mm[0] - layout_paper[0]).abs() < 0.5
+                                    && (d.paper_mm[1] - layout_paper[1]).abs() < 0.5
+                            })
+                            .map(|d| {
+                                let [llx, lly, urx, ury] = d.printable_mm;
+                                [llx, lly, d.paper_mm[0] - urx, d.paper_mm[1] - ury]
+                            })
+                            .filter(|m| m.iter().all(|v| v.is_finite() && *v >= 0.0))
+                            .filter(|m| *m != [0.0; 4]);
+                        if plot_settings.paper_mm.is_none() && layout_margins.is_some() {
+                            summary.notes.push("plot-device-margins".into());
+                        }
+                        let layout_margins = layout_margins.unwrap_or(p.margins);
                         let margins = if plot_settings.paper_mm.is_some() {
                             [0.0; 4]
                         } else {
-                            p.margins
+                            layout_margins
                         };
                         // The offset is the plot origin the dialog shows, so it replaces the
                         // layout's own.
@@ -974,20 +1074,21 @@ impl<'a> PvecConversion<'a> {
                         // What the layout itself prints, for a fit under the Layout area: its
                         // paper (after its rotation) less its own margins.
                         let (lw, lh) = if matches!(p.rotation, 1 | 3) {
-                            (p.paper_height, p.paper_width)
+                            (layout_paper[1], layout_paper[0])
                         } else {
-                            (p.paper_width, p.paper_height)
+                            (layout_paper[0], layout_paper[1])
                         };
                         let own = [
-                            lw - p.margins[0] - p.margins[2],
-                            lh - p.margins[1] - p.margins[3],
+                            lw - layout_margins[0] - layout_margins[2],
+                            lh - layout_margins[1] - layout_margins[3],
                         ];
                         // UNMEASURED (the print profile ADR's open item): the paper's lower left
                         // is taken to sit at -(margin + plot origin) from the paper-space origin.
                         // No fixture with non-zero margins and origin has measured it, so the
                         // report says `position: unmeasured`.
                         let su = |v: [f64; 2]| to_unit(v[0]).zip(to_unit(v[1]));
-                        // The window is paper-space units already, the unit of the frame.
+                        // The window is in paper-space drawing units, so it goes to the paper at
+                        // the plot scale, the way the linework does (#1665).
                         let window_box = match plot_settings.area {
                             PlotArea::Window(w) => Some(w),
                             PlotArea::Layout if p.plot_type == 4 => Some(p.window),
@@ -1001,7 +1102,8 @@ impl<'a> PvecConversion<'a> {
                             .zip(su([margins[0] + shift[0], margins[1] + shift[1]]));
                         if let Some(w) = window_box {
                             if w.iter().all(|v| v.is_finite()) && w[2] > w[0] && w[3] > w[1] {
-                                frame_box = Some(w);
+                                let k = sheet_unit.map_or(1.0, drawn_at);
+                                frame_box = Some(w.map(|v| v * k));
                                 plot_unit = sheet_unit;
                                 windowed = true;
                             } else {
@@ -1084,11 +1186,10 @@ impl<'a> PvecConversion<'a> {
                         // Rotation 1 is the swap of the sides already made; 2 and 3 turn the
                         // sheet's content about the frame's centre once the frame is known.
                         flip = matches!(p.rotation, 2 | 3);
-                        let [n, d] = plot_settings
-                            .scale
-                            .map_or([p.scale_numerator, p.scale_denominator], |s| {
-                                [s.paper, s.drawing]
-                            });
+                        per_unit = drawn_at(sheet_unit);
+                        if per_unit != 1.0 {
+                            summary.notes.push("plot-scale-applied".into());
+                        }
                         if plot_settings.scale.is_some() {
                             summary.notes.push("plot-scale-overridden".into());
                         }
@@ -1120,6 +1221,7 @@ impl<'a> PvecConversion<'a> {
                 drop_widths,
                 place,
                 flip,
+                per_unit,
             });
         }
         let source_name = match *source {
@@ -1153,6 +1255,14 @@ impl<'a> PvecConversion<'a> {
             .map(|v| (leaf_key(v), v.paint))
             .collect();
         drop(view.included);
+        // A DIMENSION the view pass expanded as an INSERT of its block has no row of its own
+        // (#1658), so the report counts them under `DIMENSION.expanded`.
+        let dimensions_expanded: u64 = view
+            .expanded_classes
+            .iter()
+            .filter(|(class, _)| is_dimension_class(class))
+            .map(|(_, n)| n)
+            .sum();
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
             .iter()
@@ -1438,6 +1548,9 @@ impl<'a> PvecConversion<'a> {
         let mut texts: Vec<(EntityId, TextBody)> = Vec::new();
         let mut fills: Vec<(Vec<EntityId>, FillBody)> = Vec::new();
         let mut annotation_counts: BTreeMap<String, u64> = BTreeMap::new();
+        if dimensions_expanded > 0 {
+            annotation_counts.insert("DIMENSION.expanded".into(), dimensions_expanded);
+        }
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         /// The pieces of a line or straight polyline inside the sheet `b`, `[min x, min y, max x,
@@ -1572,6 +1685,8 @@ impl<'a> PvecConversion<'a> {
             }
             sh.summary.notes.push("plot-area-extents".into());
             if let Some(e) = ext {
+                // The extents are drawing units; the paper they are placed on is not (#1665).
+                let e = e.map(|v| v * sh.per_unit);
                 let [ml, mb, mr, mt] = pl.margin;
                 let (printable_w, printable_h) = (pl.size[0] - ml - mr, pl.size[1] - mb - mt);
                 let (ew, eh) = (e[2] - e[0], e[3] - e[1]);
@@ -1610,18 +1725,22 @@ impl<'a> PvecConversion<'a> {
             }
         }
         let frame = sheet.as_ref().and_then(|s| s.frame);
-        // Plotting upside-down turns everything 180 degrees about the frame's centre, which
-        // leaves the frame where it is. The windows turn with it, so what is drawn through them
-        // and the rectangle it is cut to stay together.
-        let flip_map = sheet
-            .as_ref()
-            .filter(|s| s.flip)
-            .and_then(|s| s.frame)
-            .map(|b| [-1.0, 0.0, 0.0, -1.0, b[0] + b[2], b[1] + b[3]]);
-        if let Some(m) = flip_map {
+        // The sheet's own linework goes to the paper: drawn at the plot scale (#1665), then,
+        // plotting upside-down, turned 180 degrees about the frame's centre, which leaves the frame
+        // where it is. The windows go with it, so what is drawn through them and the rectangle it
+        // is cut to stay together.
+        let sheet_map = sheet.as_ref().and_then(|s| {
+            let k = s.per_unit;
+            match s.frame.filter(|_| s.flip) {
+                Some(b) => Some([-k, 0.0, 0.0, -k, b[0] + b[2], b[1] + b[3]]),
+                None => (k != 1.0).then_some([k, 0.0, 0.0, k, 0.0, 0.0]),
+            }
+        });
+        if let Some(m) = sheet_map {
+            let [p, q, r, s, u, v] = m;
+            let at = |pt: [f64; 2]| [p * pt[0] + q * pt[1] + u, r * pt[0] + s * pt[1] + v];
             for (_, w) in &mut windows {
                 if let Window::Drawn { map, rect, ring } = w {
-                    let [p, q, r, s, u, v] = m;
                     let [a, b, c, d, tx, ty] = *map;
                     *map = [
                         p * a + q * c,
@@ -1631,15 +1750,16 @@ impl<'a> PvecConversion<'a> {
                         p * tx + q * ty + u,
                         r * tx + s * ty + v,
                     ];
+                    let (lo, hi) = (at([rect[0], rect[1]]), at([rect[2], rect[3]]));
                     *rect = [
-                        m[4] - rect[2],
-                        m[5] - rect[3],
-                        m[4] - rect[0],
-                        m[5] - rect[1],
+                        lo[0].min(hi[0]),
+                        lo[1].min(hi[1]),
+                        lo[0].max(hi[0]),
+                        lo[1].max(hi[1]),
                     ];
                     if let Some(points) = ring {
                         for pt in points.iter_mut() {
-                            *pt = [m[4] - pt[0], m[5] - pt[1]];
+                            *pt = at(*pt);
                         }
                     }
                 }
@@ -1674,8 +1794,8 @@ impl<'a> PvecConversion<'a> {
                         lifted = Item::Leaf(&lifted_leaf);
                         &lifted
                     }
-                    (None, Item::Leaf(f)) if flip_map.is_some() => {
-                        lifted_leaf = f.through(flip_map.expect("checked in the guard"));
+                    (None, Item::Leaf(f)) if sheet_map.is_some() => {
+                        lifted_leaf = f.through(sheet_map.expect("checked in the guard"));
                         lifted = Item::Leaf(&lifted_leaf);
                         &lifted
                     }
@@ -2142,13 +2262,18 @@ impl<'a> PvecConversion<'a> {
                 // start is inside what it is cut to, and a fill is not carried at all.
                 let mut pending: Option<Body> = None;
                 // Texts and fills are two choices (#1624): a class whose choice is off stays
-                // unmapped and says so, so a caller that asked for one never gets the other.
+                // unmapped and says so, so a caller that asked for one never gets the other. A
+                // MULTILEADER's or TOLERANCE's text is a text too, and so is a DIMENSION's when it
+                // reaches here, which is only when its block could not be followed (#1658).
+                let class_name = raw.provenance.class_name.as_str();
+                let dimension = is_dimension_class(class_name);
                 let (text_class, fill_class) = (
-                    matches!(
-                        raw.provenance.class_name.as_str(),
-                        "TEXT" | "MTEXT" | "ATTDEF"
-                    ),
-                    matches!(raw.provenance.class_name.as_str(), "HATCH" | "SOLID"),
+                    dimension
+                        || matches!(
+                            class_name,
+                            "TEXT" | "MTEXT" | "ATTDEF" | "MULTILEADER" | "TOLERANCE"
+                        ),
+                    matches!(class_name, "HATCH" | "SOLID"),
                 );
                 if annotate
                     && matches!(item, Item::Leaf(_))
@@ -2216,6 +2341,12 @@ impl<'a> PvecConversion<'a> {
                             }),
                         Err(annotation::CLIPPED) => Ok(None),
                         Err(why) => {
+                            // A dimension the provider has no text for says why its block was not
+                            // followed, which is the part worth knowing.
+                            let why = match &raw.geometry {
+                                RawGeometry::Unmapped { reason } if dimension => reason.as_str(),
+                                _ => why,
+                            };
                             done.warnings.push(format!("{class}: not carried, {why}"));
                             Ok(None)
                         }
@@ -2226,12 +2357,24 @@ impl<'a> PvecConversion<'a> {
                             break;
                         }
                         Ok(Some((mut pieces, body))) => {
+                            // What the stream does not carry of the entity (#1658).
+                            let left_out = match class {
+                                "MULTILEADER" => Some("its leader lines are not drawn"),
+                                "TOLERANCE" => Some("its frame is not drawn"),
+                                _ if dimension => Some(
+                                    "its block is missing, so its text is rebuilt from the measurement and nothing else is drawn",
+                                ),
+                                _ => None,
+                            };
                             for piece in &mut pieces {
                                 piece.classification =
                                     Classification::supported(Basis::Equivalent, class);
                                 piece.warnings.push(format!(
                                     "{class}: carried in a PVec stream, on hidden geometry"
                                 ));
+                                if let Some(why) = left_out {
+                                    piece.warnings.push(format!("{class}: {why}"));
+                                }
                             }
                             *annotation_counts
                                 .entry(format!("{class}.mapped"))
@@ -2554,7 +2697,20 @@ impl<'a> PvecConversion<'a> {
         })
     }
 
+    /// Everything after the source is open. A cancel that was really the deadline is told as
+    /// [`PvecConvertError::Deadline`], whichever step noticed it.
     fn run<P: DwgProvider>(
+        mut self,
+        provider: &P,
+        unit: SourceUnit,
+    ) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
+        let cancel = self.cancel.clone();
+        self.run_armed(provider, unit)
+            .map_err(|e| e.settled(&cancel))
+    }
+
+    fn run_armed<P: DwgProvider>(
         self,
         provider: &P,
         unit: SourceUnit,
@@ -2955,8 +3111,9 @@ struct Classified {
 }
 
 /// The plot scale as the calibration record (P-9, #1562): `n` paper units to `d` drawing units,
-/// the paper unit being `sheet_unit`. It is never applied to a coordinate. A caller's calibration
-/// wins. The summary says what became of it.
+/// the paper unit being `sheet_unit`. The sheet's linework is drawn at it (#1665), so a coordinate
+/// is a unit of paper in the sheet unit, which is what the record has always taken it to be. A
+/// caller's calibration wins. The summary says what became of it.
 fn plot_scale_record(
     [n, d]: [f64; 2],
     paper_unit: SourceUnit,
@@ -2968,8 +3125,8 @@ fn plot_scale_record(
 ) -> Option<Calibration> {
     let sized = |v: f64| v.is_finite() && v > 0.0;
     let mut written = None;
-    // P-9: the plot scale is the calibration record, never applied to a
-    // coordinate. A caller's calibration wins.
+    // P-9: the plot scale is the calibration record, and since #1665 also the
+    // scale the sheet is drawn at. A caller's calibration wins.
     if caller_calibration {
         summary.notes.push("caller-calibration".into());
     } else if !(sized(n) && sized(d)) {
@@ -3082,6 +3239,10 @@ struct Sheet {
     /// The layout plots upside-down (rotation 2 or 3): the content turns 180 degrees about the
     /// frame's centre (#1632).
     flip: bool,
+    /// Units of paper, in the sheet unit, that one paper-space drawing unit prints as: the plot
+    /// scale, applied to the sheet's own linework, its windows and its extents (#1665). 1 when
+    /// the frame is the extents.
+    per_unit: f64,
 }
 
 /// A paper sheet's placement in the sheet unit: what the frame is worked out from once the
@@ -3502,9 +3663,15 @@ fn promote_leaf(
         (None, None) if f.matrix() == [1.0, 0.0, 0.0, 1.0, 0.0, 0.0] => {
             return gated(record, prov, gate);
         }
-        // A sheet's own leaf turned about the frame's centre by a plot upside-down (#1632).
+        // A sheet's own leaf drawn at the plot scale (#1665), and turned about the frame's centre
+        // by a plot upside-down (#1632).
         (None, None) => crate::pvec::InstanceStep {
-            block_name: "*PLOT_ROTATION".into(),
+            block_name: if f.matrix()[0] < 0.0 {
+                "*PLOT_ROTATION"
+            } else {
+                "*PLOT_SCALE"
+            }
+            .into(),
             insert_handle: prov
                 .handle
                 .unwrap_or_else(|| crate::cad::ItemHandle::new(1)),
@@ -3535,6 +3702,13 @@ fn promote_leaf(
             vec![format!("{class}: {e:?}")],
         )),
     }
+}
+
+/// Whether a source class is one of acadrust's dimension classes (`DIMENSION_LINEAR` and the rest,
+/// `ARC_DIMENSION`, `LARGE_RADIAL_DIMENSION`), which the provider reports as INSERTs of their blocks
+/// (#1658).
+fn is_dimension_class(class: &str) -> bool {
+    class.starts_with("DIMENSION_") || matches!(class, "ARC_DIMENSION" | "LARGE_RADIAL_DIMENSION")
 }
 
 /// A leaf the basic extractor does not take: a SPLINE goes through the exact spline extractor
@@ -3743,6 +3917,48 @@ impl PvecConvertError {
             #[cfg(feature = "pvec-raster-thumbnail")]
             PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
+            PvecConvertError::Deadline => d(DiagnosticCode::Cancelled, "deadline"),
+        }
+    }
+
+    /// A stable, upper snake code for this failure (#1674), for a caller that has to tell one from
+    /// another without reading the message. The message may change, the code does not.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            PvecConvertError::Open(_) => "OPEN_FAILED",
+            PvecConvertError::View(e) => match e {
+                ViewProfileError::LayoutNotFound { .. } => "LAYOUT_NOT_FOUND",
+                ViewProfileError::NoModelSpace { .. } => "NO_MODEL_SPACE",
+                ViewProfileError::Limit(e) => e.code(),
+                _ => "VIEW_FAILED",
+            },
+            PvecConvertError::Flatten(e) => match e {
+                FlattenError::Limit { limit, .. } => limit.code(),
+                FlattenError::BlockRecursionLimit { .. } => "BLOCK_CYCLE",
+                _ => "FLATTEN_FAILED",
+            },
+            PvecConvertError::UnitRequired => "UNIT_REQUIRED",
+            PvecConvertError::Write(_) => "WRITE_FAILED",
+            PvecConvertError::NothingStorable { .. } => "NOTHING_STORABLE",
+            PvecConvertError::Tally(_) => "TALLY_FAILED",
+            PvecConvertError::Components(_) => "COMPONENTS_FAILED",
+            PvecConvertError::Report(_) => "REPORT_FAILED",
+            PvecConvertError::Publish(_) => "PUBLISH_FAILED",
+            PvecConvertError::CapabilityNotAllowed { .. } => "CAPABILITY_NOT_ALLOWED",
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            PvecConvertError::Thumbnail(_) => "THUMBNAIL_FAILED",
+            PvecConvertError::Cancelled => "CANCELLED",
+            PvecConvertError::Deadline => "DEADLINE",
+        }
+    }
+
+    /// `Cancelled` is `Deadline` when `cancel` fired because its time was up and nobody called
+    /// `cancel()`; every other error is as it was.
+    fn settled(self, cancel: &CancelToken) -> Self {
+        match self {
+            PvecConvertError::Cancelled if cancel.deadline_passed() => PvecConvertError::Deadline,
+            other => other,
         }
     }
 }

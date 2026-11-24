@@ -1,4 +1,5 @@
-//! TEXT, MTEXT, ATTDEF, HATCH and SOLID as PVec's text and hatch streams (#1609).
+//! TEXT, MTEXT, ATTDEF, HATCH and SOLID as PVec's text and hatch streams (#1609), and the text of a
+//! MULTILEADER, a TOLERANCE, or a DIMENSION whose block is missing (#1658).
 //!
 //! Neither is a curve, so neither goes into the geometry. Each rides on entities that are:
 //!

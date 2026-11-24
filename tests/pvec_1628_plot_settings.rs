@@ -817,9 +817,10 @@ fn issue_1628_a_scale_preset_or_a_custom_scale_replaces_the_layouts_plot_scale()
         (mm(2.0, 5.0), "2:5"),
         (mm(10.0, 1.0), "10:1"),
     ] {
+        // The scale moves the line (#1665), so it is small enough to stay on the paper at 10:1.
         let (_, s, dir) = framed(
             "scale",
-            one_line([10.0, 10.0], [20.0, 20.0]),
+            one_line([1.0, 1.0], [2.0, 2.0]),
             PlotSettings {
                 scale: Some(scale),
                 ..PlotSettings::default()
