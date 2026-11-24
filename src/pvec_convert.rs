@@ -3518,7 +3518,6 @@ struct Done {
     warnings: Vec<String>,
 }
 
-/// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
 /// The lines a LEADER, MULTILEADER or TOLERANCE leaf draws (#1671), each as a leaf of its own with
 /// the entity's provenance, style and placement, so the layer rules, the view pass and any viewport
 /// it is seen through treat them as they do the entity. A MULTILEADER's or TOLERANCE's own leaf
@@ -3543,13 +3542,21 @@ fn line_leaves<P: DwgProvider>(
         if class == "LEADER" && !drawn.is_empty() {
             replaced.insert(flat_key(f));
         }
-        lines.extend(drawn.into_iter().map(|geometry| {
-            f.carrying(RawEntity {
-                geometry,
-                provenance: f.entity.provenance.clone(),
-                style: f.entity.style.clone(),
-            })
-        }));
+        // No entity draws more than this many lines: a frame of rows and cells or a leader's
+        // lines and arrowheads are a few dozen at most.
+        const MAX_LINES_PER_ENTITY: usize = 4096;
+        lines.extend(
+            drawn
+                .into_iter()
+                .take(MAX_LINES_PER_ENTITY)
+                .map(|geometry| {
+                    f.carrying(RawEntity {
+                        geometry,
+                        provenance: f.entity.provenance.clone(),
+                        style: f.entity.style.clone(),
+                    })
+                }),
+        );
     }
     (lines, replaced)
 }
@@ -3557,6 +3564,7 @@ fn line_leaves<P: DwgProvider>(
 /// A leaf's handle, block path and class, which says which view pass decision is its own.
 type LeafKey = (Option<u64>, String, String);
 
+/// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
 fn flat_key(f: &FlatEntity) -> LeafKey {
     leaf_key_of(&f.entity.provenance)
 }

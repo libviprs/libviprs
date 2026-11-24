@@ -69,7 +69,7 @@ use crate::pvec::provider::{
     LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, Point3, ProvenanceStub,
     ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact,
     SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef, ViewportClip,
-    ViewportEntity, XrefAttachment,
+    ViewportEntity, XrefAttachment, z_axis_flip,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -213,7 +213,7 @@ fn stroke(points: &[Point3], closed: bool) -> Option<RawGeometry> {
 fn arrowhead(tip: Point3, toward: Point3, size: f64) -> Option<RawGeometry> {
     let (dx, dy) = (toward[0] - tip[0], toward[1] - tip[1]);
     let len = (dx * dx + dy * dy).sqrt();
-    if !(size.is_finite() && size > 0.0 && len > 0.0) {
+    if !(size.is_finite() && size > 0.0 && len.is_finite() && len > 0.0) {
         return None;
     }
     let (ux, uy) = (dx / len, dy / len);
@@ -264,9 +264,12 @@ pub(crate) fn run_advance(line: &str) -> f64 {
 /// with, since the drawing's own face is not read.
 fn tolerance_frame(t: &acr::entities::Tolerance, h: f64, gap: f64) -> Vec<RawGeometry> {
     let gap = gap.max(0.0);
-    // A frame off the Z axis is refused as its text is.
-    let flat = t.normal.x == 0.0 && t.normal.y == 0.0 && t.normal.z > 0.0;
-    if !(flat && h.is_finite() && h > 0.0 && gap.is_finite()) {
+    // A frame off the Z axis is refused as its text is; a -Z normal mirrors x and float noise in
+    // the axis is read as the axis (#1660).
+    let Some(flip) = z_axis_flip([t.normal.x, t.normal.y, t.normal.z]) else {
+        return Vec::new();
+    };
+    if !(h.is_finite() && h > 0.0 && gap.is_finite()) {
         return Vec::new();
     }
     let shown = gdt_text(&t.text);
@@ -284,8 +287,9 @@ fn tolerance_frame(t: &acr::entities::Tolerance, h: f64, gap: f64) -> Vec<RawGeo
     let row_height = h + 2.0 * gap;
     let (sin, cos) = angle_of(t.direction, 0.0).sin_cos();
     let at = |x: f64, y: f64| {
+        let px = t.insertion_point.x + x * cos - y * sin;
         [
-            t.insertion_point.x + x * cos - y * sin,
+            if flip { -px } else { px },
             t.insertion_point.y + x * sin + y * cos,
             t.insertion_point.z,
         ]
