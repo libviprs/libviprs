@@ -60,6 +60,7 @@ use std::sync::{Arc, Mutex};
 
 mod calibration;
 mod capability;
+mod dwg_image;
 mod georef;
 mod layouts;
 mod manifest;
@@ -212,6 +213,9 @@ pub enum PvecConvertError {
         /// The INSERT chain the entity was reached through, spelled `block@HANDLE/...`.
         block_path: String,
     },
+    /// A placed DWG IMAGE's raster could not be written (#1667).
+    #[error("a placed image could not be written")]
+    Rasters(#[source] crate::raster_pvec::container::RasterWriteError),
     /// The thumbnail could not be drawn (#1629). The artifact was published.
     #[cfg(feature = "pvec-raster-thumbnail")]
     #[error("the thumbnail could not be drawn")]
@@ -268,7 +272,6 @@ pub struct PvecConversion<'a> {
     xrefs: Vec<(String, CadSource<'a>)>,
     xref_note: Arc<Mutex<xref::XrefNote>>,
     /// The directory a DWG IMAGE's file is read from (#1667); `None` places no image.
-    #[allow(dead_code)]
     images: Option<PathBuf>,
 }
 
@@ -385,8 +388,12 @@ impl<'a> PvecConversion<'a> {
         }
     }
 
-    /// Place a DWG IMAGE as a raster (#1667), reading its file from `dir`. Not wired yet: the
-    /// red tests of #1667 fail against this.
+    /// Place a DWG IMAGE as a raster (#1667). The file its definition names is looked up by file
+    /// name in `dir` (the directory part of the path the drawing carries is never followed, so a
+    /// drawing cannot point at a file outside `dir`), decoded, and written at the IMAGE's
+    /// insertion point, scale and rotation, cut to its clip, in the frame of the linework around
+    /// it. An IMAGE whose file is not in `dir`, or does not decode, or is switched off, is not
+    /// placed and its row says why. Off by default, and then an IMAGE is only counted (#1328).
     #[must_use]
     pub fn images(mut self, dir: impl Into<PathBuf>) -> Self {
         self.images = Some(dir.into());
@@ -727,6 +734,7 @@ impl<'a> PvecConversion<'a> {
             calibration: caller_calibration,
             plot_style,
             plot_settings,
+            images,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -1450,6 +1458,8 @@ impl<'a> PvecConversion<'a> {
         let mut texts: Vec<(EntityId, TextBody)> = Vec::new();
         let mut fills: Vec<(Vec<EntityId>, FillBody)> = Vec::new();
         let mut annotation_counts: BTreeMap<String, u64> = BTreeMap::new();
+        // The IMAGEs placed as rasters (#1667), in the order they were met.
+        let mut rasters: Vec<crate::raster_pvec::pyramid::RasterPyramid> = Vec::new();
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         /// The pieces of a line or straight polyline inside the sheet `b`, `[min x, min y, max x,
@@ -2265,6 +2275,35 @@ impl<'a> PvecConversion<'a> {
                         }
                     }
                 }
+                // An IMAGE is placed as a raster when the caller said where its file is (#1667).
+                // Its row stays the unmapped one it always was, and says what became of the pixels.
+                if let (Some(dir), Item::Leaf(f), false) = (images.as_deref(), item, frozen_here)
+                    && raw.provenance.class_name == "IMAGE"
+                    && matches!(raw.geometry, RawGeometry::Unmapped { .. })
+                    && let Some(frame) = raw.provenance.handle.and_then(|h| provider.image_frame(h))
+                {
+                    let named = frame
+                        .file_name
+                        .rsplit(['\\', '/'])
+                        .next()
+                        .unwrap_or_default();
+                    match dwg_image::place(
+                        &frame,
+                        |p| f.map_point(p),
+                        dir,
+                        clip_box,
+                        ring.map(Vec::as_slice),
+                    ) {
+                        Ok(pyramid) => {
+                            rasters.push(pyramid);
+                            done.warnings
+                                .push(format!("IMAGE: placed as a raster from {named}"));
+                        }
+                        Err(why) => done
+                            .warnings
+                            .push(format!("IMAGE: not drawn, {why} ({named})")),
+                    }
+                }
                 let mut carried_ids: Vec<EntityId> = Vec::new();
                 let mut stop = false;
                 for done in std::iter::once(done).chain(more) {
@@ -2562,6 +2601,7 @@ impl<'a> PvecConversion<'a> {
             texts,
             fills,
             annotation_counts,
+            rasters,
             sheet,
         })
     }
@@ -2588,6 +2628,7 @@ impl<'a> PvecConversion<'a> {
             texts,
             fills,
             annotation_counts,
+            rasters,
             sheet,
         } = self.classify(provider, Some(unit))?;
         #[cfg(feature = "pvec-raster-thumbnail")]
@@ -2671,6 +2712,24 @@ impl<'a> PvecConversion<'a> {
             Ok((report, fidelity))
         };
         let config = WriteConfig { unit, leaves };
+        // The manifest box takes in every placed raster too, so a logo past the linework is inside it.
+        let open_area = rasters.iter().fold(area, |acc, r| {
+            let [x0, y0, x1, y1] = r.visible_box.map(f64::from);
+            let [a, b, c, d, tx, ty] = r.pixel_to_source;
+            [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                .iter()
+                .map(|p| [a * p[0] + b * p[1] + tx, c * p[0] + d * p[1] + ty])
+                .fold(acc, |acc, q| {
+                    Some(acc.map_or([q[0], q[1], q[0], q[1]], |b| {
+                        [
+                            b[0].min(q[0]),
+                            b[1].min(q[1]),
+                            b[2].max(q[0]),
+                            b[3].max(q[1]),
+                        ]
+                    }))
+                })
+        });
         let mut chunk = 0u64;
         let mut on_chunk = |entities: u64, bytes: u64| {
             chunk += 1;
@@ -2700,7 +2759,7 @@ impl<'a> PvecConversion<'a> {
                 &config,
                 geometries.iter().map(|(id, g)| (*id, g)),
                 Vec::new(),
-                area,
+                open_area,
                 spill,
                 &cancel,
                 on_chunk,
@@ -2710,6 +2769,9 @@ impl<'a> PvecConversion<'a> {
             // PVec sorts the calibration block after every other kind, so it can go in first.
             if let Some(c) = &calibration {
                 open.calibration(c).map_err(write_error)?;
+            }
+            if !rasters.is_empty() {
+                open.rasters(&rasters).map_err(PvecConvertError::Rasters)?;
             }
             if select == StreamSelection::NONE && regions.is_none() {
                 return Ok((open, None, None));
@@ -2962,6 +3024,8 @@ struct Classified {
     texts: Vec<(EntityId, TextBody)>,
     fills: Vec<(Vec<EntityId>, FillBody)>,
     annotation_counts: BTreeMap<String, u64>,
+    /// The IMAGEs placed as rasters, written after the geometry (#1667).
+    rasters: Vec<crate::raster_pvec::pyramid::RasterPyramid>,
     /// The paper sheet, for a paper layout under the print profile.
     sheet: Option<Sheet>,
 }
@@ -3731,6 +3795,7 @@ impl PvecConvertError {
             PvecConvertError::Write(_) | PvecConvertError::Components(_) => {
                 d(DiagnosticCode::WriteFailed, "write")
             }
+            PvecConvertError::Rasters(_) => d(DiagnosticCode::WriteFailed, "rasters"),
             PvecConvertError::NothingStorable { .. } => {
                 d(DiagnosticCode::WriteFailed, "nothing-storable")
             }
