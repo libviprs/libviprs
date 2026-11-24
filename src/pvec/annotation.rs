@@ -350,7 +350,7 @@ pub(crate) fn map(
                     .filter_map(|l| {
                         let (s, c) = l.angle.sin_cos();
                         let along = linear([c, s]);
-                        let length = along[0].hypot(along[1]);
+                        let length = pvec_numeric::detmath::hypot(along[0], along[1]);
                         if !(length.is_finite() && length > 0.0) {
                             return None;
                         }
