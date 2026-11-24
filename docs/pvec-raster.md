@@ -80,7 +80,7 @@ Until the georeference hand-off of #1048 can hand libviprs a calibration, the ca
 
 ## DWG images
 
-A DWG `IMAGE` names a file path, and no reader here opens a path a drawing names. It shows up in the conversion report as a frame (insertion point, U and V vectors, size, `show_image`, `definition_loaded`) and no placement is written. The same goes for an image with `SHOW_IMAGE` clear or no loaded definition.
+A DWG `IMAGE` names a file path, and no reader here opens a path a drawing names. It shows up in the conversion report as a frame (insertion point, U and V vectors, size, `show_image`, `definition_loaded`) and no placement is written. The same goes for an image with `SHOW_IMAGE` clear or no loaded definition. That is what a conversion does by default. With `PvecConversion::images(dir)` (issue #1667) the conversion reads the file the definition names from `dir`, by its file name only, and writes a raster placement for it, cut to its clip, in the frame of the linework around it; an image whose file is missing or does not decode stays a frame and its row says why.
 
 ## The commands
 
