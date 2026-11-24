@@ -702,3 +702,46 @@ fn issue_1670_text_is_sized_so_a_capital_stands_one_text_height() {
     let size = real(&tf.operands[1]) / PT_PER_MM;
     assert!((size - 5.0 / 0.716).abs() < 0.05, "{size} mm");
 }
+
+// ---- a line that is not flat --------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_sloped_line_is_drawn_as_it_looks_from_above() {
+    // A plan shows a line whose ends are at different heights as the segment it covers.
+    let dir = scratch("sloped");
+    let mut doc = CadDocument::new();
+    doc.add_layout("A3").unwrap();
+    set_plot(&mut doc, &Sheet("A3", 420.0, 297.0, 0));
+    let l = Line::from_coords(10.0, 10.0, 0.0, 100.0, 50.0, 30.0);
+    doc.add_entity_to_layout(EntityType::Line(l), "A3").unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dest = dir.join("out.pdf");
+    PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"])
+        .convert_with::<AcadrustProvider>()
+        .unwrap();
+    let o = ops(&dest, 1);
+    let at = o.iter().position(|o| o.operator == "S").expect("a stroke");
+    let pts: Vec<(f64, f64)> = o[..at]
+        .iter()
+        .filter(|o| o.operator == "m" || o.operator == "l")
+        .map(|o| {
+            (
+                real(&o.operands[0]) / PT_PER_MM,
+                real(&o.operands[1]) / PT_PER_MM,
+            )
+        })
+        .collect();
+    assert_eq!(pts.len(), 2, "{pts:?}");
+    assert!(
+        (pts[0].0 - 10.0).abs() < 0.05 && (pts[0].1 - 10.0).abs() < 0.05,
+        "{pts:?}"
+    );
+    assert!(
+        (pts[1].0 - 100.0).abs() < 0.05 && (pts[1].1 - 50.0).abs() < 0.05,
+        "{pts:?}"
+    );
+}
