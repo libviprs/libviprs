@@ -84,6 +84,10 @@ pub struct PdfVectorLimits {
     /// is the cap on any one stream; an image over it is refused alone and the page converts
     /// (issue #1362).
     pub max_image_stream_bytes: u64,
+    /// Most decoded bytes of font side data (`/ToUnicode` CMaps and `/CIDToGIDMap` streams)
+    /// read across the page and every form expansion. An embedded font program is never read, so
+    /// it is not counted here (issue #1687).
+    pub max_font_bytes: u64,
 }
 
 impl Default for PdfVectorLimits {
@@ -98,6 +102,7 @@ impl Default for PdfVectorLimits {
             max_images: 4_096,
             max_image_bytes: 512 << 20,
             max_image_stream_bytes: 64 << 20,
+            max_font_bytes: 16 << 20,
         }
     }
 }
@@ -693,6 +698,18 @@ pub enum PdfVectorError {
         /// The configured limit.
         limit: u64,
         /// The count reached.
+        observed: u64,
+    },
+    /// A font's side data is past a bound: the decoded `/ToUnicode` and `/CIDToGIDMap` bytes over
+    /// `max_font_bytes`, a CMap with too many entries, a `/W` array with too many widths or a
+    /// `/CIDToGIDMap` with more than 65 536 glyphs (issue #1687).
+    #[error("font limit on {what} exceeded: limit {limit}, observed {observed}")]
+    FontLimitExceeded {
+        /// Which bound: `font bytes`, `cmap entries`, `cid widths` or `glyphs`.
+        what: &'static str,
+        /// The bound.
+        limit: u64,
+        /// The count reached when reading stopped.
         observed: u64,
     },
     /// A `/Resources` lookup came back to an object it had already visited.
