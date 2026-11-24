@@ -1763,3 +1763,5 @@ annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_directory_whe
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stored_default_that_no_longer_loads_is_an_error_not_a_fall_back
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stored_file_over_the_cap_is_unreadable_without_being_read
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_the_directory_is_private_and_so_are_the_files
+annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stale_scratch_file_does_not_stop_a_store_and_is_left_alone
+annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_threads_storing_the_same_default_all_succeed_and_leave_no_scratch
