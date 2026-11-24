@@ -317,6 +317,65 @@ fn a_cid_to_gid_map_with_more_than_65536_glyphs_is_a_typed_refusal() {
     }
 }
 
+/// One range over every code with a destination of `digits` hex digits.
+fn range_cmap(digits: usize) -> String {
+    CMAP.replace(
+        "3 beginbfchar\n<0001> <0041>\n<0002> <0042>\n<0003> <0043>\nendbfchar",
+        &format!(
+            "1 beginbfrange\n<0000> <FFFF> <{}>\nendbfrange",
+            "0041".repeat(digits / 4)
+        ),
+    )
+}
+
+#[test]
+fn a_bfrange_destination_over_64_units_is_a_typed_refusal_before_anything_is_built() {
+    // 65 536 codes times 5 000 units is 650 MB if each code keeps its own copy.
+    let started = std::time::Instant::now();
+    match Fixture::new(Map::Flate(range_cmap(20_000).into_bytes()))
+        .refusal(&PdfVectorLimits::default())
+    {
+        PdfVectorError::FontLimitExceeded {
+            what,
+            limit,
+            observed,
+        } => {
+            assert_eq!(what, "cmap destination");
+            assert_eq!(limit, 64);
+            assert_eq!(observed, 5_000);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(started.elapsed().as_secs() < 2, "{:?}", started.elapsed());
+}
+
+#[test]
+fn built_cmap_strings_count_against_the_font_byte_bound() {
+    // 64 units a code is allowed, but 65 536 codes of 64 bytes are 4 MiB against a 1 MiB bound.
+    let limits = PdfVectorLimits {
+        max_font_bytes: 1 << 20,
+        ..PdfVectorLimits::default()
+    };
+    match Fixture::new(Map::Flate(range_cmap(256).into_bytes())).refusal(&limits) {
+        PdfVectorError::FontLimitExceeded { what, limit, .. } => {
+            assert_eq!(what, "font bytes");
+            assert_eq!(limit, 1 << 20);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_short_bfrange_destination_still_reads() {
+    let cmap = CMAP.replace(
+        "3 beginbfchar\n<0001> <0041>\n<0002> <0042>\n<0003> <0043>\nendbfchar",
+        "1 beginbfrange\n<0001> <0003> <00410042>\nendbfrange",
+    );
+    // Two units a code, the last one counting up: AB, AC, AD.
+    let page = Fixture::new(Map::Flate(cmap.into_bytes())).page();
+    assert_eq!(page.texts[0].text, "ABACAD");
+}
+
 #[test]
 fn a_w_array_with_too_many_widths_is_a_typed_refusal() {
     // `0 65535 500` three times: 196 608 widths.
