@@ -1730,3 +1730,13 @@ annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_an_open_poly
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_every_side_draws_what_the_rule_says
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_the_pattern_is_never_stretched
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_the_plots_side_starts_on_a_dash_of_3_875_and_keeps_the_period
+annotated   fs-detected  tests/pvec_1704_layout_set_rows.rs::issue_1704_a_set_keeps_its_rows_by_default
+annotated   fs-detected  tests/pvec_1704_layout_set_rows.rs::issue_1704_a_set_that_drops_rows_keeps_them_in_the_report_file_only
+annotated   fs-detected  tests/pvec_1704_plot_memory.rs::issue_1704_the_peak_does_not_move_when_the_sheet_count_grows_fivefold
+annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_a_cancel_part_way_leaves_no_file_and_an_existing_output_alone
+annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_a_deadline_part_way_leaves_no_file
+annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_a_finished_sheet_leaves_no_report_behind
+annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_a_one_sheet_plot_is_structurally_what_it_was
+annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_a_streamed_file_has_one_xref_table_and_the_pages_in_order
+annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_the_same_plot_is_the_same_bytes_every_time
+annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_the_scratch_never_holds_more_than_one_sheet

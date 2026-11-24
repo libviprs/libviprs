@@ -167,6 +167,7 @@ pub struct PvecLayoutSet<'a> {
     #[allow(clippy::type_complexity)]
     sheet: Box<dyn for<'s> Fn(PvecConversion<'s>) -> PvecConversion<'s> + 'a>,
     deadline: Option<Duration>,
+    keep_rows: bool,
 }
 
 impl<'a> PvecLayoutSet<'a> {
@@ -180,7 +181,19 @@ impl<'a> PvecLayoutSet<'a> {
             select: None,
             sheet: Box::new(|c| c),
             deadline: None,
+            keep_rows: true,
         }
+    }
+
+    /// Whether each written sheet's outcome keeps the report's per entity rows (the default). The
+    /// rows are in the report file beside the artifact either way, and on a drawing of tens of
+    /// thousands of entities a set of dozens of sheets holds every sheet's rows at once when they
+    /// are kept (#1704). Without them `report.entities` is empty and the totals, the view, the
+    /// sheet summary and the rest of the report are as they were.
+    #[must_use]
+    pub fn keep_rows(mut self, keep: bool) -> Self {
+        self.keep_rows = keep;
+        self
     }
 
     /// Only these layouts, matched the way a [`SpaceSelection::PaperLayout`] is (ASCII case
@@ -417,6 +430,11 @@ impl<'a> PvecLayoutSet<'a> {
                 outcome = Err(SheetSkip::Failed(PvecConvertError::Publish(
                     PublishError::Io(e),
                 )));
+            }
+            if !self.keep_rows
+                && let Ok(done) = &mut outcome
+            {
+                done.report.entities = Vec::new();
             }
             let (status, reason, written) = match &outcome {
                 Ok(o) => ("written", None, Some(o.written)),
