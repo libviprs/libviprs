@@ -308,6 +308,9 @@ pub struct PlotSettings {
     pub print_lineweights: Option<bool>,
     /// Paper space draws after what the viewports show. `None` is the layout's own.
     pub paperspace_last: Option<bool>,
+    /// The device a PC3 describes. It fills what the layout's own page setup leaves empty (a zero
+    /// paper, no margins) and never replaces what the layout says (issue #1673). `None` is no PC3.
+    pub device: Option<crate::cad::plot_files::PlotDevice>,
 }
 
 /// A plot scale as the plot dialog's custom row gives it: `paper` paper units of `paper_unit` to
