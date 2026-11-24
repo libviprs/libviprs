@@ -300,7 +300,7 @@ impl CadDrawing for AcadrustDrawing {
             sink,
             report,
         };
-        self.emit(&flat.entities, IDENTITY, true, &mut run)?;
+        self.emit(&flat.entities, &mut run)?;
         self.emit_attributes(&EntityScope::Layout(layout.id), &mut run)?;
         report.mark_complete();
         sink.finish()
@@ -318,32 +318,11 @@ struct Run<'a> {
     report: &'a mut DecodeReport,
 }
 
-/// `outer` after `inner`: the map that does `inner` first.
-fn compose(outer: [f64; 6], inner: [f64; 6]) -> [f64; 6] {
-    let [oa, ob, oc, od, otx, oty] = outer;
-    let [ia, ib, ic, id, itx, ity] = inner;
-    [
-        oa * ia + ob * ic,
-        oa * ib + ob * id,
-        oc * ia + od * ic,
-        oc * ib + od * id,
-        oa * itx + ob * ity + otx,
-        oc * itx + od * ity + oty,
-    ]
-}
-
 impl AcadrustDrawing {
-    /// Sends every visible leaf to the sink, `outer` applied after the leaf's own map. A
-    /// DIMENSION is a leaf with no geometry of its own: its lines and text live in the anonymous
-    /// block it names, which is walked once more (`nest` is false inside it, so a block that
-    /// names itself cannot loop).
-    fn emit(
-        &self,
-        leaves: &[FlatEntity],
-        outer: [f64; 6],
-        nest: bool,
-        run: &mut Run<'_>,
-    ) -> Result<(), CadError> {
+    /// Sends every visible leaf to the sink, through the leaf's own map. A DIMENSION is not a
+    /// leaf: the provider reports it as an INSERT of the anonymous block that holds its lines and
+    /// text, so the flatten walk has already expanded it (#1658).
+    fn emit(&self, leaves: &[FlatEntity], run: &mut Run<'_>) -> Result<(), CadError> {
         let state = |h: &ItemHandle| run.hidden.get(h).copied().unwrap_or_default();
         for leaf in leaves {
             let prov = &leaf.entity.provenance;
@@ -362,14 +341,7 @@ impl AcadrustDrawing {
             if hides {
                 continue;
             }
-            let matrix = compose(outer, leaf.matrix());
-            if nest
-                && let Some(block) = self.dimension_block(leaf)
-                && let Some(handle) = prov.handle
-            {
-                self.emit_dimension_block(&block, handle, leaf, matrix, run)?;
-                continue;
-            }
+            let matrix = leaf.matrix();
             if let Some((drawn, notes)) = convert_drawn(&self.provider, leaf, matrix) {
                 for p in drawn {
                     let kind = p.kind();
@@ -435,45 +407,6 @@ impl AcadrustDrawing {
             }
         }
         Ok(())
-    }
-
-    fn dimension_block(&self, leaf: &FlatEntity) -> Option<String> {
-        if !leaf.entity.provenance.class_name.starts_with("DIMENSION") {
-            return None;
-        }
-        self.provider
-            .dimension_block(leaf.entity.provenance.handle?)
-    }
-
-    fn emit_dimension_block(
-        &self,
-        block: &str,
-        handle: ItemHandle,
-        leaf: &FlatEntity,
-        matrix: [f64; 6],
-        run: &mut Run<'_>,
-    ) -> Result<(), CadError> {
-        let scope = EntityScope::BlockDefinition {
-            name: block.to_owned(),
-            reached_via: leaf.entity.provenance.block_path.child(block, handle),
-        };
-        match BlockResolver::new(&self.provider, self.bounds()).flatten(
-            &scope,
-            NAME,
-            block,
-            &mut NoProvenance,
-            &mut LineageStore::new(),
-        ) {
-            Ok(inner) => self.emit(&inner.entities, matrix, false, run),
-            Err(e) => {
-                run.report.push(
-                    Diagnostic::from_code(DiagnosticCode::UNRESOLVED_BLOCK, e.to_string())
-                        .with_view(run.view)
-                        .with_entity(handle),
-                );
-                Ok(())
-            }
-        }
     }
 }
 

@@ -215,9 +215,129 @@ pub(crate) fn decode_escapes(text: &str) -> String {
     out
 }
 
+/// The text of a TOLERANCE (a feature control frame) as a person reads it.
+///
+/// A frame's string switches to the `gdt` font for its symbols, so a letter inside a
+/// `{\Fgdt;…}` group stands for one: `j` is position (⌖), `n` a diameter (⌀), `m` maximum material
+/// condition (Ⓜ), `b` perpendicularity (⊥) and so on, after AutoCAD's `gdt.shx`. A letter with no
+/// symbol stays as it is. `%%v` divides the frame's cells: the cells of each row are joined with
+/// `" | "` and an empty cell is dropped, since the frame itself is not drawn. The rest of the
+/// string goes through [`display_text`], so rows come out one per line; the transport escapes
+/// ([`decode_escapes`]) are still the caller's to decode.
+#[cfg(feature = "dwg-acadrust")]
+pub(crate) fn gdt_text(content: &str) -> String {
+    /// Stands in for `%%v` until the rows are known; [`display_text`] passes it through.
+    const CELL: char = '\u{1f}';
+    let mut mapped = String::with_capacity(content.len());
+    // Whether the gdt font is on, for the group being read and the groups around it.
+    let (mut gdt, mut outer) = (false, Vec::new());
+    let mut chars = content.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '{' => {
+                outer.push(gdt);
+                mapped.push(c);
+            }
+            '}' => {
+                gdt = outer.pop().unwrap_or(false);
+                mapped.push(c);
+            }
+            '\\' => match chars.next() {
+                Some('f' | 'F') => {
+                    let arg = until_semicolon(&mut chars);
+                    gdt = arg
+                        .split('|')
+                        .next()
+                        .is_some_and(|name| name.trim().eq_ignore_ascii_case("gdt"));
+                }
+                // A code's argument is not text, so none of it is mapped.
+                Some(code @ ('C' | 'c' | 'H' | 'T' | 'Q' | 'W' | 'A' | 'p' | 'S')) => {
+                    mapped.push('\\');
+                    mapped.push(code);
+                    mapped.push_str(&until_semicolon(&mut chars));
+                    mapped.push(';');
+                }
+                Some(code) => {
+                    mapped.push('\\');
+                    mapped.push(code);
+                }
+                None => {}
+            },
+            // A `%%` code is read whole, so the letter after it is never a symbol: `%%v` is a
+            // cell break and every other one (`%%c`, and `%%%` for a percent) is left for
+            // [`decode_escapes`].
+            '%' if chars.peek() == Some(&'%') => {
+                chars.next();
+                match chars.next() {
+                    Some('v' | 'V') => mapped.push(CELL),
+                    Some(code) => {
+                        mapped.push_str("%%");
+                        mapped.push(code);
+                    }
+                    None => mapped.push_str("%%"),
+                }
+            }
+            _ if gdt => mapped.push(match c {
+                'a' => '\u{2220}',
+                'b' => '\u{22a5}',
+                'c' => '\u{23e5}',
+                'd' => '\u{2313}',
+                'e' => '\u{25cb}',
+                'f' => '\u{2225}',
+                'g' => '\u{232d}',
+                'h' => '\u{2197}',
+                'i' => '\u{232f}',
+                'j' => '\u{2316}',
+                'k' => '\u{2312}',
+                'l' => '\u{24c1}',
+                'm' => '\u{24c2}',
+                'n' => '\u{2300}',
+                'p' => '\u{24c5}',
+                'r' => '\u{25ce}',
+                's' => '\u{24c8}',
+                't' => '\u{2330}',
+                'u' => '\u{23e4}',
+                other => other,
+            }),
+            _ => mapped.push(c),
+        }
+    }
+    display_text(&mapped)
+        .text
+        .split('\n')
+        .map(|row| {
+            row.split(CELL)
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(any(feature = "dwg-acadsharp", feature = "dwg-acadrust"))]
+    fn a_feature_control_frame_reads_as_its_symbols_and_cells() {
+        // g13_tolerance.dwg's frame.
+        let frame = r"{\Fgdt;j}%%v{\Fgdt;n}0.25{\Fgdt;m}%%vA%%v%%v%%v\P{\Fgdt;b}%%v0.5%%vB";
+        assert_eq!(
+            gdt_text(frame),
+            "\u{2316} | \u{2300}0.25\u{24c2} | A\n\u{22a5} | 0.5 | B"
+        );
+        // The same letters outside the font are letters, a group ends the font, and a code's
+        // argument is never mapped.
+        assert_eq!(gdt_text(r"jn{\Fgdt;j}j"), "jn\u{2316}j");
+        assert_eq!(gdt_text(r"{\Fgdt;{\H2x;a}}a"), "\u{2220}a");
+        assert_eq!(gdt_text(r"{\fArial|b0;{\Fgdt;p}}%%V5"), "\u{24c5} | 5");
+        // A newline separates rows as well as \P, and a letter with no symbol stays.
+        assert_eq!(gdt_text("{\\Fgdt;q}%%v1\n2"), "q | 1\n2");
+        assert_eq!(gdt_text("%%c5 %%%v"), "%%c5 %%%v");
+    }
 
     #[test]
     fn plain_text_passes_through() {
