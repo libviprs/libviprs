@@ -1562,6 +1562,7 @@ annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_a_multi
 annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_a_tolerance_is_drawn_as_its_frame_one_rectangle_per_row
 annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_the_lines_do_not_need_the_texts_option
 annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_what_is_on_a_frozen_layer_loses_its_lines_with_it
+annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_a_tolerance_on_a_minus_z_or_noisy_normal_draws_its_frame_like_its_text
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_cancel_after_a_sheet_stops_the_next_one_starting
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_deadline_on_one_sheet_fails_only_that_sheet
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_deadline_that_is_met_changes_nothing

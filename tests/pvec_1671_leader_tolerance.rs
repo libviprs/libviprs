@@ -318,3 +318,53 @@ fn issue_1671_what_is_on_a_frozen_layer_loses_its_lines_with_it() {
         "the LINE is still drawn"
     );
 }
+
+/// A TOLERANCE on its own, its normal as given, with the style the main drawing uses.
+fn tolerance_with_normal(normal: Vector3) -> Vec<u8> {
+    let mut doc = CadDocument::new();
+    let style = doc.dim_styles.get_mut("Standard").unwrap();
+    style.dimtxt = 2.5;
+    style.dimgap = 0.625;
+    let mut t = Tolerance::with_text(
+        Vector3::new(100.0, 50.0, 0.0),
+        "{\\Fgdt;j}%%v0.5%%vA\\P{\\Fgdt;b}%%v0.1%%vB",
+    );
+    t.normal = normal;
+    doc.add_entity(EntityType::Tolerance(t)).unwrap();
+    DwgWriter::write_to_vec(&doc).unwrap()
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1671_a_tolerance_on_a_minus_z_or_noisy_normal_draws_its_frame_like_its_text() {
+    // The text accepts a -Z normal (mirrored in x) and a Z axis with float noise in it, so the
+    // frame does too: two row rectangles each, 3.75 high.
+    for (tag, normal, mirrored) in [
+        ("minus-z", Vector3::new(0.0, 0.0, -1.0), true),
+        ("noisy", Vector3::new(1e-12, 0.0, 1.0), false),
+    ] {
+        let run = convert(tag, &tolerance_with_normal(normal), true);
+        assert_eq!(
+            run.texts.len(),
+            2,
+            "{tag}: the text is carried: {:?}",
+            run.texts
+        );
+        let runs = run.of("TOLERANCE");
+        let rects: Vec<_> = runs.iter().filter(|r| r.len() == 4).collect();
+        assert_eq!(rects.len(), 2, "{tag}: a rectangle a row: {runs:?}");
+        for r in &rects {
+            let (lo, hi) = r
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(l, h), p| (l.min(p[1]), h.max(p[1])));
+            assert!(near(hi - lo, 3.75), "{tag}: {r:?}");
+        }
+        let xs: Vec<f64> = rects.iter().flat_map(|r| r.iter().map(|p| p[0])).collect();
+        if mirrored {
+            assert!(xs.iter().all(|x| *x <= -100.0 + 1e-6), "{tag}: {xs:?}");
+            assert!(xs.iter().any(|x| near(*x, -100.0)), "{tag}: {xs:?}");
+        } else {
+            assert!(xs.iter().any(|x| near(*x, 100.0)), "{tag}: {xs:?}");
+        }
+    }
+}
