@@ -799,6 +799,13 @@ annotated   not-detected tests/pvec_1630_plot_style_tables.rs::the_grayscale_pol
 annotated   not-detected tests/pvec_1630_plot_style_tables.rs::the_lineweight_list_sets_the_width
 annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::the_recorded_properties_do_not_change_what_is_drawn
 annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::without_a_table_the_conversion_is_what_it_was
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_millimetre_sheet_at_1_to_0_04_draws_at_full_paper_size
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_inch_sheet_at_1_to_1_016_draws_at_full_paper_size
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_the_callers_unit_does_not_change_a_plotted_sheet
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_real_tabloid_layout_draws_at_full_paper_size
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_callers_plot_scale_is_applied_like_the_stored_one
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_plot_window_is_scaled_with_the_linework
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_upside_down_sheet_at_1_to_0_04_is_scaled_then_turned
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_override_follows_the_layouts_rotation
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_size_override_replaces_the_paper_and_its_margins
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_that_is_not_a_size_is_refused_not_framed
@@ -897,6 +904,11 @@ annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_content_draws_
 annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_layer_override_applies
 annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_missing_stays_skipped
 annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_nested_depth_capped
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_a_named_state_applies_only_what_its_mask_restores
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_a_state_name_matches_without_regard_to_case
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_a_user_override_still_beats_the_state
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_turning_off_the_layers_a_state_does_not_list_hides_them
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_with_no_state_the_saved_layer_table_decides
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
@@ -1548,6 +1560,7 @@ annotated   fs-detected  tests/pvec_1658_annotation_text.rs::issue_1658_the_curs
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_cancel_after_a_sheet_stops_the_next_one_starting
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_deadline_on_one_sheet_fails_only_that_sheet
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_deadline_that_is_met_changes_nothing
+annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_deadline_too_large_to_count_is_no_deadline
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_failed_conversion_carries_its_code
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_failed_set_carries_its_code
 annotated   fs-detected  tests/pvec_1674_codes_progress_deadline.rs::issue_1674_a_passed_deadline_is_not_a_cancel
