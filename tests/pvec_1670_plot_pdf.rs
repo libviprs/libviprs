@@ -167,8 +167,8 @@ fn issue_1670_one_page_per_layout_at_the_layouts_paper() {
         );
     };
     near(0, 420.0, 297.0);
-    // stored 210 x 297 at rotation 1: shown as the stored paper, the box turned
-    near(1, 210.0, 297.0);
+    // stored 210 x 297 at rotation 1: shown as the landscape frame, from a portrait box
+    near(1, 297.0, 210.0);
 }
 
 #[test]
@@ -299,8 +299,8 @@ fn issue_1670_text_is_text() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1670_a_rotated_layout_is_a_rotated_page() {
-    // Layout A4 is portrait paper with plot rotation 1: the plotted sheet (the frame) is landscape, and
-    // the page carries /Rotate the way a plotter's own PDF does, so it shows as the portrait paper.
+    // Layout A4 is portrait paper with plot rotation 1: the plotted sheet (the frame) is landscape. The
+    // box is the portrait paper and the page carries /Rotate, the way a plotter's own PDF does.
     let (out, pdf) = plot("rotate", |p| p);
     out.unwrap();
     let doc = Document::load(&pdf).unwrap();
@@ -317,7 +317,7 @@ fn issue_1670_a_rotated_layout_is_a_rotated_page() {
         .map(real)
         .collect();
     assert!(
-        (media[2] - 297.0 * PT_PER_MM).abs() < 0.2 && (media[3] - 210.0 * PT_PER_MM).abs() < 0.2,
+        (media[2] - 210.0 * PT_PER_MM).abs() < 0.2 && (media[3] - 297.0 * PT_PER_MM).abs() < 0.2,
         "{media:?}"
     );
     let first = doc.get_dictionary(doc.get_pages()[&1]).unwrap();

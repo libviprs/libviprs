@@ -86,6 +86,9 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
         }
     }
 
+    // The owner plotted the first layouts in tab order and left the last ones out, so the plot
+    // takes as many as the reference has pages.
+    let want_pages = libviprs::pdf_info(&reference).unwrap().page_count;
     let out_dir = std::env::var_os("LIBVIPRS_OWNER_PLOT_OUT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
@@ -114,7 +117,9 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
         .unit(SourceUnit::Millimeters)
         .view_profile(ViewProfile::print_profile(&paper[0].name))
         .plot_style_table(table)
-        .layouts(paper.iter().map(|l| l.name.clone()))
+        .layouts(paper.iter().take(want_pages).map(|l| l.name.clone()))
+        .texts(true)
+        .fills(true)
         .convert_with::<AcadrustProvider>()
         .unwrap();
     eprintln!(

@@ -341,7 +341,7 @@ impl<'a> PdfPlot<'a> {
 
 /// One page: its box in points, the content stream that draws it, and the fonts it uses.
 struct Page {
-    /// The box, in points: the sheet's frame.
+    /// The size the page is displayed at, in points: the sheet's frame.
     size: [f64; 2],
     /// `/Rotate`: 0, 90 or 270. A layout rotated a quarter turn is displayed turned.
     rotate: i64,
@@ -477,15 +477,25 @@ fn read_page(artifact: &Path, rotation: i16) -> Result<Page, crate::pvec::publis
         text = true;
     }
 
-    // A layout rotated a quarter turn is plotted with the page turned: the box is the sheet's
-    // frame, as the plotter feeds it, and `/Rotate` shows it the way the paper is held. This is
-    // what a plotter's own PDF does (a portrait Tabloid sheet at rotation 1 is a landscape box
-    // rotated 270).
+    // A layout rotated a quarter turn is the paper turned: the box is the paper as it feeds (the
+    // frame with its sides swapped) and `/Rotate` shows it the way the layout reads, as a
+    // plotter's own PDF does. A portrait Tabloid layout at rotation 1 is a portrait box rotated
+    // 270 and displays as the landscape frame. The content is drawn in the frame, so it is
+    // turned back into the box.
     let rotate = match rotation {
         1 => 270,
         3 => 90,
         _ => 0,
     };
+    if rotate != 0 {
+        let (displayed_w, displayed_h) = (size[0], size[1]);
+        let cm = if rotate == 270 {
+            format!("0 -1 1 0 0 {displayed_w:.4} cm\n")
+        } else {
+            format!("0 1 -1 0 {displayed_h:.4} 0 cm\n")
+        };
+        content.insert_str(0, &cm);
+    }
     Ok(Page {
         size,
         rotate,
@@ -658,7 +668,12 @@ fn write_pdf(dest: &Path, pages: impl Iterator<Item = Page>) -> std::io::Result<
     let mut kids = Vec::new();
     for page in pages {
         let content = doc.add_object(Stream::new(Dictionary::new(), page.content.into_bytes()));
-        let [w, h] = page.size;
+        // The box is the paper as it feeds: the displayed frame, turned back when the page rotates.
+        let [w, h] = if page.rotate == 0 {
+            page.size
+        } else {
+            [page.size[1], page.size[0]]
+        };
         let resources = if page.text {
             dictionary! { "Font" => dictionary! { "F1" => font } }
         } else {
@@ -689,5 +704,7 @@ fn write_pdf(dest: &Path, pages: impl Iterator<Item = Page>) -> std::io::Result<
         "Producer" => Object::string_literal(concat!("libviprs ", env!("CARGO_PKG_VERSION"))),
     });
     doc.trailer.set("Info", info);
+    // Flate on every stream, as a plotter's PDF has it.
+    doc.compress();
     doc.save(dest).map(|_| ())
 }
