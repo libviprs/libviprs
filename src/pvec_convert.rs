@@ -219,6 +219,9 @@ pub enum PvecConvertError {
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
     Cancelled,
+    /// The wall-clock deadline passed (#1674). Nothing was published.
+    #[error("the deadline passed")]
+    Deadline,
 }
 
 /// What a conversion produced.
@@ -260,6 +263,8 @@ pub struct PvecConversion<'a> {
     element_rules: Option<ElementRules>,
     plot_style: Option<acadrust::plot_style::PlotStyleTable>,
     plot_settings: PlotSettings,
+    /// The wall-clock bound set with [`deadline`](Self::deadline), until the run starts its clock.
+    deadline: Option<std::time::Duration>,
     /// A paper sheet with nothing to stroke is a success with `written == 0` and no artifact,
     /// for a caller (the PDF plot, #1636) that still wants the empty page.
     empty_sheet_ok: bool,
@@ -373,6 +378,7 @@ impl<'a> PvecConversion<'a> {
             element_rules: None,
             plot_style: None,
             plot_settings: PlotSettings::default(),
+            deadline: None,
             empty_sheet_ok: false,
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail_width: None,
@@ -381,7 +387,8 @@ impl<'a> PvecConversion<'a> {
         }
     }
 
-    /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Shorthand
+    /// Carry TEXT, MTEXT, ATTDEF, MULTILEADER and TOLERANCE text, HATCH and SOLID in PVec's text and
+    /// hatch streams (#1609, #1658). Shorthand
     /// for [`texts`](Self::texts) and [`fills`](Self::fills) together, so a call to either after it
     /// wins for its half. Off by default, and it only takes effect with the line style stream
     /// selected ([`components`](Self::components)): each text is anchored on a short polyline and
@@ -398,14 +405,20 @@ impl<'a> PvecConversion<'a> {
     /// Carry TEXT, MTEXT and ATTDEF in PVec's text stream (#1624), without HATCH and SOLID: those
     /// stay unmapped, each with a warning saying fills are off, until [`fills`](Self::fills) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
+    ///
+    /// A MULTILEADER's text and a TOLERANCE's frame text are carried the same way, each row saying
+    /// its leader lines or its frame are not drawn (#1658). A DIMENSION needs neither option: the
+    /// provider reports it as an INSERT of its anonymous block, so its lines are geometry and its
+    /// printed value is an MTEXT in that block. Only a dimension whose block is missing comes here,
+    /// with its text rebuilt from the measurement and its style (decimal units only).
     #[must_use]
     pub fn texts(mut self, on: bool) -> Self {
         self.texts = on;
         self
     }
 
-    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT and ATTDEF
-    /// stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
+    /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT, ATTDEF,
+    /// MULTILEADER and TOLERANCE stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
     #[must_use]
     pub fn fills(mut self, on: bool) -> Self {
@@ -522,6 +535,29 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// A wall-clock bound on the conversion (#1674), counted from the moment `convert` or
+    /// `convert_with` is called. It is polled where the cancel token is: before the source is read
+    /// further, and every batch of entities while they are classified. Past it the conversion fails
+    /// with [`PvecConvertError::Deadline`] and publishes nothing, and the cancel token you gave stays
+    /// as it was. A cancel from the caller wins when both happened.
+    #[must_use]
+    pub fn deadline(mut self, within: std::time::Duration) -> Self {
+        self.deadline = Some(within);
+        self
+    }
+
+    /// Starts the deadline's clock, once: the cancel token this conversion polls is a copy that also
+    /// reads as cancelled when the time is up.
+    fn arm(&mut self) {
+        if let Some(at) = self
+            .deadline
+            .take()
+            .and_then(|d| std::time::Instant::now().checked_add(d))
+        {
+            self.cancel = self.cancel.with_deadline(at);
+        }
+    }
+
     /// Receives each diagnostic as it is made (`EngineEvent::ConversionDiagnostic`), and the one
     /// the run fails with. Without one, a drawing that converts cleanly makes no diagnostic at all.
     #[must_use]
@@ -628,7 +664,8 @@ impl<'a> PvecConversion<'a> {
     /// # Errors
     ///
     /// [`PvecConvertError`]. After any error the destination and its report are as they were.
-    pub fn convert(self) -> Result<PvecConversionOutput, PvecConvertError> {
+    pub fn convert(mut self) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
         let observer = self.observer.clone();
         #[cfg(feature = "pvec-raster-thumbnail")]
         if self.thumbnail_width == Some(0) {
@@ -640,7 +677,7 @@ impl<'a> PvecConversion<'a> {
             );
         }
         let result = if self.cancel.is_cancelled() {
-            Err(PvecConvertError::Cancelled)
+            Err(PvecConvertError::Cancelled.settled(&self.cancel))
         } else {
             AcadrustProvider::open(self.source)
                 .map_err(PvecConvertError::Open)
@@ -657,10 +694,13 @@ impl<'a> PvecConversion<'a> {
     /// # Errors
     ///
     /// [`PvecConvertError::UnitRequired`] without a unit, otherwise as [`convert`](Self::convert).
-    pub fn convert_with<P: DwgProvider>(self) -> Result<PvecConversionOutput, PvecConvertError> {
+    pub fn convert_with<P: DwgProvider>(
+        mut self,
+    ) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
         let observer = self.observer.clone();
         let result = if self.cancel.is_cancelled() {
-            Err(PvecConvertError::Cancelled)
+            Err(PvecConvertError::Cancelled.settled(&self.cancel))
         } else {
             self.unit
                 .ok_or(PvecConvertError::UnitRequired)
@@ -1153,6 +1193,14 @@ impl<'a> PvecConversion<'a> {
             .map(|v| (leaf_key(v), v.paint))
             .collect();
         drop(view.included);
+        // A DIMENSION the view pass expanded as an INSERT of its block has no row of its own
+        // (#1658), so the report counts them under `DIMENSION.expanded`.
+        let dimensions_expanded: u64 = view
+            .expanded_classes
+            .iter()
+            .filter(|(class, _)| is_dimension_class(class))
+            .map(|(_, n)| n)
+            .sum();
         let excluded_inserts: BTreeSet<u64> = view
             .excluded
             .iter()
@@ -1438,6 +1486,9 @@ impl<'a> PvecConversion<'a> {
         let mut texts: Vec<(EntityId, TextBody)> = Vec::new();
         let mut fills: Vec<(Vec<EntityId>, FillBody)> = Vec::new();
         let mut annotation_counts: BTreeMap<String, u64> = BTreeMap::new();
+        if dimensions_expanded > 0 {
+            annotation_counts.insert("DIMENSION.expanded".into(), dimensions_expanded);
+        }
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         /// The pieces of a line or straight polyline inside the sheet `b`, `[min x, min y, max x,
@@ -2142,13 +2193,18 @@ impl<'a> PvecConversion<'a> {
                 // start is inside what it is cut to, and a fill is not carried at all.
                 let mut pending: Option<Body> = None;
                 // Texts and fills are two choices (#1624): a class whose choice is off stays
-                // unmapped and says so, so a caller that asked for one never gets the other.
+                // unmapped and says so, so a caller that asked for one never gets the other. A
+                // MULTILEADER's or TOLERANCE's text is a text too, and so is a DIMENSION's when it
+                // reaches here, which is only when its block could not be followed (#1658).
+                let class_name = raw.provenance.class_name.as_str();
+                let dimension = is_dimension_class(class_name);
                 let (text_class, fill_class) = (
-                    matches!(
-                        raw.provenance.class_name.as_str(),
-                        "TEXT" | "MTEXT" | "ATTDEF"
-                    ),
-                    matches!(raw.provenance.class_name.as_str(), "HATCH" | "SOLID"),
+                    dimension
+                        || matches!(
+                            class_name,
+                            "TEXT" | "MTEXT" | "ATTDEF" | "MULTILEADER" | "TOLERANCE"
+                        ),
+                    matches!(class_name, "HATCH" | "SOLID"),
                 );
                 if annotate
                     && matches!(item, Item::Leaf(_))
@@ -2216,6 +2272,12 @@ impl<'a> PvecConversion<'a> {
                             }),
                         Err(annotation::CLIPPED) => Ok(None),
                         Err(why) => {
+                            // A dimension the provider has no text for says why its block was not
+                            // followed, which is the part worth knowing.
+                            let why = match &raw.geometry {
+                                RawGeometry::Unmapped { reason } if dimension => reason.as_str(),
+                                _ => why,
+                            };
                             done.warnings.push(format!("{class}: not carried, {why}"));
                             Ok(None)
                         }
@@ -2226,12 +2288,24 @@ impl<'a> PvecConversion<'a> {
                             break;
                         }
                         Ok(Some((mut pieces, body))) => {
+                            // What the stream does not carry of the entity (#1658).
+                            let left_out = match class {
+                                "MULTILEADER" => Some("its leader lines are not drawn"),
+                                "TOLERANCE" => Some("its frame is not drawn"),
+                                _ if dimension => Some(
+                                    "its block is missing, so its text is rebuilt from the measurement and nothing else is drawn",
+                                ),
+                                _ => None,
+                            };
                             for piece in &mut pieces {
                                 piece.classification =
                                     Classification::supported(Basis::Equivalent, class);
                                 piece.warnings.push(format!(
                                     "{class}: carried in a PVec stream, on hidden geometry"
                                 ));
+                                if let Some(why) = left_out {
+                                    piece.warnings.push(format!("{class}: {why}"));
+                                }
                             }
                             *annotation_counts
                                 .entry(format!("{class}.mapped"))
@@ -2554,7 +2628,20 @@ impl<'a> PvecConversion<'a> {
         })
     }
 
+    /// Everything after the source is open. A cancel that was really the deadline is told as
+    /// [`PvecConvertError::Deadline`], whichever step noticed it.
     fn run<P: DwgProvider>(
+        mut self,
+        provider: &P,
+        unit: SourceUnit,
+    ) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
+        let cancel = self.cancel.clone();
+        self.run_armed(provider, unit)
+            .map_err(|e| e.settled(&cancel))
+    }
+
+    fn run_armed<P: DwgProvider>(
         self,
         provider: &P,
         unit: SourceUnit,
@@ -3537,6 +3624,13 @@ fn promote_leaf(
     }
 }
 
+/// Whether a source class is one of acadrust's dimension classes (`DIMENSION_LINEAR` and the rest,
+/// `ARC_DIMENSION`, `LARGE_RADIAL_DIMENSION`), which the provider reports as INSERTs of their blocks
+/// (#1658).
+fn is_dimension_class(class: &str) -> bool {
+    class.starts_with("DIMENSION_") || matches!(class, "ARC_DIMENSION" | "LARGE_RADIAL_DIMENSION")
+}
+
 /// A leaf the basic extractor does not take: a SPLINE goes through the exact spline extractor
 /// (#1430), anything else is an unmapped source class. The record's own class is the entity's, so
 /// a one-span spline that became a Bezier is exact and an unwrapped periodic one is equivalent.
@@ -3743,6 +3837,48 @@ impl PvecConvertError {
             #[cfg(feature = "pvec-raster-thumbnail")]
             PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
+            PvecConvertError::Deadline => d(DiagnosticCode::Cancelled, "deadline"),
+        }
+    }
+
+    /// A stable, upper snake code for this failure (#1674), for a caller that has to tell one from
+    /// another without reading the message. The message may change, the code does not.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            PvecConvertError::Open(_) => "OPEN_FAILED",
+            PvecConvertError::View(e) => match e {
+                ViewProfileError::LayoutNotFound { .. } => "LAYOUT_NOT_FOUND",
+                ViewProfileError::NoModelSpace { .. } => "NO_MODEL_SPACE",
+                ViewProfileError::Limit(e) => e.code(),
+                _ => "VIEW_FAILED",
+            },
+            PvecConvertError::Flatten(e) => match e {
+                FlattenError::Limit { limit, .. } => limit.code(),
+                FlattenError::BlockRecursionLimit { .. } => "BLOCK_CYCLE",
+                _ => "FLATTEN_FAILED",
+            },
+            PvecConvertError::UnitRequired => "UNIT_REQUIRED",
+            PvecConvertError::Write(_) => "WRITE_FAILED",
+            PvecConvertError::NothingStorable { .. } => "NOTHING_STORABLE",
+            PvecConvertError::Tally(_) => "TALLY_FAILED",
+            PvecConvertError::Components(_) => "COMPONENTS_FAILED",
+            PvecConvertError::Report(_) => "REPORT_FAILED",
+            PvecConvertError::Publish(_) => "PUBLISH_FAILED",
+            PvecConvertError::CapabilityNotAllowed { .. } => "CAPABILITY_NOT_ALLOWED",
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            PvecConvertError::Thumbnail(_) => "THUMBNAIL_FAILED",
+            PvecConvertError::Cancelled => "CANCELLED",
+            PvecConvertError::Deadline => "DEADLINE",
+        }
+    }
+
+    /// `Cancelled` is `Deadline` when `cancel` fired because its time was up and nobody called
+    /// `cancel()`; every other error is as it was.
+    fn settled(self, cancel: &CancelToken) -> Self {
+        match self {
+            PvecConvertError::Cancelled if cancel.deadline_passed() => PvecConvertError::Deadline,
+            other => other,
         }
     }
 }

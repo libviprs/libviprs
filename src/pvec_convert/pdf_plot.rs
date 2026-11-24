@@ -7,6 +7,8 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use acadrust::plot_style::PlotStyleTable;
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
@@ -18,6 +20,7 @@ use pvec_geometry::{Curve2d, Side};
 use super::{PlotSettings, PvecConversion, PvecConvertError};
 use crate::CancelToken;
 use crate::cad::CadSource;
+use crate::observe::{EngineEvent, EngineObserver};
 use crate::pvec::SourceLimits;
 use crate::pvec::components::StreamSelection;
 use crate::pvec::publish::open_published;
@@ -48,6 +51,8 @@ pub struct PdfPlot<'a> {
     table: Option<PlotStyleTable>,
     layouts: Option<Vec<String>>,
     cancel: CancelToken,
+    observer: Option<Arc<dyn EngineObserver>>,
+    deadline: Option<Duration>,
     limits: SourceLimits,
     texts: bool,
     fills: bool,
@@ -67,6 +72,8 @@ impl<'a> PdfPlot<'a> {
             table: None,
             layouts: None,
             cancel: CancelToken::new(),
+            observer: None,
+            deadline: None,
             limits: SourceLimits::default(),
             texts: false,
             fills: false,
@@ -112,10 +119,28 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
-    /// Stops the plot at the next layout once `cancel` is cancelled; no file is left.
+    /// The cancel token, polled before each page and inside each page's conversion (#1674). A plot
+    /// that is cancelled writes no PDF and leaves no scratch directory.
     #[must_use]
     pub fn cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
+        self
+    }
+
+    /// Receives each page's `ConversionSheetStarted` and `ConversionSheetFinished`, with the events
+    /// and diagnostics of the page's own conversion (#1674).
+    #[must_use]
+    pub fn observer(mut self, observer: Arc<dyn EngineObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    /// A wall-clock bound on the whole plot, counted from `convert_with` (#1674). Past it the plot
+    /// fails with [`PvecConvertError::Deadline`], writes no PDF and leaves no scratch directory, and the
+    /// cancel token stays as it was.
+    #[must_use]
+    pub fn deadline(mut self, within: Duration) -> Self {
+        self.deadline = Some(within);
         self
     }
 
@@ -133,7 +158,7 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
-    /// Fill solids and wide strokes.
+    /// Fill solids.
     #[must_use]
     pub fn fills(mut self, on: bool) -> Self {
         self.fills = on;
@@ -164,8 +189,20 @@ impl<'a> PdfPlot<'a> {
         self,
         file_unit: impl FnOnce(&P) -> Option<SourceUnit>,
     ) -> Result<PdfPlotOutput, PvecConvertError> {
-        if self.cancel.is_cancelled() {
-            return Err(PvecConvertError::Cancelled);
+        // The deadline counts from here, and rides on this plot's own copy of the cancel token.
+        let cancel = match self.deadline.and_then(|d| Instant::now().checked_add(d)) {
+            Some(at) => self.cancel.with_deadline(at),
+            None => self.cancel.clone(),
+        };
+        let stopped = || {
+            if cancel.deadline_passed() {
+                PvecConvertError::Deadline
+            } else {
+                PvecConvertError::Cancelled
+            }
+        };
+        if cancel.is_cancelled() {
+            return Err(stopped());
         }
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
         let unit = self
@@ -212,42 +249,71 @@ impl<'a> PdfPlot<'a> {
         let work = self.dest.with_extension("plot-work");
         fs::create_dir_all(&work)
             .map_err(|e| PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(e)))?;
+        let total = wanted.len() as u32;
+        let tell = |event: EngineEvent| {
+            if let Some(o) = &self.observer {
+                o.on_event(event);
+            }
+        };
         let pages = wanted
             .iter()
             .enumerate()
             .map(|(n, name)| {
-                if self.cancel.is_cancelled() {
-                    return Err(PvecConvertError::Cancelled);
+                if cancel.is_cancelled() {
+                    return Err(stopped());
                 }
+                let index = n as u32 + 1;
+                tell(EngineEvent::ConversionSheetStarted {
+                    index,
+                    total,
+                    layout: (*name).clone(),
+                });
                 let mut profile = self.profile.clone();
                 profile.space = SpaceSelection::PaperLayout((*name).clone());
                 let file = work.join(format!("{n}.pvec"));
                 let mut conversion = PvecConversion::new(self.source, &file)
                     .view_profile(profile)
-                    .plot_settings(self.settings.clone());
-                conversion.empty_sheet_ok = true;
-                conversion = conversion
+                    .plot_settings(self.settings.clone())
                     .limits(self.limits)
-                    .cancel(self.cancel.clone())
                     .texts(self.texts)
                     .fills(self.fills)
-                    .components(StreamSelection::ALL);
+                    .components(StreamSelection::ALL)
+                    .cancel(cancel.clone());
+                if let Some(o) = &self.observer {
+                    conversion = conversion.observer(o.clone());
+                }
+                conversion.empty_sheet_ok = true;
                 if let Some(table) = &self.table {
                     conversion = conversion.plot_style_table(table.clone());
                 }
-                let out = conversion.run(&provider, unit)?;
-                let sheet = out.report.sheet;
-                let rotation = sheet
-                    .as_ref()
-                    .filter(|s| s.frame == "paper")
-                    .and_then(|s| s.plot.as_ref())
-                    .map_or(0, |p| p.rotation);
-                let page = if out.written == 0 {
-                    blank_page(sheet.as_ref(), unit)
-                } else {
-                    read_page(&file, rotation).map_err(PvecConvertError::Publish)?
+                let page = conversion.run(&provider, unit).and_then(|out| {
+                    let sheet = out.report.sheet;
+                    let rotation = sheet
+                        .as_ref()
+                        .filter(|s| s.frame == "paper")
+                        .and_then(|s| s.plot.as_ref())
+                        .map_or(0, |p| p.rotation);
+                    let page = if out.written == 0 {
+                        blank_page(sheet.as_ref(), unit)
+                    } else {
+                        read_page(&file, rotation).map_err(PvecConvertError::Publish)?
+                    };
+                    Ok((page, sheet.map(|s| s.notes).unwrap_or_default()))
+                });
+                let status = match &page {
+                    Ok(_) => ("written", None),
+                    Err(PvecConvertError::Cancelled) => ("cancelled", Some("CANCELLED")),
+                    Err(PvecConvertError::Deadline) => ("deadline", Some("DEADLINE")),
+                    Err(e) => ("failed", Some(e.code())),
                 };
-                Ok((page, sheet.map(|s| s.notes).unwrap_or_default()))
+                tell(EngineEvent::ConversionSheetFinished {
+                    index,
+                    total,
+                    layout: (*name).clone(),
+                    status: status.0.to_owned(),
+                    code: status.1.map(str::to_owned),
+                });
+                page
             })
             .collect::<Result<Vec<_>, PvecConvertError>>();
         // The scratch artifacts are this call's own, so they go whether or not it worked.
