@@ -1399,6 +1399,16 @@ pub trait DwgProvider {
         None
     }
 
+    /// The lines the `LEADER`, `MULTILEADER` or `TOLERANCE` with this handle draws, as open and
+    /// closed polylines in the coordinates of the block it sits in (#1671): a leader's line and
+    /// arrowhead, and the cell frame of a tolerance. They are geometry, so they do not depend on
+    /// the texts choice; the text of a `MULTILEADER` and a `TOLERANCE` is
+    /// [`annotation`](Self::annotation). The default has none.
+    fn annotation_lines(&self, handle: ItemHandle) -> Vec<RawGeometry> {
+        let _ = handle;
+        Vec::new()
+    }
+
     /// What the `ATTDEF` with this handle draws when it is reached through the `INSERT` with that
     /// handle, or `None` when it draws nothing there (#1609). AutoCAD draws a constant definition's
     /// value and the INSERT's own `ATTRIB` value for any other, never the definition's tag. The

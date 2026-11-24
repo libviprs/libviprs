@@ -31,7 +31,7 @@ const STREAMS: StreamSelection = StreamSelection {
     ..StreamSelection::NONE
 };
 
-/// One polyline as its points, with the first point repeated at the end when it is closed.
+/// One polyline as its points, a closed one without its first point repeated.
 type Run = Vec<[f64; 2]>;
 
 struct Converted {
@@ -80,7 +80,11 @@ fn convert(tag: &str, bytes: &[u8], texts: bool) -> Converted {
         else {
             continue;
         };
-        let run = p.vertices().iter().map(|v| [v.x, v.y]).collect();
+        let mut run: Run = p.vertices().iter().map(|v| [v.x, v.y]).collect();
+        // A closed run may come back with its first point repeated; it is the same shape.
+        if run.len() > 2 && run.first() == run.last() {
+            run.pop();
+        }
         runs.push((row.source_class.clone(), run));
     }
     let texts = streams
@@ -113,6 +117,12 @@ fn drawing(layer: &str) -> Vec<u8> {
     )))
     .unwrap();
 
+    // A DWG keeps the arrow size and the tolerance's text height and gap in the dimension style.
+    let style = doc.dim_styles.get_mut("Standard").unwrap();
+    style.dimasz = 2.0;
+    style.dimtxt = 2.5;
+    style.dimgap = 0.625;
+
     let mut leader = Leader::from_vertices(vec![
         Vector3::new(10.0, 10.0, 0.0),
         Vector3::new(30.0, 20.0, 0.0),
@@ -143,8 +153,6 @@ fn drawing(layer: &str) -> Vec<u8> {
         Vector3::new(100.0, 50.0, 0.0),
         "{\\Fgdt;j}%%v0.5%%vA\\P{\\Fgdt;b}%%v0.1%%vB",
     );
-    t.text_height = 2.5;
-    t.dimension_gap = 0.625;
     t.common.layer = layer.into();
     doc.add_entity(EntityType::Tolerance(t)).unwrap();
 
@@ -172,11 +180,12 @@ fn through<'a>(runs: &[&'a Run], points: &[[f64; 2]]) -> Option<&'a Run> {
 /// The small closed shape at `tip`: an arrowhead, every point within `size` of the tip.
 fn arrowhead_at(runs: &[&Run], tip: [f64; 2], size: f64) -> bool {
     runs.iter().any(|r| {
-        r.len() >= 3
-            && r.first() == r.last()
+        r.len() == 3
             && has_point(r, tip)
             && r.iter()
-                .all(|p| (p[0] - tip[0]).hypot(p[1] - tip[1]) <= size + 1e-6)
+                .all(|p| (p[0] - tip[0]).hypot(p[1] - tip[1]) <= size * 1.05)
+            && r.iter()
+                .any(|p| (p[0] - tip[0]).hypot(p[1] - tip[1]) >= size)
     })
 }
 
@@ -248,8 +257,7 @@ fn issue_1671_a_tolerance_is_drawn_as_its_frame_one_rectangle_per_row() {
     // 3.75 stand from 46.25 to 53.75 about y = 50.
     let rect = |lo: f64, hi: f64| {
         runs.iter().copied().find(|r| {
-            r.len() == 5
-                && r.first() == r.last()
+            r.len() == 4
                 && r.iter().all(|p| near(p[1], lo) || near(p[1], hi))
                 && r.iter().any(|p| near(p[1], lo))
                 && r.iter().any(|p| near(p[1], hi))

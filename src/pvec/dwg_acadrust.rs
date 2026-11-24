@@ -177,6 +177,142 @@ pub struct DrawnFact {
     pub skipped: Vec<String>,
 }
 
+/// Each leader line of a MULTILEADER root as its points from the arrow tip, ending at the root's
+/// connection point where the text or block attaches.
+fn root_runs(
+    root: &acr::entities::LeaderRoot,
+) -> impl Iterator<Item = (&acr::entities::LeaderLine, Vec<Point3>)> {
+    root.lines.iter().map(|line| {
+        let mut run: Vec<Point3> = line.points.iter().copied().map(p3).collect();
+        run.push(p3(root.connection_point));
+        (line, run)
+    })
+}
+
+/// A run of points as a polyline in the plane at the first point's height, seen from above like
+/// every other 3D line here, or nothing when it has fewer than two points (#1671).
+fn stroke(points: &[Point3], closed: bool) -> Option<RawGeometry> {
+    (points.len() >= 2).then(|| RawGeometry::Polyline {
+        vertices: points
+            .iter()
+            .map(|p| RawVertex {
+                x: p[0],
+                y: p[1],
+                bulge: 0.0,
+            })
+            .collect(),
+        closed,
+        elevation: points[0][2],
+        normal: [0.0, 0.0, 1.0],
+    })
+}
+
+/// The closed arrowhead at `tip` of a line that runs on toward `toward`: a triangle `size` long and
+/// a third as wide, which is what AutoCAD draws for its closed arrow. Nothing when there is no size
+/// to draw or no direction to point in (#1671).
+fn arrowhead(tip: Point3, toward: Point3, size: f64) -> Option<RawGeometry> {
+    let (dx, dy) = (toward[0] - tip[0], toward[1] - tip[1]);
+    let len = dx.hypot(dy);
+    if !(size.is_finite() && size > 0.0 && len > 0.0) {
+        return None;
+    }
+    let (ux, uy) = (dx / len, dy / len);
+    let (bx, by) = (tip[0] + ux * size, tip[1] + uy * size);
+    let half = size / 6.0;
+    stroke(
+        &[
+            tip,
+            [bx - uy * half, by + ux * half, tip[2]],
+            [bx + uy * half, by - ux * half, tip[2]],
+        ],
+        true,
+    )
+}
+
+/// The advance of `line` in text heights, from Helvetica's widths (the face the PDF export's
+/// standard fonts fill `/Widths` from), scaled so a capital stands one text height. The drawing's
+/// own face is not read, so this is an estimate: close for TrueType Arial, a little wide for the
+/// SHX stroke fonts.
+pub(crate) fn run_advance(line: &str) -> f64 {
+    // Helvetica's widths for U+0020 to U+007E, in 1/1000 em, and its capital height.
+    const WIDTHS: [u16; 95] = [
+        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
+        556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722,
+        722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722,
+        667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556,
+        556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
+        500, 334, 260, 334, 584,
+    ];
+    const CAPITAL: f64 = 0.716;
+    line.chars()
+        .map(|c| match c as u32 {
+            0x20..=0x7e => f64::from(WIDTHS[c as usize - 0x20]),
+            // East Asian full width characters are one em wide.
+            0x2e80..=0x9fff | 0xac00..=0xd7a3 | 0xff00..=0xff60 => 1000.0,
+            _ => 556.0,
+        })
+        .sum::<f64>()
+        / 1000.0
+        / CAPITAL
+}
+
+/// The frame of a TOLERANCE (#1671): one closed rectangle per row, stacked about the insertion
+/// point (the left end of the frame and the middle of its rows) and turned by the frame's
+/// direction, with a divider between the cells of a row. A row is as high as the text plus the
+/// dimension gap above and below it, and a cell as wide as its text plus the gap either side. The
+/// text's width is an estimate from Helvetica's widths, the same one the text stream is laid out
+/// with, since the drawing's own face is not read.
+fn tolerance_frame(t: &acr::entities::Tolerance, h: f64, gap: f64) -> Vec<RawGeometry> {
+    let gap = gap.max(0.0);
+    // A frame off the Z axis is refused as its text is.
+    let flat = t.normal.x == 0.0 && t.normal.y == 0.0 && t.normal.z > 0.0;
+    if !(flat && h.is_finite() && h > 0.0 && gap.is_finite()) {
+        return Vec::new();
+    }
+    let shown = gdt_text(&t.text);
+    let rows: Vec<Vec<f64>> = shown
+        .split('\n')
+        .map(|row| {
+            row.split(" | ")
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .map(|cell| run_advance(cell) * h + 2.0 * gap)
+                .collect::<Vec<f64>>()
+        })
+        .filter(|cells| !cells.is_empty())
+        .collect();
+    let row_height = h + 2.0 * gap;
+    let (sin, cos) = angle_of(t.direction, 0.0).sin_cos();
+    let at = |x: f64, y: f64| {
+        [
+            t.insertion_point.x + x * cos - y * sin,
+            t.insertion_point.y + x * sin + y * cos,
+            t.insertion_point.z,
+        ]
+    };
+    let mut out = Vec::new();
+    for (i, cells) in rows.iter().enumerate() {
+        let top = (rows.len() as f64 / 2.0 - i as f64) * row_height;
+        let bottom = top - row_height;
+        let width: f64 = cells.iter().sum();
+        out.extend(stroke(
+            &[
+                at(0.0, top),
+                at(width, top),
+                at(width, bottom),
+                at(0.0, bottom),
+            ],
+            true,
+        ));
+        let mut x = 0.0;
+        for cell in &cells[..cells.len() - 1] {
+            x += cell;
+            out.extend(stroke(&[at(x, top), at(x, bottom)], false));
+        }
+    }
+    out
+}
+
 /// A circular boundary edge as its start point, end point and the bulge of the span, or
 /// [`None`] for a degenerate or full-circle edge.
 fn arc_span(e: &acr::entities::CircularArcEdge) -> Option<([f64; 2], [f64; 2], f64)> {
@@ -515,6 +651,19 @@ impl AcadrustProvider {
         }
     }
 
+    /// The text height and the gap round it of a TOLERANCE. A DWG from R2000 on does not store them
+    /// with the entity (the reader leaves its defaults), so its dimension style gives them,
+    /// `DIMTXT` and `DIMGAP` times `DIMSCALE`; with no such style the entity's own stand.
+    fn tolerance_size(&self, t: &acr::entities::Tolerance) -> (f64, f64) {
+        self.doc.dim_styles.get(&t.dimension_style_name).map_or(
+            (t.text_height, t.dimension_gap),
+            |s| {
+                let k = if s.dimscale > 0.0 { s.dimscale } else { 1.0 };
+                (s.dimtxt * k, s.dimgap.abs() * k)
+            },
+        )
+    }
+
     /// What the HATCH, LEADER, MULTILEADER or TOLERANCE with this handle draws, or [`None`] for
     /// any other entity.
     #[must_use]
@@ -527,15 +676,12 @@ impl AcadrustProvider {
                 .push(l.vertices.iter().copied().map(p3).collect()),
             EntityType::MultiLeader(m) => {
                 let c = &m.context;
-                // A leader line is stored as its points from the arrow tip; it ends at the root's
-                // connection point, where the text or block attaches.
-                for root in &c.leader_roots {
-                    for line in &root.lines {
-                        let mut run: Vec<Point3> = line.points.iter().copied().map(p3).collect();
-                        run.push(p3(root.connection_point));
-                        out.strokes.push(run);
-                    }
-                }
+                out.strokes.extend(
+                    c.leader_roots
+                        .iter()
+                        .flat_map(root_runs)
+                        .map(|(_, run)| run),
+                );
                 if c.has_text_contents && !c.text_string.is_empty() {
                     out.texts.push(TextFact {
                         position: p3(c.text_location),
@@ -555,7 +701,7 @@ impl AcadrustProvider {
             // shown string.
             EntityType::Tolerance(t) => out.texts.push(TextFact {
                 position: p3(t.insertion_point),
-                height: t.text_height,
+                height: self.tolerance_size(t).0,
                 rotation: angle_of(t.direction, 0.0),
                 content: gdt_text(&t.text),
                 multiline: false,
@@ -1092,6 +1238,49 @@ impl DwgProvider for AcadrustProvider {
         )
     }
 
+    fn annotation_lines(&self, handle: ItemHandle) -> Vec<RawGeometry> {
+        let mut out = Vec::new();
+        match self.doc.get_entity(acr::Handle::new(handle.get())) {
+            Some(EntityType::Leader(l)) => {
+                let run: Vec<Point3> = l.vertices.iter().copied().map(p3).collect();
+                // A DWG keeps the arrow size in the leader's dimension style, so the style wins.
+                let size = self
+                    .doc
+                    .dim_styles
+                    .get(&l.dimension_style)
+                    .map_or(l.arrow_size, |s| {
+                        s.dimasz * if s.dimscale > 0.0 { s.dimscale } else { 1.0 }
+                    });
+                if l.arrow_enabled && run.len() >= 2 {
+                    out.extend(arrowhead(run[0], run[1], size));
+                }
+                out.extend(stroke(&run, false));
+            }
+            Some(EntityType::MultiLeader(m)) => {
+                for (line, run) in m.context.leader_roots.iter().flat_map(root_runs) {
+                    let size = [
+                        line.arrowhead_size,
+                        m.context.arrowhead_size,
+                        m.arrowhead_size,
+                    ]
+                    .into_iter()
+                    .find(|s| *s > 0.0)
+                    .unwrap_or(0.0);
+                    if run.len() >= 2 {
+                        out.extend(arrowhead(run[0], run[1], size));
+                    }
+                    out.extend(stroke(&run, false));
+                }
+            }
+            Some(EntityType::Tolerance(t)) => {
+                let (h, gap) = self.tolerance_size(t);
+                out = tolerance_frame(t, h, gap);
+            }
+            _ => {}
+        }
+        out
+    }
+
     fn annotation(&self, handle: ItemHandle) -> Option<Annotation> {
         let entity = self.doc.get_entity(acr::Handle::new(handle.get()))?;
         match entity {
@@ -1182,7 +1371,7 @@ impl DwgProvider for AcadrustProvider {
                 lay.anchor = (0.0, TextAnchorV::Middle);
                 text(
                     t.insertion_point,
-                    t.text_height,
+                    self.tolerance_size(t).0,
                     angle_of(t.direction, 0.0),
                     t.normal,
                     decode_escapes(&gdt_text(&t.text)),

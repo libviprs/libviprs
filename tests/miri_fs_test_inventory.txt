@@ -1545,6 +1545,11 @@ annotated   fs-detected  tests/pvec_1658_annotation_text.rs::issue_1658_with_tex
 annotated   fs-detected  tests/pvec_1658_annotation_text.rs::issue_1658_a_dimension_off_its_default_placement_draws_where_it_is_placed
 annotated   fs-detected  tests/pvec_1658_annotation_text.rs::issue_1658_a_dimension_on_a_frozen_layer_is_dropped_whole
 annotated   fs-detected  tests/pvec_1658_annotation_text.rs::issue_1658_the_cursor_reports_a_dimension_as_an_insert_of_its_block
+annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_a_leader_is_drawn_as_its_line_with_an_arrowhead
+annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_a_multileader_is_drawn_as_its_line_to_the_text_with_an_arrowhead
+annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_a_tolerance_is_drawn_as_its_frame_one_rectangle_per_row
+annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_the_lines_do_not_need_the_texts_option
+annotated   fs-detected  tests/pvec_1671_leader_tolerance.rs::issue_1671_what_is_on_a_frozen_layer_loses_its_lines_with_it
 annotated   not-detected tests/pvec_end_to_end.rs::n2_3_1050_an_ordering_perturbation_turns_the_determinism_check_red
 annotated   not-detected tests/pvec_gate_classification.rs::n2_8_1060_reclassifying_one_entity_is_a_one_line_baseline_diff
 annotated   not-detected tests/pvec_gate_classification.rs::n2_8_1060_the_classification_of_every_fixture_matches_the_checked_in_baseline
