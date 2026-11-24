@@ -1641,3 +1641,11 @@ annotated   not-detected tests/plot_files_1673.rs::issue_1673_every_refusal_has_
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_the_device_facts_are_paper_printable_area_raster_limit_and_text_mode
 annotated   fs-detected  tests/pvec_1668_pdf_decodeparms.rs::the_owners_plan_converts_on_the_pages_that_stopped
 annotated   fs-detected  tests/pvec_1687_cid_truetype_text.rs::a_real_plan_with_cid_truetype_labels_gives_text
+annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_a_2d_polyline_follows_its_own_flag
+annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_a_closed_polyline_with_plinegen_off_is_one_record_per_side
+annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_a_solid_polyline_stays_one_record_whatever_its_flag
+annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_an_arc_segment_restarts_the_pattern_too
+annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_an_open_polyline_with_plinegen_off_restarts_at_each_inner_vertex
+annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_every_side_keeps_the_entitys_linetype_and_a_line_is_untouched
+annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_the_entitys_flag_wins_over_the_headers
+annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_the_same_polyline_with_plinegen_on_keeps_its_one_continuous_pattern
