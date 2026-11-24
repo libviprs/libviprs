@@ -297,6 +297,73 @@ fn issue_1676_a_sample_tile_has_the_line_where_the_sheet_puts_it() {
     let _ = fs::remove_dir_all(dir);
 }
 
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1676_a_stem_that_is_not_a_plain_file_name_is_refused_and_touches_nothing() {
+    for stem in ["../x", "", "a/b", "a\\b", ".", "..", "a\0b", "/abs"] {
+        let base = scratch("stem");
+        let out = base.join("out");
+        // What a "../x" stem would reach: the scratch directory's name beside the destination.
+        let bystander = base.join("x.plot-work");
+        fs::create_dir_all(&bystander).unwrap();
+        fs::write(bystander.join("keep"), b"keep").unwrap();
+        NEXT.with(|n| *n.borrow_mut() = Some(horizontal()));
+        let err = PmTilesPlot::new(CadSource::Bytes(b"mock"), &out)
+            .stem(stem)
+            .unit(SourceUnit::Millimeters)
+            .view_profile(ViewProfile::print_profile("Sheet"))
+            .convert_with::<Mock>()
+            .unwrap_err();
+        assert!(
+            matches!(err, PmTilesPlotError::BadStem(_)),
+            "{stem:?}: {err:?}"
+        );
+        assert_eq!(err.code(), "PLOT_STEM");
+        assert_eq!(
+            fs::read(bystander.join("keep")).unwrap(),
+            b"keep",
+            "{stem:?}"
+        );
+        assert_eq!(files(&base), ["x.plot-work"], "{stem:?}");
+        assert!(
+            !out.exists(),
+            "{stem:?}: the refusal came before anything was made"
+        );
+        let _ = fs::remove_dir_all(base);
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1676_a_plot_that_fails_leaves_an_archive_that_was_already_there() {
+    let l = |h| vec![line(h, [10.0, 25.0], [90.0, 25.0], 7, 100)];
+    let mock = Mock {
+        sheets: vec![
+            ("A".into(), plot(100.0, 50.0, 0), l(1)),
+            ("B".into(), plot(100.0, 50.0, 0), l(2)),
+        ],
+    };
+    let dir = scratch("keep-old");
+    fs::write(dir.join("drawing.01-a.pmtiles"), b"keep").unwrap();
+    // The second sheet's archive cannot be written: a directory has its name.
+    fs::create_dir(dir.join("drawing.02-b.pmtiles")).unwrap();
+    NEXT.with(|n| *n.borrow_mut() = Some(mock));
+    let err = PmTilesPlot::new(CadSource::Bytes(b"mock"), &dir)
+        .stem("drawing")
+        .unit(SourceUnit::Millimeters)
+        .layouts(["A", "B"])
+        .dpi(127)
+        .convert_with::<Mock>()
+        .unwrap_err();
+    assert!(matches!(err, PmTilesPlotError::Io(_)), "{err:?}");
+    assert_eq!(fs::read(dir.join("drawing.01-a.pmtiles")).unwrap(), b"keep");
+    assert_eq!(
+        files(&dir),
+        ["drawing.01-a.pmtiles", "drawing.02-b.pmtiles"]
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
 // ---- hostile input --------------------------------------------------------------------------
 
 #[test]

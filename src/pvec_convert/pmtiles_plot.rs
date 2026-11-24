@@ -142,6 +142,9 @@ pub enum PmTilesPlotError {
     /// A file or directory could not be made.
     #[error("the output could not be written")]
     Io(#[source] std::io::Error),
+    /// The file stem is not a plain file name.
+    #[error("the file stem {0:?} is not a plain file name")]
+    BadStem(String),
     /// The cancel token fired.
     #[error("cancelled")]
     Cancelled,
@@ -166,6 +169,7 @@ impl PmTilesPlotError {
             Self::Engine(_) => "TILES_FAILED",
             Self::Sink(_) => "ARCHIVE_FAILED",
             Self::Io(_) => "PUBLISH_FAILED",
+            Self::BadStem(_) => "PLOT_STEM",
             Self::Cancelled => "CANCELLED",
             Self::Deadline => "DEADLINE",
         }
