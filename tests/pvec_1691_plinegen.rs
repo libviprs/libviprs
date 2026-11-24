@@ -130,7 +130,7 @@ fn pl2d(points: &[[f64; 2]], closed: bool, plinegen: bool) -> EntityType {
         p.close();
     }
     if plinegen {
-        p.flags = p.flags | acadrust::entities::PolylineFlags::LINETYPE_CONTINUOUS;
+        p.flags |= acadrust::entities::PolylineFlags::LINETYPE_CONTINUOUS;
     }
     p.common.linetype = "HIDDEN".into();
     EntityType::Polyline2D(p)

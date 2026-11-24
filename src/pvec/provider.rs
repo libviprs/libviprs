@@ -1401,6 +1401,15 @@ pub trait DwgProvider {
         true
     }
 
+    /// Whether the polyline `handle` plots its linetype as one pattern through all its vertices
+    /// (its PLINEGEN flag set) rather than starting the pattern anew on every side (#1691). The
+    /// entity's own flag is what the plot follows: the header's PLINEGEN only seeds the polylines
+    /// drawn after it, so a provider reads the header only for a handle it cannot find. The
+    /// default is continuous, so a provider that does not read the flag changes nothing.
+    fn polyline_linetype_generation(&self, _handle: ItemHandle) -> bool {
+        true
+    }
+
     /// The drawing's external-reference block records, in the block table's order.
     ///
     /// The default says the provider cannot report them.
