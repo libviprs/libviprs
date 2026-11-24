@@ -4060,7 +4060,7 @@ fn classify_leaf(
 ) -> Result<Done, PvecConvertError> {
     let class = f.entity.provenance.class_name.as_str();
     // A plan shows a sloped line as the segment it covers, when the caller asked for that.
-    let flattened = match &f.entity.geometry {
+    let mut flattened = match &f.entity.geometry {
         RawGeometry::Line { start, end } if gate.project_plan && start[2] != end[2] => {
             Some(RawEntity {
                 geometry: RawGeometry::Line {
@@ -4072,14 +4072,40 @@ fn classify_leaf(
         }
         _ => None,
     };
-    let basic = match dwg_basic::extract(flattened.as_ref().unwrap_or(&f.entity)) {
-        Ok(b) => b,
-        Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate, viewport),
-        Err(e) => {
-            return Ok(without_geometry(
-                e.classification(class),
-                vec![e.warning(class)],
-            ));
+    // A plotter draws a polyline through its points and skips a side with no length, so for a plot
+    // the vertex that starts such a side goes and the rest is drawn (#1706). The stored geometry
+    // stays strict: only a plan's conversion repairs.
+    let mut skipped = 0usize;
+    let basic = loop {
+        let subject = flattened.as_ref().unwrap_or(&f.entity);
+        match dwg_basic::extract(subject) {
+            Ok(b) => break b,
+            Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate, viewport),
+            Err(BasicError::CoincidentVertices { index }) if gate.project_plan => {
+                let mut next = subject.clone();
+                match &mut next.geometry {
+                    RawGeometry::Polyline { vertices, .. }
+                        if vertices.len() > 2 && index < vertices.len() =>
+                    {
+                        vertices.remove(index);
+                    }
+                    _ => {
+                        let e = BasicError::CoincidentVertices { index };
+                        return Ok(without_geometry(
+                            e.classification(class),
+                            vec![e.warning(class)],
+                        ));
+                    }
+                }
+                skipped += 1;
+                flattened = Some(next);
+            }
+            Err(e) => {
+                return Ok(without_geometry(
+                    e.classification(class),
+                    vec![e.warning(class)],
+                ));
+            }
         }
     };
     // A curve seen edge on is drawn as the segment it projects to: what a plan shows, and not the
@@ -4099,6 +4125,11 @@ fn classify_leaf(
         }
     };
     let mut done = promote_leaf(f, record, gate, viewport)?;
+    if skipped > 0 && done.geometry.geometry().is_some() {
+        done.warnings.push(format!(
+            "{class}: {skipped} repeated vertices skipped, as a plotter does"
+        ));
+    }
     if f.edge_on() && done.geometry.geometry().is_some() {
         done.warnings.push(format!(
             "{class}: in a block in a vertical plane, seen edge on and drawn as the segment it covers"

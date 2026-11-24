@@ -1730,3 +1730,8 @@ annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_an_open_poly
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_every_side_draws_what_the_rule_says
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_the_pattern_is_never_stretched
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_the_plots_side_starts_on_a_dash_of_3_875_and_keeps_the_period
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_polyline_without_a_repeat_is_drawn
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_an_open_lwpolyline_with_a_repeated_vertex_is_drawn
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_closed_lwpolyline_that_repeats_its_first_point_is_drawn
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_2d_polyline_with_a_repeated_vertex_is_drawn
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_polyline_that_is_one_point_repeated_draws_nothing_and_does_not_fail

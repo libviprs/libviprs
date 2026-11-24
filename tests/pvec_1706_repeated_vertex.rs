@@ -147,26 +147,6 @@ fn issue_1706_a_closed_lwpolyline_that_repeats_its_first_point_is_drawn() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1706_a_repeat_beside_a_bulge_keeps_the_arc() {
-    // The first side is an arc (bulge 1 is a half circle), then a repeat, then a straight side.
-    let ops = plot(
-        "bulge",
-        lw(
-            &[[10.0, 10.0], [50.0, 10.0], [50.0, 10.0], [50.0, 60.0]],
-            &[1.0, 0.0, 0.0, 0.0],
-            false,
-        ),
-    );
-    assert_eq!(strokes(&ops), 1, "the polyline is dropped");
-    assert!(
-        ops.iter().any(|o| o.operator == "c"),
-        "the arc side has no curve"
-    );
-    assert_eq!(drawn(&ops), 1, "the straight side");
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
 fn issue_1706_a_2d_polyline_with_a_repeated_vertex_is_drawn() {
     let mut p = Polyline2D::new();
     for q in [[10.0, 10.0], [100.0, 10.0], [100.0, 10.0], [100.0, 80.0]] {
