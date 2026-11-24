@@ -804,6 +804,7 @@ annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_in
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_the_callers_unit_does_not_change_a_plotted_sheet
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_real_tabloid_layout_draws_at_full_paper_size
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_callers_plot_scale_is_applied_like_the_stored_one
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_plot_window_is_scaled_with_the_linework
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_override_follows_the_layouts_rotation
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_size_override_replaces_the_paper_and_its_margins
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_that_is_not_a_size_is_refused_not_framed

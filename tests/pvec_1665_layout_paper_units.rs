@@ -25,7 +25,7 @@ use libviprs::pvec::{
     ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact, SourceUnit,
     ViewProfile,
 };
-use libviprs::pvec_convert::{PlotScale, PlotSettings, PvecConversion};
+use libviprs::pvec_convert::{PlotArea, PlotScale, PlotSettings, PvecConversion};
 use pvec_facade::Curve;
 
 // ---- a hand-built provider ------------------------------------------------------------
@@ -355,6 +355,28 @@ fn issue_1665_a_callers_plot_scale_is_applied_like_the_stored_one() {
     assert_close("the frame", frame, [0.4318, 0.2794]);
     assert_close("the rectangle's lower left", min, [0.025, 0.025]);
     assert_close("the rectangle's upper right", max, [0.4068, 0.2544]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// A plot window is picked in paper-space drawing units, so at 1 : 0.04 it frames 25 mm of paper
+/// per unit, the linework with it: a window half a unit outside the rectangle all round is a frame
+/// 406.8 by 254.4 mm with the rectangle 12.5 mm in from its edges.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1665_a_plot_window_is_scaled_with_the_linework() {
+    let dir = convert(
+        "window",
+        tabloid(),
+        SourceUnit::Millimeters,
+        PlotSettings {
+            area: PlotArea::Window([0.5, 0.5, 16.772, 10.676]),
+            ..PlotSettings::default()
+        },
+    );
+    let (frame, min, max, _) = measured(&dir);
+    assert_close("the frame", frame, [0.4068, 0.2544]);
+    assert_close("the rectangle's lower left", min, [0.0125, 0.0125]);
+    assert_close("the rectangle's upper right", max, [0.3943, 0.2419]);
     let _ = fs::remove_dir_all(dir);
 }
 
