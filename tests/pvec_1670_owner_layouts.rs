@@ -126,6 +126,7 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
                     profile.layers.no_plot = Ignore;
                     profile.layers.no_plot_text = Ignore;
                 }
+                "no_plot_geometry" => profile.layers.no_plot = Ignore,
                 "frozen" => profile.layers.frozen = Ignore,
                 "off" => profile.layers.off = Ignore,
                 _ => {}
