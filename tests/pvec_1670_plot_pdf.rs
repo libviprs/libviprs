@@ -745,3 +745,43 @@ fn issue_1670_a_sloped_line_is_drawn_as_it_looks_from_above() {
         "{pts:?}"
     );
 }
+
+// ---- a fill takes the plot style table's colour -------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_fill_takes_the_plot_style_tables_colour_for_its_aci() {
+    // The table plots ACI 1 black: a SOLID in ACI 1 is filled black, as its lines would be.
+    let dir = scratch("fillctb");
+    let mut doc = CadDocument::new();
+    doc.add_layout("A3").unwrap();
+    set_plot(&mut doc, &Sheet("A3", 420.0, 297.0, 0));
+    let mut solid = Solid::new(
+        Vector3::new(300.0, 50.0, 0.0),
+        Vector3::new(330.0, 50.0, 0.0),
+        Vector3::new(300.0, 80.0, 0.0),
+        Vector3::new(330.0, 80.0, 0.0),
+    );
+    solid.common.color = Color::Index(1);
+    doc.add_entity_to_layout(EntityType::Solid(solid), "A3")
+        .unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dest = dir.join("out.pdf");
+    PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"])
+        .plot_style_table(ctb())
+        .fills(true)
+        .convert_with::<AcadrustProvider>()
+        .unwrap();
+    let o = ops(&dest, 1);
+    let at = o.iter().position(|o| o.operator == "f*").expect("a fill");
+    let rg = o[..at].iter().rev().find(|o| o.operator == "rg").unwrap();
+    let c: Vec<u8> = rg
+        .operands
+        .iter()
+        .map(|v| (real(v) * 255.0).round() as u8)
+        .collect();
+    assert_eq!(c, [0, 0, 0], "{rg:?}");
+}
