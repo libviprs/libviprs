@@ -2450,7 +2450,7 @@ impl<'a> PvecConversion<'a> {
                         }
                         let t = half / side;
                         let at = |t: f64| {
-                            let mut q = a.clone();
+                            let mut q = *a;
                             q.x = a.x + (b.x - a.x) * t;
                             q.y = a.y + (b.y - a.y) * t;
                             q
