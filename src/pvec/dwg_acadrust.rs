@@ -1213,6 +1213,14 @@ impl DwgProvider for AcadrustProvider {
         self.doc.header.paper_space_linetype_scaling
     }
 
+    fn polyline_linetype_generation(&self, handle: ItemHandle) -> bool {
+        match self.doc.get_entity(acr::Handle::new(handle.get())) {
+            Some(EntityType::LwPolyline(p)) => p.plinegen,
+            Some(EntityType::Polyline2D(p)) => p.flags.bits() & 128 != 0,
+            _ => self.doc.header.polyline_linetype_generation,
+        }
+    }
+
     fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
         Ok(self
             .doc

@@ -2329,6 +2329,86 @@ impl<'a> PvecConversion<'a> {
                         }
                     }
                 }
+                // PLINEGEN off (#1691): a polyline's pattern starts anew on every side, so each side
+                // is a record of its own with the entity's style and provenance, the way a piece cut
+                // at an edge is. Only a polyline that has a pattern is split. A solid one, or one
+                // with PLINEGEN on, stays whole, and the flag is the entity's own: the header's
+                // PLINEGEN only seeds the polylines drawn after it.
+                if components.line_style
+                    && !frozen_here
+                    && matches!(raw.geometry, RawGeometry::Polyline { .. })
+                    && matches!(
+                        raw.provenance.class_name.as_str(),
+                        "LWPOLYLINE" | "POLYLINE"
+                    )
+                    && (table.is_some()
+                        || dwg_style_input(&raw.style, true)
+                            .linetype_elements
+                            .is_some())
+                    && raw
+                        .provenance
+                        .handle
+                        .is_some_and(|h| !provider.polyline_linetype_generation(h))
+                {
+                    let mut restarted: Vec<Done> = Vec::new();
+                    for d in std::iter::once(done).chain(std::mem::take(&mut more)) {
+                        let sides: Vec<Curve> = match d.geometry.geometry() {
+                            Some(Curve::Polyline(p)) => p
+                                .vertices()
+                                .windows(2)
+                                .filter_map(|w| Polyline::new(w.to_vec()).ok().map(Curve::Polyline))
+                                .collect(),
+                            Some(Curve::Composite(c)) => c
+                                .segments()
+                                .iter()
+                                .flat_map(|s| match s {
+                                    Curve::Polyline(p) => p
+                                        .vertices()
+                                        .windows(2)
+                                        .filter_map(|w| {
+                                            Polyline::new(w.to_vec()).ok().map(Curve::Polyline)
+                                        })
+                                        .collect(),
+                                    other => vec![other.clone()],
+                                })
+                                .collect(),
+                            _ => Vec::new(),
+                        };
+                        let fidelity = d.geometry.fidelity();
+                        let built: Result<Vec<Normalized2DGeometry>, _> = sides
+                            .into_iter()
+                            .map(|c| Normalized2DGeometry::from_curve(c, fidelity))
+                            .collect();
+                        match built {
+                            Ok(parts) if parts.len() > 1 => {
+                                for (k, part) in parts.into_iter().enumerate() {
+                                    match gated(part, &raw.provenance, gate) {
+                                        Ok(mut piece) => {
+                                            if k == 0 {
+                                                piece.warnings.extend(d.warnings.clone());
+                                            }
+                                            restarted.push(piece);
+                                        }
+                                        Err(e) => {
+                                            failure = Some(e);
+                                            break;
+                                        }
+                                    }
+                                }
+                                if failure.is_some() {
+                                    break;
+                                }
+                            }
+                            _ => restarted.push(d),
+                        }
+                    }
+                    if failure.is_some() {
+                        break;
+                    }
+                    let mut it = restarted.into_iter();
+                    done = it.next().expect("a polyline leaves at least one record");
+                    more = it.collect();
+                }
                 // A text, a hatch or a SOLID goes in a stream when the provider can say what it
                 // draws, and is counted as unmapped otherwise (#1609). Its carriers are written
                 // hidden. On a sheet or through a viewport a text is kept line by line when its
