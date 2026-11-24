@@ -24,19 +24,19 @@ fn table() -> PlotStyleTable {
 }
 
 #[test]
-#[ignore = "acadrust#73: resolve_lineweight reads the table at the style's own number, one entry too far"]
+#[ignore = "acadrust#73: the fork's own resolve_lineweight reads one entry too far; the conversion reads the list itself since #1692 (tests/pvec_1692_ctb_lineweight.rs)"]
 fn issue_1673_style_lineweight_one_is_the_first_entry_of_the_custom_table() {
     assert_eq!(table().resolve_lineweight(1), Some(0.10));
 }
 
 #[test]
-#[ignore = "acadrust#73: resolve_lineweight reads the table at the style's own number, one entry too far"]
+#[ignore = "acadrust#73: the fork's own resolve_lineweight reads one entry too far; the conversion reads the list itself since #1692 (tests/pvec_1692_ctb_lineweight.rs)"]
 fn issue_1673_style_lineweight_two_is_the_second_entry() {
     assert_eq!(table().resolve_lineweight(2), Some(0.20));
 }
 
 #[test]
-#[ignore = "acadrust#73: resolve_lineweight reads the table at the style's own number, one entry too far"]
+#[ignore = "acadrust#73: the fork's own resolve_lineweight reads one entry too far; the conversion reads the list itself since #1692 (tests/pvec_1692_ctb_lineweight.rs)"]
 fn issue_1673_the_last_entry_is_reachable_by_its_number() {
     // 4 names the fourth entry. Read as an index it is past the end and the style falls back
     // to the object's lineweight without saying so.
