@@ -366,7 +366,7 @@ impl Font {
         let is_type0 = subtype == b"Type0";
         let to_unicode = match font.get(b"ToUnicode") {
             Ok(o) => match side_stream(doc, o, limits, spent)? {
-                Some(bytes) => parse_cmap(&String::from_utf8_lossy(&bytes))?,
+                Some(bytes) => parse_cmap(&String::from_utf8_lossy(&bytes), limits, spent)?,
                 None => BTreeMap::new(),
             },
             Err(_) => BTreeMap::new(),
@@ -516,6 +516,8 @@ impl Font {
 const MAX_CMAP_ENTRIES: u64 = 131_072;
 /// The most widths a CID font's `/W` array may set, counted the same way.
 const MAX_CID_WIDTHS: u64 = 131_072;
+/// The most UTF-16 units one `/ToUnicode` destination may have. Real maps write one to a few.
+const MAX_CMAP_DESTINATION: u64 = 64;
 /// The most glyphs a `/CIDToGIDMap` stream may hold: one 2 byte entry per CID.
 const MAX_CID_GLYPHS: u64 = 65_536;
 
@@ -562,7 +564,31 @@ fn side_stream(
 }
 
 /// The `bfchar` and `bfrange` entries of a `/ToUnicode` CMap.
-fn parse_cmap(text: &str) -> Result<BTreeMap<u32, String>, PdfVectorError> {
+///
+/// A destination is at most [`MAX_CMAP_DESTINATION`] UTF-16 units, and the bytes of the strings
+/// built count against `max_font_bytes` (through `spent`) before they are allocated, so a range
+/// over every code cannot hold the same long string 65 536 times.
+fn parse_cmap(
+    text: &str,
+    limits: &PdfVectorLimits,
+    spent: &mut u64,
+) -> Result<BTreeMap<u32, String>, PdfVectorError> {
+    let mut charge = |bytes: u64| {
+        *spent = spent.saturating_add(bytes);
+        if *spent > limits.max_font_bytes {
+            Err(font_limit("font bytes", limits.max_font_bytes, *spent))
+        } else {
+            Ok(())
+        }
+    };
+    let short = |t: &str| {
+        let units = (t.len() / 4) as u64;
+        if units > MAX_CMAP_DESTINATION {
+            Err(font_limit("cmap destination", MAX_CMAP_DESTINATION, units))
+        } else {
+            Ok(())
+        }
+    };
     let hex = |t: &str| u32::from_str_radix(t, 16).ok();
     let utf16 = |t: &str| {
         let units: Vec<u16> = (0..t.len() / 4)
@@ -601,7 +627,10 @@ fn parse_cmap(text: &str) -> Result<BTreeMap<u32, String>, PdfVectorError> {
                         if entries > MAX_CMAP_ENTRIES {
                             return Err(too_many(entries));
                         }
-                        map.insert(code, utf16(dest));
+                        short(dest)?;
+                        let built = utf16(dest);
+                        charge(built.len() as u64)?;
+                        map.insert(code, built);
                     }
                     k += 2;
                     continue;
@@ -622,7 +651,10 @@ fn parse_cmap(text: &str) -> Result<BTreeMap<u32, String>, PdfVectorError> {
                         if entries > MAX_CMAP_ENTRIES {
                             return Err(too_many(entries));
                         }
-                        map.insert(code, utf16(item));
+                        short(item)?;
+                        let built = utf16(item);
+                        charge(built.len() as u64)?;
+                        map.insert(code, built);
                     }
                     k += 4 + list.len();
                 } else {
@@ -631,8 +663,12 @@ fn parse_cmap(text: &str) -> Result<BTreeMap<u32, String>, PdfVectorError> {
                     if entries > MAX_CMAP_ENTRIES {
                         return Err(too_many(entries));
                     }
+                    short(dest)?;
+                    let base = utf16(dest);
+                    // Every code keeps its own copy of the base, one character longer at most.
+                    charge((base.len() as u64 + 4) * (u64::from(hi - lo) + 1))?;
                     for code in lo..=hi {
-                        let mut units = utf16(dest);
+                        let mut units = base.clone();
                         if let Some(last) = units.pop() {
                             units.extend(char::from_u32(u32::from(last) + (code - lo)));
                         }

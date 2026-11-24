@@ -14,7 +14,7 @@ justification travels, and an INSERT's map is applied to position, height and ro
 
 ## Update, issue #1687
 
-The PDF text stream reads a Type0 font with `/Identity-H` or `/Identity-V` and a `/ToUnicode` CMap, whether the CMap is stored as it is or filtered. A font without `/ToUnicode` is still omitted and counted under `TEXT_CID_NO_TOUNICODE`, because no glyph id maps to a character without the embedded program, which is never read. The bounds are `PdfVectorLimits::max_font_bytes` (decoded CMap and `/CIDToGIDMap` bytes a page), 131 072 CMap entries, 131 072 `/W` widths and 65 536 glyphs, and passing one is `PdfVectorError::FontLimitExceeded`.
+The PDF text stream reads a Type0 font with `/Identity-H` or `/Identity-V` and a `/ToUnicode` CMap, whether the CMap is stored as it is or filtered. A font without `/ToUnicode` is still omitted and counted under `TEXT_CID_NO_TOUNICODE`, because no glyph id maps to a character without the embedded program, which is never read. The bounds are `PdfVectorLimits::max_font_bytes` (decoded CMap and `/CIDToGIDMap` bytes a page), 131 072 CMap entries, 64 UTF-16 units a CMap destination, 131 072 `/W` widths and 65 536 glyphs, and passing one is `PdfVectorError::FontLimitExceeded`.
 
 ## Decision
 
