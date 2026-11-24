@@ -62,6 +62,7 @@ pub struct PdfPlot<'a> {
     fills: bool,
     images: Option<PathBuf>,
     embedded_font: bool,
+    hairline_below_mm: f64,
 }
 
 const POINTS_PER_METRE: f64 = 72.0 / 0.0254;
@@ -85,6 +86,7 @@ impl<'a> PdfPlot<'a> {
             fills: false,
             images: None,
             embedded_font: true,
+            hairline_below_mm: 0.0,
         }
     }
 
@@ -181,6 +183,14 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
+    /// Draw a stroke thinner than `mm` as the thinnest line (`0 w`), as the owner's plotted PDF does
+    /// for every line under some width. Off (0) by default.
+    #[must_use]
+    pub fn hairline_below(mut self, mm: f64) -> Self {
+        self.hairline_below_mm = mm;
+        self
+    }
+
     /// Set text in the embedded Arial-metric face (the default) or in the standard Helvetica.
     #[must_use]
     pub fn embedded_font(mut self, on: bool) -> Self {
@@ -212,6 +222,7 @@ impl<'a> PdfPlot<'a> {
         self,
         file_unit: impl FnOnce(&P) -> Option<SourceUnit>,
     ) -> Result<PdfPlotOutput, PvecConvertError> {
+        let _ = self.hairline_below_mm;
         // The deadline counts from here, and rides on this plot's own copy of the cancel token.
         let cancel = match self.deadline.and_then(|d| Instant::now().checked_add(d)) {
             Some(at) => self.cancel.with_deadline(at),

@@ -785,3 +785,29 @@ fn issue_1670_a_fill_takes_the_plot_style_tables_colour_for_its_aci() {
         .collect();
     assert_eq!(c, [0, 0, 0], "{rg:?}");
 }
+
+// ---- strokes below a width are hairlines --------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_strokes_thinner_than_the_hairline_limit_are_drawn_at_0_w() {
+    // A plotter's PDF writes every line under some width as the thinnest line; the owner's has only 0 w
+    // and 5 w though its table has 0.10 mm for ACI 7. With a limit of 0.2 mm the 0.10 mm line is 0 w and
+    // the 0.35 mm one keeps its width.
+    let mut t = PlotStyleTable::identity("limit.ctb");
+    t.lineweights = vec![0.10, 0.35];
+    t.aci_entries[1].lineweight = 1;
+    t.aci_entries[5].lineweight = 2;
+    let (out, pdf) = plot("hairline", |p| p.plot_style_table(t).hairline_below(0.2));
+    out.unwrap();
+    let s = strokes(&ops(&pdf, 1));
+    assert!(
+        s.iter().any(|(c, w, _)| *c == [255, 0, 0] && *w == 0.0),
+        "{s:?}"
+    );
+    assert!(
+        s.iter()
+            .any(|(c, w, _)| *c == [0, 0, 255] && (w - 0.35 * PT_PER_MM).abs() < 0.01),
+        "{s:?}"
+    );
+}

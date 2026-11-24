@@ -55,7 +55,14 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
         );
         return;
     };
-    let table = PlotStyleTable::from_bytes("owner.ctb", &fs::read(&ctb).unwrap()).unwrap();
+    let mut table = PlotStyleTable::from_bytes("owner.ctb", &fs::read(&ctb).unwrap()).unwrap();
+    // `LIBVIPRS_OWNER_PLOT_ALLTHIN=1` puts every style at the list's first entry, to see what the
+    // plotted PDF's widths are.
+    if std::env::var_os("LIBVIPRS_OWNER_PLOT_ALLTHIN").is_some() {
+        for e in &mut table.aci_entries {
+            e.lineweight = 1;
+        }
+    }
     let pc3 = Pc3::parse(&fs::read(&pc3).unwrap()).unwrap();
     let media = pc3.media().unwrap();
     eprintln!("pc3 media {:?}", media);

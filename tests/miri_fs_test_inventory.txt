@@ -828,6 +828,7 @@ annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_solid_fill_is
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_text_is_sized_so_a_capital_stands_one_text_height
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_sloped_line_is_drawn_as_it_looks_from_above
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_fill_takes_the_plot_style_tables_colour_for_its_aci
+annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_strokes_thinner_than_the_hairline_limit_are_drawn_at_0_w
 annotated   fs-detected  tests/pvec_1670_font.rs::issue_1670_the_text_is_set_in_an_embedded_true_type_face
 annotated   fs-detected  tests/pvec_1670_font.rs::issue_1670_the_advance_widths_are_arials
 annotated   fs-detected  tests/pvec_1670_font.rs::issue_1670_the_text_is_selectable
