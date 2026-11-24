@@ -64,6 +64,7 @@ mod dwg_image;
 mod georef;
 mod layouts;
 mod manifest;
+mod pdf_hatch;
 mod pdf_plot;
 pub use pdf_plot::{PdfPlot, PdfPlotOutput};
 #[cfg(feature = "pvec-raster")]
@@ -109,8 +110,8 @@ use crate::pvec::annotation::{self, Body};
 use crate::pvec::bounds::BoundsReport;
 use crate::pvec::classify::{ElementClass, ElementRules};
 use crate::pvec::components::{
-    ComponentSource, ComponentsError, FillBody, StreamSelection, TextBody, annotation_streams,
-    build_streams,
+    ComponentSource, ComponentsError, FillBody, PlacedPatternLine, StreamSelection, TextBody,
+    annotation_streams, build_streams,
 };
 use crate::pvec::curve_clip::{CurveClip, CurveClipError, clip_curve};
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
@@ -232,6 +233,13 @@ pub enum PvecConvertError {
     /// The wall-clock deadline passed (#1674). Nothing was published.
     #[error("the deadline passed")]
     Deadline,
+    /// A page of a plot is not a PDF page (#1670): a side that is not finite or is over the PDF limit
+    /// of 14400 points. Nothing was written.
+    #[error("a page was refused: {reason}")]
+    PageRefused {
+        /// What is wrong with the page.
+        reason: &'static str,
+    },
 }
 
 /// What a conversion produced.
@@ -248,6 +256,11 @@ pub struct PvecConversionOutput {
     /// The most outcomes that were waiting for the consumer at once. Never above the capacity set
     /// with [`PvecConversion::queue_capacity`].
     pub peak_queue_depth: u32,
+    /// The line families of each pattern hatch the artifact carries, placed in the artifact's
+    /// space and keyed by the index of the hatch's first boundary entity in the artifact. The PVEC
+    /// hatch stream keeps only a pattern's name, angle and scale, so a plot draws the pattern from
+    /// these. Empty without `fills(true)` and the component streams.
+    pub hatch_patterns: BTreeMap<u32, Vec<PlacedPatternLine>>,
     /// The sheet as a PNG, when [`PvecConversion::thumbnail`] asked for one (#1629).
     #[cfg(feature = "pvec-raster-thumbnail")]
     pub thumbnail: Option<Vec<u8>>,
@@ -449,6 +462,15 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// Draw a LINE whose ends are at different heights as the segment it covers seen from above,
+    /// where a PVec conversion refuses it as 3D (`geometry-3d`): what a plan or a plot shows. Off by
+    /// default.
+    #[must_use]
+    pub fn project_plan(mut self, on: bool) -> Self {
+        self.gate.project_plan = on;
+        self
+    }
+
     /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT, ATTDEF,
     /// MULTILEADER and TOLERANCE stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
@@ -632,7 +654,9 @@ impl<'a> PvecConversion<'a> {
     /// `Default` (the default) or `Permissive`. Replaces any earlier capability setting.
     #[must_use]
     pub fn profile(mut self, profile: ConversionProfile) -> Self {
+        let project_plan = self.gate.project_plan;
         self.gate = Gate::of(profile);
+        self.gate.project_plan = project_plan;
         self
     }
 
@@ -2594,8 +2618,7 @@ impl<'a> PvecConversion<'a> {
                 if annotate
                     && matches!(item, Item::Leaf(_))
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && ((text_class && !*want_texts)
-                        || (fill_class && !*want_fills && window.is_none() && clip_box.is_none()))
+                    && ((text_class && !*want_texts) || (fill_class && !*want_fills))
                 {
                     let (class, choice) = (
                         raw.provenance.class_name.as_str(),
@@ -2608,8 +2631,7 @@ impl<'a> PvecConversion<'a> {
                     && !frozen_here
                     && let Item::Leaf(f) = item
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && ((text_class && *want_texts)
-                        || (fill_class && *want_fills && window.is_none() && clip_box.is_none()))
+                    && ((text_class && *want_texts) || (fill_class && *want_fills))
                 {
                     let class = raw.provenance.class_name.as_str();
                     let made = raw
@@ -2623,25 +2645,30 @@ impl<'a> PvecConversion<'a> {
                         })
                         .ok_or("it draws nothing the provider can report")
                         .and_then(|a| {
-                            annotation::map(f, a, &|p| {
-                                clip_box.is_none_or(|b| {
-                                    p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
-                                }) && ring.is_none_or(|r| {
-                                    // Even-odd crossing count over the viewport's polygon.
-                                    let mut inside = false;
-                                    for (i, a) in r.iter().enumerate() {
-                                        let b = &r[(i + 1) % r.len()];
-                                        if (a[1] > p[1]) != (b[1] > p[1])
-                                            && p[0]
-                                                < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1])
-                                                    + a[0]
-                                        {
-                                            inside = !inside;
+                            annotation::map(
+                                f,
+                                a,
+                                &|p| {
+                                    clip_box.is_none_or(|b| {
+                                        p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
+                                    }) && ring.is_none_or(|r| {
+                                        // Even-odd crossing count over the viewport's polygon.
+                                        let mut inside = false;
+                                        for (i, a) in r.iter().enumerate() {
+                                            let b = &r[(i + 1) % r.len()];
+                                            if (a[1] > p[1]) != (b[1] > p[1])
+                                                && p[0]
+                                                    < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1])
+                                                        + a[0]
+                                            {
+                                                inside = !inside;
+                                            }
                                         }
-                                    }
-                                    inside
-                                })
-                            })
+                                        inside
+                                    })
+                                },
+                                if ring.is_none() { clip_box } else { None },
+                            )
                         });
                     let made_clipped = matches!(made, Err(annotation::CLIPPED));
                     let carried = match made {
@@ -2911,7 +2938,23 @@ impl<'a> PvecConversion<'a> {
                 }
                 match pending {
                     Some(Body::Text(lines)) => texts.extend(carried_ids.into_iter().zip(lines)),
-                    Some(Body::Fill(f)) => fills.push((carried_ids, f)),
+                    Some(Body::Fill(mut f)) => {
+                        // The plot style table's colour and screening for the fill's ACI, as a stroke
+                        // gets them: a table that plots ACI 9 black plots a fill in ACI 9 black (#1670).
+                        if let (Some(t), Some(LeafPaint::Colour(SourceColour::Aci(aci)))) =
+                            (table, paints.get(&leaf_key_of(&raw.provenance)))
+                        {
+                            let [r, g, b, a] = f.rgba.to_be_bytes();
+                            let [r, g, b] = t.resolve_color(*aci).map_or([r, g, b], |c| {
+                                c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                            });
+                            let s = f64::from(t.resolve_screening(*aci));
+                            let [r, g, b] = [r, g, b]
+                                .map(|c| (255.0 - (255.0 - f64::from(c)) * s).round() as u8);
+                            f.rgba = u32::from_be_bytes([r, g, b, a]);
+                        }
+                        fills.push((carried_ids, f));
+                    }
                     None => {}
                 }
                 if stop {
@@ -3177,6 +3220,8 @@ impl<'a> PvecConversion<'a> {
         // change a geometry block.
         // The writer takes what it keeps out of the geometry, so the geometry goes the moment the
         // open call returns, whether it succeeded or not, and the report is built without it.
+        let hatch_patterns: std::cell::RefCell<BTreeMap<u32, Vec<PlacedPatternLine>>> =
+            std::cell::RefCell::new(BTreeMap::new());
         let open = |geometries: Vec<(EntityId, Normalized2DGeometry)>,
                     spill: Option<&SpillConfig>,
                     on_chunk: &mut dyn FnMut(u64, u64)|
@@ -3259,8 +3304,10 @@ impl<'a> PvecConversion<'a> {
                         .insert("line-style.bad-style".to_owned(), style_bad);
                 }
                 streams = built.streams;
-                let (carried, dropped) = annotation_streams(&texts, &fills, &open.source_ids)
-                    .map_err(PvecConvertError::Components)?;
+                let (carried, dropped, patterns) =
+                    annotation_streams(&texts, &fills, &open.source_ids)
+                        .map_err(PvecConvertError::Components)?;
+                *hatch_patterns.borrow_mut() = patterns;
                 streams.extend(carried);
                 for d in &dropped {
                     *made
@@ -3428,6 +3475,7 @@ impl<'a> PvecConversion<'a> {
             fidelity,
             written,
             peak_queue_depth,
+            hatch_patterns: hatch_patterns.into_inner(),
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail,
         })
@@ -3818,12 +3866,16 @@ struct Gate {
     allowed: BTreeSet<CapabilityId>,
     exact_only: bool,
     policy: CapabilityPolicy,
+    /// A LINE whose ends are at different heights is drawn as the segment it covers in plan, not
+    /// refused as 3D. Not part of a profile: a plot asks for it.
+    project_plan: bool,
 }
 
 impl Gate {
     fn of(profile: ConversionProfile) -> Self {
         Self {
             name: profile.name(),
+            project_plan: false,
             allowed: profile.capabilities(),
             exact_only: profile.exact_only(),
             policy: profile.policy(),
@@ -4007,7 +4059,20 @@ fn classify_leaf(
     viewport: Option<crate::cad::ItemHandle>,
 ) -> Result<Done, PvecConvertError> {
     let class = f.entity.provenance.class_name.as_str();
-    let basic = match dwg_basic::extract(&f.entity) {
+    // A plan shows a sloped line as the segment it covers, when the caller asked for that.
+    let flattened = match &f.entity.geometry {
+        RawGeometry::Line { start, end } if gate.project_plan && start[2] != end[2] => {
+            Some(RawEntity {
+                geometry: RawGeometry::Line {
+                    start: [start[0], start[1], 0.0],
+                    end: [end[0], end[1], 0.0],
+                },
+                ..f.entity.clone()
+            })
+        }
+        _ => None,
+    };
+    let basic = match dwg_basic::extract(flattened.as_ref().unwrap_or(&f.entity)) {
         Ok(b) => b,
         Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate, viewport),
         Err(e) => {
@@ -4323,6 +4388,7 @@ impl PvecConvertError {
             PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
             PvecConvertError::Deadline => d(DiagnosticCode::Cancelled, "deadline"),
+            PvecConvertError::PageRefused { .. } => d(DiagnosticCode::WriteFailed, "page-refused"),
         }
     }
 
@@ -4356,6 +4422,7 @@ impl PvecConvertError {
             PvecConvertError::Thumbnail(_) => "THUMBNAIL_FAILED",
             PvecConvertError::Cancelled => "CANCELLED",
             PvecConvertError::Deadline => "DEADLINE",
+            PvecConvertError::PageRefused { .. } => "PAGE_REFUSED",
         }
     }
 

@@ -403,6 +403,30 @@ pub(crate) struct TextBody {
 pub(crate) struct FillBody {
     pub pattern: Option<(String, f64, f64)>,
     pub rgba: u32,
+    /// For a pattern fill, its line families placed on the sheet.
+    pub lines: Vec<PlacedPatternLine>,
+}
+
+#[cfg(feature = "pvec-convert")]
+/// The line families of each pattern hatch, keyed by the artifact index of its first boundary entity.
+pub type PatternMap = BTreeMap<u32, Vec<PlacedPatternLine>>;
+
+#[cfg(feature = "pvec-convert")]
+/// One line family of a hatch pattern, placed in the artifact's space: the lines run along
+/// `direction` (a unit vector) through `origin`, the next one `step` from it, and `dashes` are
+/// lengths in the artifact's unit, positive for a dash, negative for a gap, zero for a dot (empty
+/// is a continuous line). The PVEC hatch stream keeps only a pattern's name, angle and scale, so
+/// these come back beside the artifact for a plot to draw. The fields vary together per family.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedPatternLine {
+    /// A point one of the lines passes through.
+    pub origin: [f64; 2],
+    /// The direction of the lines, a unit vector.
+    pub direction: [f64; 2],
+    /// From one line to the next.
+    pub step: [f64; 2],
+    /// Dash lengths.
+    pub dashes: Vec<f64>,
 }
 
 #[cfg(feature = "pvec-convert")]
@@ -418,7 +442,7 @@ pub(crate) fn annotation_streams(
     texts: &[(EntityId, TextBody)],
     fills: &[(Vec<EntityId>, FillBody)],
     source_ids: &[EntityId],
-) -> Result<(Vec<Stream>, Vec<DroppedRow>), ComponentsError> {
+) -> Result<(Vec<Stream>, Vec<DroppedRow>, PatternMap), ComponentsError> {
     // PVec's bounds, as for `build_streams`.
     const MAX_NAME: usize = 255;
     const MAX_TEXT: usize = 4_096;
@@ -471,6 +495,7 @@ pub(crate) fn annotation_streams(
         );
     }
     let mut records = Vec::new();
+    let mut patterns: BTreeMap<u32, Vec<PlacedPatternLine>> = BTreeMap::new();
     for (ids, f) in fills {
         let boundary: Vec<PvecEntityId> = ids
             .iter()
@@ -503,6 +528,9 @@ pub(crate) fn annotation_streams(
                 }
             }
         };
+        if !f.lines.is_empty() {
+            patterns.insert(boundary[0].index(), f.lines.clone());
+        }
         records.push(HatchRecord { boundary, fill });
     }
     if !records.is_empty() {
@@ -512,5 +540,5 @@ pub(crate) fn annotation_streams(
                 .map_err(|e| refused(&e))?,
         );
     }
-    Ok((out, dropped))
+    Ok((out, dropped, patterns))
 }

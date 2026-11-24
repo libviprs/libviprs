@@ -24,7 +24,7 @@
 //! part of a region is not the region. A hatch pattern is carried by name, angle and scale, not by
 //! its lines.
 
-use super::components::{FillBody, TextBody};
+use super::components::{FillBody, PlacedPatternLine, TextBody};
 use super::dwg_acadrust::run_advance;
 use super::flatten::FlatEntity;
 use super::provider::{
@@ -51,6 +51,7 @@ pub(crate) fn map(
     leaf: &FlatEntity,
     annotation: Annotation,
     keep: &dyn Fn([f64; 2]) -> bool,
+    clip: Option<[f64; 4]>,
 ) -> Result<(Vec<RawEntity>, Body), &'static str> {
     /// How far below its baseline a line's descenders reach, in text heights. Capitals stand one text
     /// height above the baseline.
@@ -181,6 +182,7 @@ pub(crate) fn map(
             pattern,
             rgba,
             unread_loops,
+            pattern_lines,
         } => {
             if unread_loops > 0 {
                 return Err("a boundary loop could not be read as a ring of curves");
@@ -188,7 +190,8 @@ pub(crate) fn map(
             if rings.is_empty() {
                 return Err("it has no boundary");
             }
-            z_axis_flip(normal).ok_or("its normal is not the Z axis")?;
+            let flip = z_axis_flip(normal).ok_or("its normal is not the Z axis")?;
+            let to_block = |x: f64, y: f64| if flip { [-x, y, 0.0] } else { [x, y, 0.0] };
             // PVec's container stores straight polylines and refuses a ring with arcs in it, so an
             // arc becomes short chords. A corner repeated up to rounding noise is one corner, and
             // a ring left with fewer than three has no area, so it adds nothing to the fill.
@@ -242,9 +245,82 @@ pub(crate) fn map(
                         .collect()
                 })
             }
+            // A ring wholly inside what it is seen through is carried as it is, one wholly outside is
+            // left out, and one that crosses the edge of a rectangle is cut to it (Sutherland and
+            // Hodgman, in the drawing's space, then mapped back into the entity's plane). A ring
+            // seen through a polygon is carried or left out whole.
+            let [ma, mb, mc, md, mx, my] = leaf.matrix();
+            let det = ma * md - mb * mc;
+            let cut = |vertices: Vec<RawVertex>| -> Option<Vec<RawVertex>> {
+                let seen: Vec<[f64; 2]> = vertices
+                    .iter()
+                    .map(|v| leaf.map_point(to_block(v.x, v.y)))
+                    .collect();
+                if seen.iter().all(|p| keep(*p)) {
+                    return Some(vertices);
+                }
+                let b = clip?;
+                if det == 0.0 || !det.is_finite() {
+                    return None;
+                }
+                let mut ring = seen;
+                for edge in 0..4 {
+                    let inside = |p: [f64; 2]| match edge {
+                        0 => p[0] >= b[0],
+                        1 => p[0] <= b[2],
+                        2 => p[1] >= b[1],
+                        _ => p[1] <= b[3],
+                    };
+                    let cross = |p: [f64; 2], q: [f64; 2]| {
+                        let (axis, at) = match edge {
+                            0 => (0, b[0]),
+                            1 => (0, b[2]),
+                            2 => (1, b[1]),
+                            _ => (1, b[3]),
+                        };
+                        let t = (at - p[axis]) / (q[axis] - p[axis]);
+                        let mut r = [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t];
+                        r[axis] = at;
+                        r
+                    };
+                    let mut next: Vec<[f64; 2]> = Vec::new();
+                    for (i, p) in ring.iter().enumerate() {
+                        let q = ring[(i + 1) % ring.len()];
+                        match (inside(*p), inside(q)) {
+                            (true, true) => next.push(q),
+                            (true, false) => next.push(cross(*p, q)),
+                            (false, true) => {
+                                next.push(cross(*p, q));
+                                next.push(q);
+                            }
+                            (false, false) => {}
+                        }
+                    }
+                    if next.len() < 3 {
+                        return None;
+                    }
+                    ring = next;
+                }
+                // Back to the entity's plane: the inverse of the leaf's map, then the plane's flip.
+                Some(
+                    ring.iter()
+                        .map(|p| {
+                            let (px, py) = (p[0] - mx, p[1] - my);
+                            let bx = (md * px - mb * py) / det;
+                            let by = (-mc * px + ma * py) / det;
+                            RawVertex {
+                                x: if flip { -bx } else { bx },
+                                y: by,
+                                bulge: 0.0,
+                            }
+                        })
+                        .collect(),
+                )
+            };
             let carriers: Vec<RawEntity> = rings
                 .iter()
                 .filter_map(|ring| straight(ring))
+                .filter_map(cut)
                 .map(|vertices| {
                     carrier(RawGeometry::Polyline {
                         vertices,
@@ -255,9 +331,53 @@ pub(crate) fn map(
                 })
                 .collect();
             if carriers.is_empty() {
+                // Rings that had an area and none of it in view are outside, not flat.
+                if rings.iter().any(|r| straight(r).is_some()) {
+                    return Err(CLIPPED);
+                }
                 return Err("its corners are on one line, so there is no area to fill");
             }
-            Ok((carriers, Body::Fill(FillBody { pattern, rgba })))
+            // The pattern's line families in the drawing's space (a viewport's map included): the
+            // direction and the step by the leaf's linear part, the dash lengths by what it does to
+            // a unit along the line.
+            let lines: Vec<PlacedPatternLine> = if pattern.is_some() {
+                let linear = |v: [f64; 2]| {
+                    let [bx, by, _] = to_block(v[0], v[1]);
+                    [ma * bx + mb * by, mc * bx + md * by]
+                };
+                pattern_lines
+                    .iter()
+                    .filter_map(|l| {
+                        let (s, c) = l.angle.sin_cos();
+                        let along = linear([c, s]);
+                        let length = pvec_numeric::detmath::hypot(along[0], along[1]);
+                        if !(length.is_finite() && length > 0.0) {
+                            return None;
+                        }
+                        let (ox, oy) = (l.offset[0], l.offset[1]);
+                        let step = linear([ox * c - oy * s, ox * s + oy * c]);
+                        let origin = leaf.map_point(to_block(l.base[0], l.base[1]));
+                        let ok = origin.iter().chain(&step).all(|v| v.is_finite())
+                            && l.dashes.iter().all(|d| d.is_finite());
+                        ok.then(|| PlacedPatternLine {
+                            origin,
+                            direction: [along[0] / length, along[1] / length],
+                            step,
+                            dashes: l.dashes.iter().map(|d| d * length).collect(),
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            Ok((
+                carriers,
+                Body::Fill(FillBody {
+                    pattern,
+                    rgba,
+                    lines,
+                }),
+            ))
         }
     }
 }

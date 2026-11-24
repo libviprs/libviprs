@@ -157,9 +157,9 @@ pub use provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
     EntityScope, EntityStyle, Facet, FacetCap, FacetSource, ImageFrame, InstancePath, InstanceStep,
     LayerState, LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState,
-    Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
-    SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV,
-    TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    PatternLine, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry,
+    RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform,
+    TextAnchorV, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,

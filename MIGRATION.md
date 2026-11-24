@@ -720,3 +720,21 @@ You only need to do something if you relied on `pdf_info` returning the full
 MediaBox of a cropped page. `/UserUnit` is still not applied, since the render
 ignores it. The MediaBox itself is no longer lost when it sits on the `/Pages`
 node: that case used to report 0x0.
+
+## `Annotation::Fill` gains `pattern_lines`, so struct literals and exhaustive patterns stop compiling
+
+This one is for a crate that implements `DwgProvider::annotation` or matches `Annotation::Fill` (issue #1670). `Annotation` is `#[non_exhaustive]` but its variants are not, on purpose, for the reason `TileFormat` gives above: the compile error is the feature. A struct literal now needs the new field, and a pattern that names every field needs it or `..`:
+
+```rust
+Annotation::Fill {
+    rings,
+    elevation,
+    normal,
+    pattern,
+    rgba,
+    unread_loops,
+    pattern_lines: Vec::new(), // add this; a pattern fill puts its `PatternLine`s here
+}
+```
+
+`pattern_lines` is empty for a solid fill and for a provider that does not read a hatch's pattern; a plot then draws a pattern hatch as nothing, as before. `PvecConversionOutput` also gains `hatch_patterns`, which only matters to code that builds one with a struct literal. `PdfPlot` gained builder options and the new face of its text, none of which changes a call that compiled.

@@ -863,7 +863,27 @@ pub enum Annotation {
         /// Boundary loops the provider could not read (an edge that is not a curve, or edges that
         /// do not join). A fill with any is not a region the stream can describe whole.
         unread_loops: u32,
+        /// For a pattern fill, the lines its pattern is made of, as the drawing stores them (already
+        /// scaled and turned by the hatch's own scale and angle); empty for a solid fill and for a
+        /// provider that does not read them.
+        pattern_lines: Vec<PatternLine>,
     },
+}
+
+/// One line family of a hatch pattern: the lines run at `angle`, one through `base` and the next
+/// `offset` from it, where `offset.0` is along the lines and `offset.1` across them. The fields vary
+/// together per line family.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternLine {
+    /// The direction of the lines in radians.
+    pub angle: f64,
+    /// A point one of the lines passes through, in the hatch's plane.
+    pub base: [f64; 2],
+    /// From one line to the next: along the line, then across it.
+    pub offset: [f64; 2],
+    /// Dash lengths, positive for a dash and negative for a gap, zero for a dot; empty for a
+    /// continuous line.
+    pub dashes: Vec<f64>,
 }
 
 /// Which edge of a block of text [`Annotation::Text::position`] sits on, vertically.

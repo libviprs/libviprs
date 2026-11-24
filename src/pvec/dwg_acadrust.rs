@@ -66,10 +66,10 @@ use crate::cad::{CadSource, Fill, ItemHandle, decode_escapes, display_text, gdt_
 use crate::pvec::provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
     EntityScope, EntityStyle, Facet, FacetSource, ImageFrame, InstancePath, LayerState,
-    LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, Point3,
-    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour,
-    SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef,
-    ViewportClip, ViewportEntity, XrefAttachment, z_axis_flip,
+    LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, PatternLine,
+    Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
+    SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV,
+    TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment, z_axis_flip,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -796,25 +796,33 @@ impl AcadrustProvider {
             .collect()
     }
 
-    /// The colour a fill is drawn in, as red, green, blue and alpha: its own colour, or its layer's
+    /// The colour a fill is drawn in, as red, green, blue and opacity: its own colour, or its layer's
     /// for BYLAYER. A fill whose colour is BYBLOCK (the INSERT's, which the provider cannot see)
     /// or has none is black.
     fn fill_rgba(&self, common: &acr::entities::EntityCommon) -> u32 {
-        let layer_colour = || {
-            let found = self.doc.layers.get(&common.layer).or_else(|| {
+        let layer = || {
+            self.doc.layers.get(&common.layer).or_else(|| {
                 self.doc
                     .layers
                     .iter()
                     .find(|l| l.name.eq_ignore_ascii_case(&common.layer))
-            });
-            found.map(|l| l.color)
+            })
         };
+        let layer_colour = || layer().map(|l| l.color);
         let colour = match common.color {
             acr::Color::ByLayer => layer_colour().unwrap_or(acr::Color::None),
             c => c,
         };
         let (r, g, b) = colour.rgb().unwrap_or((0, 0, 0));
-        u32::from_be_bytes([r, g, b, 255])
+        // The fill's own transparency, or its layer's for BYLAYER, as an amount (0 opaque, 255
+        // clear); the word carries the opacity that is left.
+        let amount = match common.transparency {
+            acr::types::Transparency::ByLayer => layer()
+                .and_then(|l| l.transparency.explicit_alpha())
+                .unwrap_or(0),
+            t => t.explicit_alpha().unwrap_or(0),
+        };
+        u32::from_be_bytes([r, g, b, 255 - amount])
     }
 
     fn capabilities() -> ProviderCaps {
@@ -1593,6 +1601,20 @@ impl DwgProvider for AcadrustProvider {
                     }),
                     rgba: self.fill_rgba(&h.common),
                     unread_loops: u32::try_from(drawn.skipped.len()).unwrap_or(u32::MAX),
+                    pattern_lines: if h.is_solid {
+                        Vec::new()
+                    } else {
+                        h.pattern
+                            .lines
+                            .iter()
+                            .map(|l| PatternLine {
+                                angle: l.angle,
+                                base: [l.base_point.x, l.base_point.y],
+                                offset: [l.offset.x, l.offset.y],
+                                dashes: l.dash_lengths.clone(),
+                            })
+                            .collect()
+                    },
                 })
             }
             EntityType::Solid(s) => {
@@ -1619,6 +1641,7 @@ impl DwgProvider for AcadrustProvider {
                     pattern: None,
                     rgba: self.fill_rgba(&s.common),
                     unread_loops: 0,
+                    pattern_lines: Vec::new(),
                 })
             }
             _ => None,
