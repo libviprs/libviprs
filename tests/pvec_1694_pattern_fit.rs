@@ -1,13 +1,21 @@
-//! A restarted polyline side has its dash pattern fitted to it (#1694).
+//! A restarted polyline side keeps its pattern period and centres the pattern (#1699, replacing
+//! the stretch of #1694).
 //!
-//! #1691 restarts a PLINEGEN-off polyline's pattern at every vertex, but only aligns it at the start
-//! of each side, so a side whose length is not a dash plus a whole number of periods reaches its
-//! corner in a gap where the plot has a dash. The rule here: a side is fitted so it ends on a dash.
-//! With the pattern's first dash d and period p, a side of length L takes n = floor((L - d) / p)
-//! whole periods and the pattern is stretched by L / (n p + d), every element by the same factor, so
-//! the shape is kept and the last dash ends exactly at the corner. A side that already is d plus a
-//! whole number of periods, a PLINEGEN-on polyline and a LINE are not touched. Fixtures are written
-//! with acadrust. Needs `--features pvec-convert`.
+//! #1691 restarts a PLINEGEN-off polyline's pattern at every vertex. #1694 stretched each side's
+//! pattern so the side ended on a dash, and a plotted side measures otherwise: the period stays the
+//! linetype's own and the spare length is shared by the two end dashes. With the pattern's dash d,
+//! its gap g and its period p = d + g, a side of length L holds n = floor((L + g) / p) whole
+//! periods, the remainder r = L - (n p - g) is split in two, and the first and the last dash are
+//! each d + r / 2 long, with every dash between them starting exactly p after the one before. The
+//! numbers are the plotted ones, 3.125 mm and 1.5625 mm (a period of 4.6875 mm) on a side of
+//! 93.6875 mm, where the plot's first dash is 3.87 mm.
+//!
+//! PVec's line style is one cyclic dash array and a start phase per record, and a phase can start
+//! inside a dash but cannot lengthen it, so a side is written as three records that join at the two
+//! end dashes: a solid lead of r / 2, the pattern at its own period from there to the last dash's
+//! end, and a solid tail of r / 2. A side that is exactly n periods less a gap, a side shorter than
+//! one pattern, a PLINEGEN-on polyline and a LINE are not touched. Fixtures are written with
+//! acadrust. Needs `--features pvec-convert`.
 
 #![cfg(feature = "pvec-convert")]
 
@@ -31,9 +39,13 @@ const STREAMS: StreamSelection = StreamSelection {
     ..StreamSelection::NONE
 };
 
-/// HIDDEN's dash and gap in the fixtures, and so its first dash and its period.
-const DASH: f64 = 0.25;
-const PERIOD: f64 = 0.375;
+/// HIDDEN's dash and gap in the fixtures at the plot's scale (mm), and so its period.
+const DASH: f64 = 3.125;
+const GAP: f64 = 1.5625;
+const PERIOD: f64 = 4.6875;
+/// A side of 20 periods less a gap plus a remainder of 1.5, so each end dash is 0.75 longer: the
+/// first dash is 3.875 mm. Every number here is a multiple of 1/16, so the arithmetic is exact.
+const PLOT_SIDE: f64 = 20.0 * PERIOD - GAP + 1.5;
 
 /// One record: its two ends when it is a two-point polyline (zeros otherwise) and the dash array of
 /// its style (empty for none).
@@ -100,7 +112,7 @@ fn doc() -> CadDocument {
     let mut doc = CadDocument::new();
     doc.header.polyline_linetype_generation = false;
     let mut hidden = LineType::new("HIDDEN");
-    hidden.elements = vec![LineTypeElement::dash(DASH), LineTypeElement::space(0.125)];
+    hidden.elements = vec![LineTypeElement::dash(DASH), LineTypeElement::space(GAP)];
     doc.line_types.add(hidden).unwrap();
     doc
 }
@@ -130,122 +142,214 @@ fn length(r: &Record) -> f64 {
     (r.1[0] - r.0[0]).hypot(r.1[1] - r.0[1])
 }
 
-/// Whether the record's pattern ends exactly on the end of a dash at its far corner: its length is
-/// the first dash plus a whole number of periods, to float noise.
-fn ends_on_a_dash(r: &Record) -> bool {
-    let [d, g] = [r.2[0], r.2[1]];
-    let n = (length(r) - d) / (d + g);
-    (n - n.round()).abs() < 1e-6 && n.round() >= 0.0
+/// The records grouped into sides: consecutive records that run the same way along the same line
+/// are one side (a corner turns, so the next side is a new group).
+fn sides(records: &[Record]) -> Vec<&[Record]> {
+    let dir = |r: &Record| {
+        let l = length(r).max(1e-12);
+        [
+            ((r.1[0] - r.0[0]) / l).round(),
+            ((r.1[1] - r.0[1]) / l).round(),
+        ]
+    };
+    let mut out: Vec<&[Record]> = Vec::new();
+    let mut from = 0;
+    for k in 1..=records.len() {
+        if k == records.len() || dir(&records[k]) != dir(&records[from]) {
+            out.push(&records[from..k]);
+            from = k;
+        }
+    }
+    out
 }
 
-/// The factor the pattern was stretched by, from its first dash.
-fn stretch(r: &Record) -> f64 {
-    r.2[0] / DASH
+/// The dashes a side draws, as (start, end) distances along it from its first point, with the
+/// dashes that touch (the end of a solid lead and the first dash of the pattern) joined. A record
+/// with no dash array is solid, and one with an array repeats it from its start (every phase here
+/// is zero).
+fn drawn(side: &[Record]) -> Vec<(f64, f64)> {
+    let mut out: Vec<(f64, f64)> = Vec::new();
+    let mut at = 0.0;
+    for r in side {
+        let l = length(r);
+        if r.2.is_empty() {
+            out.push((at, at + l));
+        } else {
+            let mut x = 0.0;
+            'cycle: loop {
+                for (k, e) in r.2.iter().enumerate() {
+                    if x >= l - 1e-9 {
+                        break 'cycle;
+                    }
+                    if k % 2 == 0 {
+                        out.push((at + x, at + (x + e).min(l)));
+                    }
+                    x += e;
+                }
+            }
+        }
+        at += l;
+    }
+    let mut joined: Vec<(f64, f64)> = Vec::new();
+    for d in out {
+        match joined.last_mut() {
+            Some(last) if d.0 - last.1 < 1e-9 => last.1 = d.1,
+            _ => joined.push(d),
+        }
+    }
+    joined
+}
+
+/// What a side of length `l` must draw by the rule alone: n periods, a remainder, and the two end
+/// dashes each d + r / 2 long.
+fn centred(l: f64) -> Vec<(f64, f64)> {
+    let n = ((l + GAP) / PERIOD + 1e-9).floor();
+    let half = (l - (n * PERIOD - GAP)) / 2.0;
+    let mut want = vec![(0.0, DASH + half)];
+    for k in 1..n as usize - 1 {
+        let s = half + k as f64 * PERIOD;
+        want.push((s, s + DASH));
+    }
+    want.push((l - DASH - half, l));
+    want
+}
+
+fn same(got: &[(f64, f64)], want: &[(f64, f64)]) -> bool {
+    got.len() == want.len()
+        && got
+            .iter()
+            .zip(want)
+            .all(|(g, w)| (g.0 - w.0).abs() < 1e-6 && (g.1 - w.1).abs() < 1e-6)
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1694_every_side_of_a_closed_polyline_ends_on_a_dash() {
-    let r = straight("closed", lw(&rect(10.1, 10.1), true, false));
-    assert_eq!(r.len(), 4, "{r:?}");
-    for side in &r {
-        assert_eq!(side.2.len(), 2, "{side:?}");
-        assert!(ends_on_a_dash(side), "this side ends in a gap: {side:?}");
+fn issue_1699_the_plots_side_starts_on_a_dash_of_3_875_and_keeps_the_period() {
+    let r = straight("plot", lw(&rect(PLOT_SIDE, PLOT_SIDE), true, false));
+    let s = sides(&r);
+    assert_eq!(s.len(), 4, "{r:?}");
+    for side in s {
+        let d = drawn(side);
+        assert!((d[0].1 - d[0].0 - 3.875).abs() < 1e-9, "first dash: {d:?}");
+        assert!((d[0].0).abs() < 1e-9, "it starts at the corner: {d:?}");
+        // The second dash starts a gap after the first, then every period.
+        for (k, w) in d.windows(2).enumerate() {
+            assert!(
+                (w[1].0 - w[0].0 - if k == 0 { 3.875 + GAP } else { PERIOD }).abs() < 1e-9,
+                "dash {k} to the next: {d:?}"
+            );
+        }
+        let last = d[d.len() - 1];
+        assert!(
+            (last.1 - PLOT_SIDE).abs() < 1e-9,
+            "it ends at the corner: {d:?}"
+        );
+        assert!((last.1 - last.0 - 3.875).abs() < 1e-9, "last dash: {d:?}");
     }
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1694_the_pattern_is_stretched_by_length_over_whole_periods_plus_a_dash() {
-    // 10.1 holds 26 periods and a dash (10.0), so it stretches by 1.01. 7.3 holds 18 and a dash
-    // (7.0), so it stretches by 7.3 / 7.0.
-    let r = straight("factor", lw(&rect(10.1, 7.3), true, false));
-    assert_eq!(r.len(), 4, "{r:?}");
-    for side in &r {
-        let l = length(side);
-        let n = ((l - DASH) / PERIOD).floor();
-        let want = l / (n * PERIOD + DASH);
+fn issue_1699_every_side_draws_what_the_rule_says() {
+    // 20 x 10 mm: n = 4 and r = 2.8125 on the long sides, n = 2 and r = 2.1875 on the short ones.
+    let r = straight("rule", lw(&rect(20.0, 10.0), true, false));
+    let s = sides(&r);
+    assert_eq!(s.len(), 4, "{r:?}");
+    for side in s {
+        let l: f64 = side.iter().map(length).sum();
+        let (got, want) = (drawn(side), centred(l));
+        assert!(same(&got, &want), "side {l}: drew {got:?}, want {want:?}");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1699_the_pattern_is_never_stretched() {
+    let r = straight("period", lw(&rect(PLOT_SIDE, 30.0), true, false));
+    assert!(r.len() >= 4, "{r:?}");
+    for rec in r.iter().filter(|rec| !rec.2.is_empty()) {
+        assert_eq!(
+            rec.2,
+            vec![DASH, GAP],
+            "the period is the linetype's own: {rec:?}"
+        );
+    }
+    // And the end dashes, not the pattern, take the remainder: no dash is shorter than d.
+    for side in sides(&r) {
         assert!(
-            (stretch(side) - want).abs() < 1e-6,
-            "side {l} stretches by {} and not {want}: {side:?}",
-            stretch(side)
+            drawn(side).iter().all(|d| d.1 - d.0 > DASH - 1e-9),
+            "{side:?}"
         );
     }
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1694_the_pattern_keeps_its_shape_when_stretched() {
-    let r = straight("shape", lw(&rect(10.3, 10.3), true, false));
-    assert_eq!(r.len(), 4, "{r:?}");
-    for side in &r {
-        assert!(
-            (side.2[0] / side.2[1] - 2.0).abs() < 1e-6,
-            "the dash and the gap grow by the same factor: {side:?}"
-        );
-        assert!(stretch(side) > 1.0, "a side only ever stretches: {side:?}");
-    }
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn issue_1694_an_open_polyline_fits_every_side_too() {
-    let pts = [[0.0, 0.0], [10.1, 0.0], [10.1, 7.3]];
+fn issue_1699_an_open_polyline_centres_every_side_too() {
+    let pts = [[0.0, 0.0], [PLOT_SIDE, 0.0], [PLOT_SIDE, 30.0]];
     let r = straight("open", lw(&pts, false, false));
-    assert_eq!(r.len(), 2, "{r:?}");
-    assert!(r.iter().all(ends_on_a_dash), "{r:?}");
+    let s = sides(&r);
+    assert_eq!(s.len(), 2, "{r:?}");
+    for side in s {
+        let l: f64 = side.iter().map(length).sum();
+        assert!(same(&drawn(side), &centred(l)), "side {l}: {side:?}");
+    }
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1694_a_2d_polyline_is_fitted_the_same_way() {
+fn issue_1699_a_2d_polyline_is_centred_the_same_way() {
     let mut p = Polyline2D::new();
-    for q in rect(10.1, 10.1) {
+    for q in rect(PLOT_SIDE, PLOT_SIDE) {
         p.add_vertex(Vertex2D::new(Vector3::new(q[0], q[1], 0.0)));
     }
     p.close();
     p.common.linetype = "HIDDEN".into();
     let r = straight("2d", EntityType::Polyline2D(p));
-    assert_eq!(r.len(), 4, "{r:?}");
-    assert!(r.iter().all(ends_on_a_dash), "{r:?}");
-}
-
-#[test]
-#[cfg_attr(miri, ignore)]
-fn issue_1694_a_side_that_is_a_dash_and_whole_periods_is_left_alone() {
-    // 7.75 is a dash and 20 periods (0.25 + 20 * 0.375), exact in binary.
-    let r = straight("exact", lw(&rect(7.75, 7.75), true, false));
-    assert_eq!(r.len(), 4, "{r:?}");
-    for side in &r {
-        assert_eq!(side.2, vec![DASH, 0.125], "{side:?}");
+    let s = sides(&r);
+    assert_eq!(s.len(), 4, "{r:?}");
+    for side in s {
+        assert!(same(&drawn(side), &centred(PLOT_SIDE)), "{side:?}");
     }
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1694_a_polyline_with_plinegen_on_keeps_its_pattern_as_drawn() {
-    let r = straight("on", lw(&rect(10.1, 10.1), true, true));
-    // One continuous run, so no two-point sides and nothing fitted.
-    assert_eq!(r.len(), 1, "{r:?}");
-    assert_eq!(r[0].2, vec![DASH, 0.125], "{r:?}");
+fn issue_1699_a_side_that_is_whole_periods_less_a_gap_is_left_alone() {
+    let l = 20.0 * PERIOD - GAP;
+    let r = straight("exact", lw(&rect(l, l), true, false));
+    assert_eq!(r.len(), 4, "{r:?}");
+    for side in &r {
+        assert_eq!(side.2, vec![DASH, GAP], "{side:?}");
+    }
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1694_a_line_keeps_its_pattern_as_drawn() {
-    let mut l = Line::from_coords(0.0, 0.0, 0.0, 10.1, 0.0, 0.0);
+fn issue_1699_a_polyline_with_plinegen_on_keeps_its_pattern_as_drawn() {
+    let r = straight("on", lw(&rect(PLOT_SIDE, PLOT_SIDE), true, true));
+    // One continuous run, so no two-point sides and nothing centred.
+    assert_eq!(r.len(), 1, "{r:?}");
+    assert_eq!(r[0].2, vec![DASH, GAP], "{r:?}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1699_a_line_keeps_its_pattern_as_drawn() {
+    let mut l = Line::from_coords(0.0, 0.0, 0.0, PLOT_SIDE, 0.0, 0.0);
     l.common.linetype = "HIDDEN".into();
     let r = straight("line", EntityType::Line(l));
     assert_eq!(r.len(), 1, "{r:?}");
-    assert_eq!(r[0].2, vec![DASH, 0.125], "{r:?}");
+    assert_eq!(r[0].2, vec![DASH, GAP], "{r:?}");
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1694_a_side_shorter_than_a_dash_is_left_alone() {
-    let r = straight("short", lw(&rect(0.2, 0.2), true, false));
+fn issue_1699_a_side_shorter_than_one_pattern_is_left_alone() {
+    // 3 mm holds no whole period (n = 0), so it keeps the pattern from its start.
+    let r = straight("short", lw(&rect(3.0, 3.0), true, false));
     assert_eq!(r.len(), 4, "{r:?}");
     for side in &r {
-        assert_eq!(side.2, vec![DASH, 0.125], "{side:?}");
+        assert_eq!(side.2, vec![DASH, GAP], "{side:?}");
     }
 }
