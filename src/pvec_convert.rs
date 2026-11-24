@@ -267,6 +267,9 @@ pub struct PvecConversion<'a> {
     thumbnail_width: Option<u32>,
     xrefs: Vec<(String, CadSource<'a>)>,
     xref_note: Arc<Mutex<xref::XrefNote>>,
+    /// The directory a DWG IMAGE's file is read from (#1667); `None` places no image.
+    #[allow(dead_code)]
+    images: Option<PathBuf>,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -378,7 +381,16 @@ impl<'a> PvecConversion<'a> {
             thumbnail_width: None,
             xrefs: Vec::new(),
             xref_note: Arc::default(),
+            images: None,
         }
+    }
+
+    /// Place a DWG IMAGE as a raster (#1667), reading its file from `dir`. Not wired yet: the
+    /// red tests of #1667 fail against this.
+    #[must_use]
+    pub fn images(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.images = Some(dir.into());
+        self
     }
 
     /// Carry TEXT, MTEXT, ATTDEF, HATCH and SOLID in PVec's text and hatch streams (#1609). Shorthand
