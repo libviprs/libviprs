@@ -319,6 +319,9 @@ pub struct PlotSettings {
     pub print_lineweights: Option<bool>,
     /// Paper space draws after what the viewports show. `None` is the layout's own.
     pub paperspace_last: Option<bool>,
+    /// The device a PC3 describes. It fills what the layout's own page setup leaves empty (a zero
+    /// paper, no margins) and never replaces what the layout says (issue #1673). `None` is no PC3.
+    pub device: Option<crate::cad::plot_files::PlotDevice>,
 }
 
 /// A plot scale as the plot dialog's custom row gives it: `paper` paper units of `paper_unit` to
@@ -1008,12 +1011,26 @@ impl<'a> PvecConversion<'a> {
                             _ => 1.0,
                         }
                     };
-                    let [paper_w, paper_h] = plot_settings
-                        .paper_mm
-                        .unwrap_or([p.paper_width, p.paper_height]);
+                    // The PC3 fills what the layout leaves empty and never replaces what it says
+                    // (#1673): a paper of no size takes the device's.
+                    let device = plot_settings.device.as_ref();
+                    let layout_paper = if sized(p.paper_width) && sized(p.paper_height) {
+                        [p.paper_width, p.paper_height]
+                    } else {
+                        device
+                            .map(|d| d.paper_mm)
+                            .filter(|d| sized(d[0]) && sized(d[1]))
+                            .unwrap_or([p.paper_width, p.paper_height])
+                    };
+                    let [paper_w, paper_h] = plot_settings.paper_mm.unwrap_or(layout_paper);
                     if !(sized(paper_w) && sized(paper_h)) {
                         summary.frame_reason = Some("paper-size-zero".into());
                     } else {
+                        if plot_settings.paper_mm.is_none()
+                            && layout_paper != [p.paper_width, p.paper_height]
+                        {
+                            summary.notes.push("plot-device-paper".into());
+                        }
                         let sheet_unit = match p.paper_units {
                             0 => Some(SourceUnit::Inches),
                             1 => Some(SourceUnit::Millimeters),
@@ -1050,10 +1067,26 @@ impl<'a> PvecConversion<'a> {
                         let (w, h) = turned;
                         // An override replaces the paper, so the margins that belong to the
                         // layout's paper go with it.
+                        let layout_margins = device
+                            .filter(|d| {
+                                p.margins == [0.0; 4]
+                                    && (d.paper_mm[0] - layout_paper[0]).abs() < 0.5
+                                    && (d.paper_mm[1] - layout_paper[1]).abs() < 0.5
+                            })
+                            .map(|d| {
+                                let [llx, lly, urx, ury] = d.printable_mm;
+                                [llx, lly, d.paper_mm[0] - urx, d.paper_mm[1] - ury]
+                            })
+                            .filter(|m| m.iter().all(|v| v.is_finite() && *v >= 0.0))
+                            .filter(|m| *m != [0.0; 4]);
+                        if plot_settings.paper_mm.is_none() && layout_margins.is_some() {
+                            summary.notes.push("plot-device-margins".into());
+                        }
+                        let layout_margins = layout_margins.unwrap_or(p.margins);
                         let margins = if plot_settings.paper_mm.is_some() {
                             [0.0; 4]
                         } else {
-                            p.margins
+                            layout_margins
                         };
                         // The offset is the plot origin the dialog shows, so it replaces the
                         // layout's own.
@@ -1061,13 +1094,13 @@ impl<'a> PvecConversion<'a> {
                         // What the layout itself prints, for a fit under the Layout area: its
                         // paper (after its rotation) less its own margins.
                         let (lw, lh) = if matches!(p.rotation, 1 | 3) {
-                            (p.paper_height, p.paper_width)
+                            (layout_paper[1], layout_paper[0])
                         } else {
-                            (p.paper_width, p.paper_height)
+                            (layout_paper[0], layout_paper[1])
                         };
                         let own = [
-                            lw - p.margins[0] - p.margins[2],
-                            lh - p.margins[1] - p.margins[3],
+                            lw - layout_margins[0] - layout_margins[2],
+                            lh - layout_margins[1] - layout_margins[3],
                         ];
                         // UNMEASURED (the print profile ADR's open item): the paper's lower left
                         // is taken to sit at -(margin + plot origin) from the paper-space origin.
