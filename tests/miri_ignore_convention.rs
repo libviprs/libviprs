@@ -911,9 +911,13 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1638 adds 1 more: the colours_ignored cell with the paint stream off. It said 1269 before this line moved.
 /// #1630 adds 4: the `tests/pvec_1630_plot_style_tables.rs` cells that write a drawing and convert it into a temp dir (the other 8 of its 12 reach the filesystem through a helper the detector does not follow, and carry the annotation all the same). It said 1197 before this line moved.
 /// #1636 adds 12: the `tests/pvec_1636_pdf_plot.rs` cells that write a PDF into a temp dir and read it back. It said 1207 before this line moved.
+/// #1675 adds 5: the `tests/pvec_1675_model_layer_state.rs` cells that write a drawing and convert it into a temp dir. It said 1332 before this line moved.
 /// #1660 adds 8: the eight `tests/pvec_1563_viewports.rs` cells that convert a viewport drawing into a temp dir. It said 1311 before this line moved.
-/// #1671 adds 5: the five `tests/pvec_1671_leader_tolerance.rs` cells that write a drawing and convert it into a temp dir. It said 1332 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1337;
+/// #1665 adds 7: the `tests/pvec_1665_layout_paper_units.rs` cells that convert a plotted sheet into a temp dir and measure it. It said 1337 before this line moved.
+/// #1674 adds 15: the `tests/pvec_1674_codes_progress_deadline.rs` cells that convert a mock drawing, a set or a plot into a temp dir. It said 1344 before this line moved.
+/// #1673 adds 4: the `tests/plot_files_1673.rs` cells that convert a hand-built layout into a temp dir. It said 1359 before this line moved.
+/// #1671 adds 5: the five `tests/pvec_1671_leader_tolerance.rs` cells that write a drawing and convert it into a temp dir. It said 1363 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1368;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

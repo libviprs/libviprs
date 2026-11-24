@@ -691,6 +691,50 @@ pub fn cad_manifest<P: DwgProvider>(source: CadSource<'_>) -> Result<CadManifest
     })
 }
 
+/// A layer state the choices name that the drawing does not store.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("layer state {name:?} is not in the drawing (it has: {})", available.join(", "))]
+pub struct LayerStateNotFound {
+    /// The name asked for.
+    pub name: String,
+    /// The states the drawing stores, in file order, without the ones AutoCAD hides.
+    pub available: Vec<String>,
+}
+
+impl LayerStateNotFound {
+    /// The stable code for this error.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        "LAYER_STATE_NOT_FOUND"
+    }
+}
+
+/// Checks that the layer state `choices` names, if any, is one the drawing stores.
+///
+/// # Errors
+///
+/// [`LayerStateNotFound`] with the names there are.
+pub fn check_layer_state(
+    manifest: &CadManifest,
+    choices: &CadChoices,
+) -> Result<(), LayerStateNotFound> {
+    let Some(name) = choices.layer_state.as_deref() else {
+        return Ok(());
+    };
+    if manifest.layer_states.iter().any(|s| same(&s.name, name)) {
+        return Ok(());
+    }
+    Err(LayerStateNotFound {
+        name: name.to_owned(),
+        available: manifest
+            .layer_states
+            .iter()
+            .filter(|s| !s.hidden)
+            .map(|s| s.name.clone())
+            .collect(),
+    })
+}
+
 /// One resolved answer per manifest layer: file flags, then the chosen state under its mask, then
 /// the overrides (spec section 1.2). The only place that applies the visibility truth table.
 #[must_use]
@@ -879,9 +923,12 @@ pub fn apply_choices(
             }
         }
     }
+    // Per-viewport overrides belong to a sheet. A model space plot has no viewports to edit, so
+    // it carries none (#1675).
     profile.layers.viewport_overrides = choices
         .viewports
         .iter()
+        .filter(|_| choices.mode == CadMode::Layouts)
         .flat_map(|(key, layers)| {
             layers
                 .iter()

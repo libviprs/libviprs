@@ -48,6 +48,22 @@ pub enum Pc3Error {
     NotFinite(&'static str),
 }
 
+impl Pc3Error {
+    /// A stable, upper snake code for this refusal (#1674).
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            Pc3Error::TooLarge(_) => "PC3_TOO_LARGE",
+            Pc3Error::TooDeep => "PC3_TOO_DEEP",
+            Pc3Error::Unrecognised => "PC3_UNRECOGNISED",
+            Pc3Error::Syntax(..) => "PC3_SYNTAX",
+            Pc3Error::BinaryNotEditable(_) => "PC3_BINARY_NOT_EDITABLE",
+            Pc3Error::Missing(_) => "PC3_MISSING",
+            Pc3Error::NotFinite(_) => "PC3_NOT_FINITE",
+        }
+    }
+}
+
 impl fmt::Display for Pc3Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -212,6 +228,28 @@ impl Pc3 {
             Value::Null => Some("null"),
             Value::Array(_) | Value::Object(_) => None,
         }
+    }
+
+    /// The value of the custom setting called `name` (`Raster_Limit`, `Font_Capture`), as the
+    /// file spells it. The settings sit under numbered keys that are not the same from file to file.
+    pub fn custom(&self, name: &str) -> Option<&str> {
+        let Value::Object(members) = at(&self.root, &["data", "custom"])? else {
+            return None;
+        };
+        members.iter().find_map(|(_, entry)| {
+            let Some(Value::Str(found)) = at(entry, &["name"]) else {
+                return None;
+            };
+            if unescape(found) != name {
+                return None;
+            }
+            match at(entry, &["value"])? {
+                Value::Number(text) | Value::Str(text) => Some(text.as_str()),
+                Value::Bool(true) => Some("true"),
+                Value::Bool(false) => Some("false"),
+                _ => None,
+            }
+        })
     }
 
     /// The paper half.
