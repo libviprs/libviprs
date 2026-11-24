@@ -12,7 +12,7 @@ use pvec_geometry::{
     Circle, Composite, Curve, Curve2d, Ellipse, GeometryError, Line, Placement2, Point2, Polyline,
     Transform2, Trimmed, Vector2,
 };
-use pvec_numeric::{MAX_POLYLINE_VERTICES, NumericError};
+use pvec_numeric::{MAX_POLYLINE_VERTICES, NumericError, detmath};
 
 use super::fidelity::{Basis, Classification, ReasonCode};
 use super::provider::{Point3, RawEntity, RawGeometry, RawVertex, same_z, z_axis_flip};
@@ -258,7 +258,7 @@ pub fn extract_line(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     if !same_z(
         elevation,
         z_of("end", end[2])?,
-        (end[0] - start[0]).hypot(end[1] - start[1]),
+        detmath::hypot(end[0] - start[0], end[1] - start[1]),
     ) {
         return Err(BasicError::NonPlanar);
     }
@@ -516,7 +516,7 @@ pub fn extract_ellipse(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     if !same_z(
         0.0,
         z_of("major_axis", major_axis[2])?,
-        major_axis[0].hypot(major_axis[1]),
+        detmath::hypot(major_axis[0], major_axis[1]),
     ) {
         return Err(BasicError::NonPlanar);
     }
