@@ -18,13 +18,6 @@ use crate::sink::SinkError;
 use crate::sink_pmtiles::PmTilesSink;
 use crate::{CancelToken, EngineBuilder, EngineError, PdfError};
 
-/// The tile edge, in pixels.
-const TILE: u32 = 256;
-/// The dpi range a plot may be rendered at.
-const DPI_RANGE: std::ops::RangeInclusive<u32> = 36..=600;
-/// PMTiles stores the zoom in five bits.
-const ZOOM_LEVELS_MAX: u32 = 32;
-
 /// Bounds on what one sheet may ask of the raster path.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RasterLimits {
@@ -183,7 +176,7 @@ impl PmTilesPlotError {
 /// [`PmTilesSink`]. The archives are `<stem>.<NN>-<slug>.pmtiles`, numbered in tab order, with
 /// the slug the layout name with every byte outside `[a-z0-9]` folded to `-`. Every bound in
 /// [`RasterLimits`] is checked on all the pages before the first is rendered, so a refusal writes
-/// nothing, and a plot that fails part way removes the archives it had written.
+/// nothing, and the archives are written under a scratch directory and moved into place only when every sheet is done, so a plot that fails leaves an archive of the same name that was already there alone.
 pub struct PmTilesPlot<'a> {
     source: CadSource<'a>,
     dest_dir: &'a Path,
@@ -201,7 +194,7 @@ pub struct PmTilesPlot<'a> {
 }
 
 impl<'a> PmTilesPlot<'a> {
-    /// A plot of `source` into archives under `dest_dir`, at 150 dpi.
+    /// A plot of `source` into archives under `dest_dir`, at 300 dpi.
     pub fn new(source: CadSource<'a>, dest_dir: &'a Path) -> Self {
         Self {
             source,
@@ -212,7 +205,7 @@ impl<'a> PmTilesPlot<'a> {
             settings: PlotSettings::default(),
             table: None,
             layouts: None,
-            dpi: 150,
+            dpi: 300,
             limits: RasterLimits::default(),
             cancel: CancelToken::new(),
             observer: None,
@@ -262,7 +255,7 @@ impl<'a> PmTilesPlot<'a> {
         self
     }
 
-    /// The resolution the page is rendered at, 36 to 600 (150 by default).
+    /// The resolution the page is rendered at, 36 to 600 (300 by default).
     #[must_use]
     pub fn dpi(mut self, dpi: u32) -> Self {
         self.dpi = dpi;
@@ -305,7 +298,17 @@ impl<'a> PmTilesPlot<'a> {
     /// [`PageTooLarge`](PmTilesPlotError::PageTooLarge) and its siblings, an unknown layout or a
     /// failed plot is [`Plot`](PmTilesPlotError::Plot).
     pub fn convert_with<P: DwgProvider>(self) -> Result<PmTilesPlotOutput, PmTilesPlotError> {
-        if !DPI_RANGE.contains(&self.dpi) {
+        // A stem is a plain file name: it is joined onto the destination and onto nothing else.
+        let stem = &self.stem;
+        if stem.is_empty()
+            || stem.contains(['/', '\\', '\0'])
+            || stem == "."
+            || stem == ".."
+            || Path::new(stem).is_absolute()
+        {
+            return Err(PmTilesPlotError::BadStem(stem.clone()));
+        }
+        if !(36..=600).contains(&self.dpi) {
             return Err(PmTilesPlotError::DpiOutOfRange(self.dpi));
         }
         let cancel = match self.deadline.and_then(|d| Instant::now().checked_add(d)) {
@@ -317,18 +320,61 @@ impl<'a> PmTilesPlot<'a> {
         }
         let wanted = self.wanted_layouts::<P>()?;
 
-        fs::create_dir_all(self.dest_dir).map_err(PmTilesPlotError::Io)?;
-        let work = self.dest_dir.join(format!("{}.plot-work", self.stem));
-        fs::create_dir_all(&work).map_err(PmTilesPlotError::Io)?;
-        let mut written: Vec<PathBuf> = Vec::new();
-        let result = self.write_sheets::<P>(&wanted, &work, &cancel, &mut written);
-        // The scratch directory is this call's own, so it goes whether or not it worked.
-        let _ = fs::remove_dir_all(&work);
-        if result.is_err() {
-            for file in &written {
-                let _ = fs::remove_file(file);
+        // An archive that is already there is only replaced by a finished plot, so a name that
+        // cannot be replaced is found before anything is written.
+        let targets: Vec<PathBuf> = wanted
+            .iter()
+            .enumerate()
+            .map(|(n, name)| {
+                let slug: String = name
+                    .bytes()
+                    .map(|b| {
+                        if b.is_ascii_alphanumeric() {
+                            char::from(b.to_ascii_lowercase())
+                        } else {
+                            '-'
+                        }
+                    })
+                    .collect();
+                self.dest_dir
+                    .join(format!("{stem}.{:02}-{slug}.pmtiles", n + 1))
+            })
+            .collect();
+        for target in &targets {
+            if fs::symlink_metadata(target).is_ok_and(|m| !m.is_file()) {
+                return Err(PmTilesPlotError::Io(std::io::Error::other(format!(
+                    "{} exists and is not a file",
+                    target.display()
+                ))));
             }
         }
+
+        fs::create_dir_all(self.dest_dir).map_err(PmTilesPlotError::Io)?;
+        // The scratch directory is made here, new, and is the only thing this call ever removes.
+        let mut attempt = 0u32;
+        let work = loop {
+            let dir = self
+                .dest_dir
+                .join(format!(".{stem}.work-{}-{attempt}", std::process::id()));
+            match fs::create_dir(&dir) {
+                Ok(()) => break dir,
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 1000 => {
+                    attempt += 1;
+                }
+                Err(e) => return Err(PmTilesPlotError::Io(e)),
+            }
+        };
+        let result = self
+            .write_sheets::<P>(&wanted, &work, &cancel)
+            .and_then(|mut out| {
+                // The archives were written under the scratch directory, and move into place now.
+                for (sheet, target) in out.sheets.iter_mut().zip(&targets) {
+                    fs::rename(&sheet.file, target).map_err(PmTilesPlotError::Io)?;
+                    sheet.file.clone_from(target);
+                }
+                Ok(out)
+            });
+        let _ = fs::remove_dir_all(&work);
         result
     }
 
@@ -337,7 +383,6 @@ impl<'a> PmTilesPlot<'a> {
         wanted: &[String],
         work: &Path,
         cancel: &CancelToken,
-        written: &mut Vec<PathBuf>,
     ) -> Result<PmTilesPlotOutput, PmTilesPlotError> {
         let pdf = work.join("plot.pdf");
         let mut plot = PdfPlot::new(self.source, &pdf)
@@ -380,20 +425,7 @@ impl<'a> PmTilesPlot<'a> {
             let raster = crate::render_page_pdfium(&pdf, n + 1, self.dpi)
                 .map_err(PmTilesPlotError::Render)?;
             let plan = self.plan_pixels(name, raster.width(), raster.height())?;
-            let slug: String = name
-                .bytes()
-                .map(|b| {
-                    if b.is_ascii_alphanumeric() {
-                        char::from(b.to_ascii_lowercase())
-                    } else {
-                        '-'
-                    }
-                })
-                .collect();
-            let file = self
-                .dest_dir
-                .join(format!("{}.{:02}-{slug}.pmtiles", self.stem, n + 1));
-            written.push(file.clone());
+            let file = work.join(format!("{n:02}.pmtiles"));
             let sink = PmTilesSink::builder(&file)
                 .plan(plan.clone())
                 .build()
@@ -447,11 +479,11 @@ impl<'a> PmTilesPlot<'a> {
                 max: self.limits.max_pixels,
             });
         }
-        let plan = PyramidPlanner::new(w, h, TILE, 0, Layout::Xyz)
+        let plan = PyramidPlanner::new(w, h, 256, 0, Layout::Xyz)
             .map_err(PmTilesPlotError::Pyramid)?
             .plan();
         let levels = plan.levels.len() as u32;
-        let max = self.limits.max_zoom_levels.min(ZOOM_LEVELS_MAX);
+        let max = self.limits.max_zoom_levels.min(32);
         if levels > max {
             return Err(PmTilesPlotError::TooManyZoomLevels {
                 layout: layout.to_owned(),
