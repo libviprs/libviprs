@@ -1783,6 +1783,9 @@ impl<'a> PvecConversion<'a> {
             }
         }
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
+        // A pattern's lengths are drawing units like the coordinates, so the sheet's own strokes
+        // get the plot scale on them too (#1683); a leaf drawn through a window keeps its own.
+        let dash_k = sheet.as_ref().map_or(1.0, |s| s.per_unit);
         // The plot style table a CTB gives, applied per ACI (#1630); an STB applies nothing.
         let table = plot_style.as_ref().filter(|t| !t.is_stb);
         // What the sheet clip did: outside, crossing, cut and the pieces the cut ones became.
@@ -2480,6 +2483,9 @@ impl<'a> PvecConversion<'a> {
                             (c, bad, false)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
+                            if window.is_none() {
+                                input.linetype_scale *= dash_k;
+                            }
                             // The table's lineweight and linetype for the stroke's ACI beat the
                             // object's; an entry that says "object" leaves them (#1630).
                             if let (Some(t), Some(aci)) = (table, effective_aci) {
