@@ -1649,13 +1649,6 @@ annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_an_open_polylin
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_every_side_keeps_the_entitys_linetype_and_a_line_is_untouched
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_the_entitys_flag_wins_over_the_headers
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_the_same_polyline_with_plinegen_on_keeps_its_one_continuous_pattern
-<<<<<<< HEAD
-annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_style_one_is_the_first_entry_of_the_list
-annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_style_two_is_the_second_entry
-annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_the_last_entry_is_reachable_by_its_number
-annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_a_first_entry_of_zero_is_the_thinnest_line
-annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_zero_and_a_number_past_the_list_keep_the_objects_lineweight
-=======
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_a_2d_polyline_is_fitted_the_same_way
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_a_line_keeps_its_pattern_as_drawn
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_a_polyline_with_plinegen_on_keeps_its_pattern_as_drawn
@@ -1665,4 +1658,8 @@ annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_an_open_poly
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_every_side_of_a_closed_polyline_ends_on_a_dash
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_the_pattern_is_stretched_by_length_over_whole_periods_plus_a_dash
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_the_pattern_keeps_its_shape_when_stretched
->>>>>>> origin/main
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_style_one_is_the_first_entry_of_the_list
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_style_two_is_the_second_entry
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_the_last_entry_is_reachable_by_its_number
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_a_first_entry_of_zero_is_the_thinnest_line
+annotated   fs-detected  tests/pvec_1692_ctb_lineweight.rs::issue_1692_zero_and_a_number_past_the_list_keep_the_objects_lineweight
