@@ -714,6 +714,23 @@ fn issue_1674_a_slow_conversion_stops_at_its_deadline() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// A deadline too far off to add to the clock is no deadline, not a panic.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1674_a_deadline_too_large_to_count_is_no_deadline() {
+    let dir = scratch("deadline-max");
+    let dest = dir.join("a.pvec");
+    drawing(vec![sheet("A", 2)]);
+    let out = PvecConversion::new(bytes(), &dest)
+        .view_profile(ViewProfile::print_profile("A"))
+        .unit(SourceUnit::Millimeters)
+        .deadline(Duration::MAX)
+        .convert_with::<Mock>()
+        .unwrap();
+    assert_eq!(out.written, 2);
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// A deadline a conversion meets changes nothing.
 #[test]
 #[cfg_attr(miri, ignore)]
