@@ -822,6 +822,8 @@ annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_placed_image_
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_without_an_image_directory_no_image_is_drawn
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_fill_behind_a_viewport_is_drawn_where_the_viewport_puts_it
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1692_a_ctb_lineweight_is_one_more_than_the_index_of_the_list
+annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_transparent_fill_is_thinned_toward_the_paper
+annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_fill_crossing_the_viewport_edge_is_cut_to_it
 annotated   fs-detected  tests/pvec_1670_owner_layouts.rs::issue_1670_owner_layouts_match_the_plotted_pdf
 annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_a_layout_at_1_to_1_keeps_its_patterns_as_drawn
 annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_dash_and_dash_dot_periods_are_paper_millimetres_at_1_to_0_04

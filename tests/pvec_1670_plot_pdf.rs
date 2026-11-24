@@ -18,7 +18,7 @@ use acadrust::entities::{Circle, Line, RasterImage, Solid, Text, Viewport};
 use acadrust::objects::{ImageDefinition, ObjectType};
 use acadrust::plot_style::PlotStyleTable;
 use acadrust::tables::{LineType, LineTypeElement};
-use acadrust::types::{Color, LineWeight, Vector3};
+use acadrust::types::{Color, LineWeight, Transparency, Vector3};
 use acadrust::{CadDocument, DwgWriter, EntityType};
 use libviprs::cad::CadSource;
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
@@ -557,5 +557,97 @@ fn issue_1692_a_ctb_lineweight_is_one_more_than_the_index_of_the_list() {
         s.iter()
             .any(|(c, w, _)| *c == [0, 0, 255] && (w - 0.5 * PT_PER_MM).abs() < 0.01),
         "ACI 5 is not at 0.5 mm in {s:?}"
+    );
+}
+
+// ---- a fill's transparency --------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_transparent_fill_is_thinned_toward_the_paper() {
+    // A red SOLID that is 60 percent transparent is drawn at 40 percent red on white: (255, 153, 153).
+    let dir = scratch("alpha");
+    let mut doc = CadDocument::new();
+    doc.add_layout("A3").unwrap();
+    set_plot(&mut doc, &Sheet("A3", 420.0, 297.0, 0));
+    let mut solid = Solid::new(
+        Vector3::new(300.0, 50.0, 0.0),
+        Vector3::new(330.0, 50.0, 0.0),
+        Vector3::new(300.0, 80.0, 0.0),
+        Vector3::new(330.0, 80.0, 0.0),
+    );
+    solid.common.color = Color::Index(1);
+    solid.common.transparency = Transparency::Explicit(153);
+    doc.add_entity_to_layout(EntityType::Solid(solid), "A3")
+        .unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dest = dir.join("out.pdf");
+    PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"])
+        .fills(true)
+        .convert_with::<AcadrustProvider>()
+        .unwrap();
+    let o = ops(&dest, 1);
+    let at = o.iter().position(|o| o.operator == "f*").expect("a fill");
+    let rg = o[..at].iter().rev().find(|o| o.operator == "rg").unwrap();
+    let c: Vec<u8> = rg
+        .operands
+        .iter()
+        .map(|v| (real(v) * 255.0).round() as u8)
+        .collect();
+    assert_eq!(c, [255, 153, 153], "{rg:?}");
+}
+
+// ---- a fill that crosses the viewport's edge --------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_fill_crossing_the_viewport_edge_is_cut_to_it() {
+    // The viewport spans paper x 110 to 310 mm. A SOLID at model x 80 to 130 is at 290 to 340 on the
+    // sheet, so its fill is cut at 310.
+    let dir = scratch("vpcut");
+    let mut doc = CadDocument::new();
+    doc.add_layout("A3").unwrap();
+    set_plot(&mut doc, &Sheet("A3", 420.0, 297.0, 0));
+    let mut window = Viewport::with_size(Vector3::new(210.0, 148.0, 0.0), 200.0, 150.0);
+    window.id = 2;
+    window.view_height = 150.0;
+    window.view_center = Vector3::new(0.0, 0.0, 0.0);
+    doc.add_entity_to_layout(EntityType::Viewport(Box::new(window)), "A3")
+        .unwrap();
+    let solid = Solid::new(
+        Vector3::new(80.0, 10.0, 0.0),
+        Vector3::new(130.0, 10.0, 0.0),
+        Vector3::new(80.0, 40.0, 0.0),
+        Vector3::new(130.0, 40.0, 0.0),
+    );
+    doc.add_entity(EntityType::Solid(solid)).unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dest = dir.join("out.pdf");
+    PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"])
+        .fills(true)
+        .convert_with::<AcadrustProvider>()
+        .unwrap();
+    let o = ops(&dest, 1);
+    let at = o
+        .iter()
+        .position(|o| o.operator == "f*")
+        .expect("the part inside is filled");
+    let xs: Vec<f64> = o[..at]
+        .iter()
+        .filter(|o| o.operator == "m" || o.operator == "l")
+        .map(|o| real(&o.operands[0]) / PT_PER_MM)
+        .collect();
+    let (lo, hi) = xs
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(l, h), x| (l.min(*x), h.max(*x)));
+    assert!(
+        (lo - 290.0).abs() < 0.5 && (hi - 310.0).abs() < 0.5,
+        "{xs:?}"
     );
 }
