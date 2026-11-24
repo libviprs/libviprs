@@ -557,6 +557,7 @@ fn issue_1674_a_pdf_plot_reports_each_page() {
     let observer = Arc::new(CollectingObserver::new());
     let out = PdfPlot::new(bytes(), &dir.join("p.pdf"))
         .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A"))
         .layouts(["A", "B"])
         .observer(observer.clone())
         .convert_with::<Mock>()
@@ -652,6 +653,7 @@ fn issue_1674_a_pdf_plot_stops_on_cancel() {
     let dest = dir.join("p.pdf");
     let e = PdfPlot::new(bytes(), &dest)
         .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A"))
         .layouts(["A", "B"])
         .cancel(token)
         .observer(observer.clone())
@@ -797,6 +799,7 @@ fn issue_1674_a_pdf_plot_stops_at_its_deadline() {
     let start = Instant::now();
     let e = PdfPlot::new(bytes(), &dest)
         .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A"))
         .layouts(["A", "B", "C"])
         .deadline(Duration::from_millis(350))
         .convert_with::<Mock>()
