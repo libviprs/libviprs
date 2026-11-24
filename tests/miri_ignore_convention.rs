@@ -915,8 +915,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1660 adds 8: the eight `tests/pvec_1563_viewports.rs` cells that convert a viewport drawing into a temp dir. It said 1311 before this line moved.
 /// #1665 adds 7: the `tests/pvec_1665_layout_paper_units.rs` cells that convert a plotted sheet into a temp dir and measure it. It said 1337 before this line moved.
 /// #1674 adds 15: the `tests/pvec_1674_codes_progress_deadline.rs` cells that convert a mock drawing, a set or a plot into a temp dir. It said 1344 before this line moved.
-/// #1670 adds 13: the `tests/pvec_1670_plot_pdf.rs` cells that plot a drawing written in memory into a temp dir and read the PDF back, and the owner-only `tests/pvec_1670_owner_layouts.rs`. It said 1359 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1372;
+/// #1673 adds 4: the `tests/plot_files_1673.rs` cells that convert a hand-built layout into a temp dir. It said 1359 before this line moved.
+/// #1670 adds 13: the `tests/pvec_1670_plot_pdf.rs` cells that plot a drawing written in memory into a temp dir and read the PDF back, and the owner-only `tests/pvec_1670_owner_layouts.rs`. It said 1363 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1376;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

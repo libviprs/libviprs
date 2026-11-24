@@ -19,7 +19,7 @@ writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the tr
 
 ## Plot settings
 
-`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`.
+`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`. `PlotSettings::device` (#1673) carries the `PlotDevice` of a PC3 (`PlotDevice::from_pc3`, files loaded with `cad::plot_files::{load_pc3, load_plot_style}`): it fills a paper of no size and missing margins under the layout, never over it, and the notes `plot-device-paper` and `plot-device-margins` say when it did.
 
 | field | effect |
 |---|---|
