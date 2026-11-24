@@ -3176,16 +3176,28 @@ fn viewport_class(v: &ViewportEntity) -> ViewportClass {
         ViewportClass::Dropped("off")
     } else if v.hide_plot {
         ViewportClass::Dropped("hide-plot")
-    } else if !(v.view_direction[0] == 0.0
-        && v.view_direction[1] == 0.0
-        && v.view_direction[2] > 0.0)
-    {
+    } else if !{
+        // Plan view up to float noise (#1660): a DWG stores the camera minus the target, so a plan
+        // view comes back as (5.8e-11, 0, 251705.56) or the like, about one ulp off. x and y over z
+        // is the lean to first order and needs no square root, and an exact (0, 0, z) passes as before.
+        // NaN fails every compare, and so does an infinite lean (inf over inf is NaN), so both stay
+        // refused, while an infinite z alone still reads as plan.
+        const LEAN: f64 = 1e-9;
+        let [x, y, z] = v.view_direction;
+        z > 0.0 && x.abs() / z <= LEAN && y.abs() / z <= LEAN
+    } {
         ViewportClass::Refused("non-plan")
     } else if v.perspective {
         ViewportClass::Refused("perspective")
     } else if !(finite && v.view_height > 0.0 && v.height > 0.0 && v.width > 0.0) {
         ViewportClass::Refused("view-height")
-    } else if v.twist != 0.0 {
+    } else if !{
+        // Under 1e-9 rad from a whole turn is float noise (#1660). AutoCAD keeps the twist in
+        // [0, 2 pi), so noise below zero is stored just under a full turn. NaN is refused.
+        const NOISE: f64 = 1e-9;
+        let t = v.twist.rem_euclid(std::f64::consts::TAU);
+        t.min(std::f64::consts::TAU - t) <= NOISE
+    } {
         // The twist sign is not measured against AutoCAD yet (the ADR's open item).
         ViewportClass::Refused("twist")
     } else {

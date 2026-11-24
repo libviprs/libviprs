@@ -590,7 +590,8 @@ pub struct ViewportEntity {
     pub view_height: f64,
     /// The view target point, model coordinates.
     pub view_target: Point3,
-    /// The view direction from the target, model coordinates; plan view is `[0, 0, 1]`.
+    /// The view direction from the target, model coordinates, as stored: plan view is `[0, 0, 1]`
+    /// up to float noise, which the reader does not remove (#1660).
     pub view_direction: Point3,
     /// The twist angle in radians, as stored (its sign against AutoCAD is not measured yet).
     pub twist: f64,

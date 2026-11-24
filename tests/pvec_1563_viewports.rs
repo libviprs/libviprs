@@ -972,3 +972,266 @@ fn issue_1610_a_viewport_with_a_target_off_the_origin_draws_what_it_shows() {
     );
     let _ = fs::remove_dir_all(dir);
 }
+
+// A real drawing's plan viewport is not stored as exactly (0, 0, 1) and zero: a sheet of the Langara
+// master floor plan has view direction (5.8e-11, 0, 251705.56) and twist 1.57e-16 on its model-space
+// viewport. That is plan view and no twist, so it has to draw what it shows (#1660).
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_a_plan_viewport_with_float_noise_in_its_direction_and_twist_is_drawn() {
+    let mut noisy = vp(0x60, 20, [210.0, 250.0], [40.0, 30.0], [5.0, 5.0], 3.0);
+    noisy.view_direction = [5.820766091346741e-11, 0.0, 251705.55886499453];
+    noisy.twist = 1.5700924586837754e-16;
+    let mut mock = drawing(false);
+    mock.paper.push(viewport_entity(0x60, &noisy.layer));
+    mock.viewports.push(noisy);
+    mock.model.push(line(0x61, "0", [4.0, 4.0], [6.0, 4.0]));
+    let (out, dir) = convert("1660-noise", mock, |c| c);
+    let report = out.expect("the sheet converts").report;
+    let row = sheet_row(&report, 0x60);
+    assert_eq!(
+        (row.status.as_str(), row.reason.as_deref()),
+        ("drawn", None)
+    );
+    // paper = centre + s * (model - view centre): s = 30 / 3 = 10, so (4, 4)..(6, 4) is (200, 240)..(220, 240).
+    assert_eq!(
+        ends(&curve_of(&report, &dir, 0x61, 0x60)),
+        [[200.0, 240.0], [220.0, 240.0]]
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+// The tolerance of #1660 must not turn a tilted or twisted view into a plan view.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_a_visibly_tilted_or_twisted_viewport_is_still_refused() {
+    let mut tilted = vp(0x62, 21, [210.0, 250.0], [40.0, 30.0], [5.0, 5.0], 3.0);
+    tilted.view_direction = [0.02, 0.0, 1.0];
+    let mut twisted = vp(0x63, 22, [210.0, 250.0], [40.0, 30.0], [5.0, 5.0], 3.0);
+    twisted.twist = 0.01;
+    let mut mock = drawing(false);
+    for v in [&tilted, &twisted] {
+        mock.paper.push(viewport_entity(v.handle.get(), &v.layer));
+    }
+    mock.viewports.extend([tilted, twisted]);
+    let (out, dir) = convert("1660-real", mock, |c| c);
+    let report = out.expect("the sheet converts").report;
+    let status = |h: u64| sheet_row(&report, h).reason.clone();
+    assert_eq!(status(0x62).as_deref(), Some("non-plan"));
+    assert_eq!(status(0x63).as_deref(), Some("twist"));
+    let _ = fs::remove_dir_all(dir);
+    // A lean or a twist of 1e-6 rad is a hair, but four orders of magnitude over float noise.
+    let (cases, dir) = sheet_of_views(
+        "1660-edge",
+        &[
+            ([1e-6, 0.0, 1.0], 0.0),
+            ([0.0, 1e-6, 1.0], 0.0),
+            ([0.0, 0.0, 1.0], 1e-6),
+            ([0.0, 0.0, 1.0], -1e-6),
+        ],
+    );
+    assert_eq!(
+        cases,
+        [
+            ("refused", Some("non-plan")),
+            ("refused", Some("non-plan")),
+            ("refused", Some("twist")),
+            ("refused", Some("twist")),
+        ]
+        .map(|(s, r)| (s.to_owned(), r.map(str::to_owned)))
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+/// One sheet with a plain window per `(view direction, twist)`, in order, and how each came out as
+/// `(status, reason)` (#1660).
+fn sheet_of_views(
+    tag: &str,
+    views: &[([f64; 3], f64)],
+) -> (Vec<(String, Option<String>)>, PathBuf) {
+    let mut mock = drawing(false);
+    for (i, &(direction, twist)) in views.iter().enumerate() {
+        let mut v = vp(
+            0x70 + i as u64,
+            30 + i as i16,
+            [210.0, 250.0],
+            [40.0, 30.0],
+            [5.0, 5.0],
+            3.0,
+        );
+        v.view_direction = direction;
+        v.twist = twist;
+        mock.paper.push(viewport_entity(v.handle.get(), &v.layer));
+        mock.viewports.push(v);
+    }
+    let (out, dir) = convert(tag, mock, |c| c);
+    let report = out.expect("the sheet converts").report;
+    let rows = (0..views.len() as u64)
+        .map(|i| {
+            let r = sheet_row(&report, 0x70 + i);
+            (r.status.clone(), r.reason.clone())
+        })
+        .collect();
+    (rows, dir)
+}
+
+fn drawn() -> (String, Option<String>) {
+    ("drawn".to_owned(), None)
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_noise_in_the_direction_alone_is_drawn() {
+    let (rows, dir) = sheet_of_views(
+        "1660-dir",
+        &[
+            ([5.820766091346741e-11, 0.0, 251705.55886499453], 0.0),
+            ([8.731149137020111e-11, 0.0, 368467.94856633426], 0.0),
+            ([0.0, -5.820766091346741e-11, 251705.55886499453], 0.0),
+            ([5.820766091346741e-11, 0.0, 1.0e300], 0.0),
+        ],
+    );
+    assert_eq!(rows, [drawn(), drawn(), drawn(), drawn()]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_noise_in_the_twist_alone_is_drawn() {
+    let (rows, dir) = sheet_of_views(
+        "1660-twist",
+        &[
+            ([0.0, 0.0, 1.0], 1.5700924586837754e-16),
+            ([0.0, 0.0, 1.0], -1.5700924586837754e-16),
+        ],
+    );
+    assert_eq!(rows, [drawn(), drawn()]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+// AutoCAD keeps a twist in [0, 2 pi), so noise just under zero is stored just under a full turn.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_a_twist_a_hair_under_a_full_turn_is_drawn() {
+    let tau = std::f64::consts::TAU;
+    let (rows, dir) = sheet_of_views(
+        "1660-wrap",
+        &[
+            ([0.0, 0.0, 1.0], tau - 1e-15),
+            ([0.0, 0.0, 1.0], tau),
+            ([0.0, 0.0, 1.0], -tau),
+            ([0.0, 0.0, 1.0], tau - 1e-6),
+            ([0.0, 0.0, 1.0], 0.5),
+        ],
+    );
+    let refused = |r: &str| ("refused".to_owned(), Some(r.to_owned()));
+    assert_eq!(
+        rows,
+        [
+            drawn(),
+            drawn(),
+            drawn(),
+            refused("twist"),
+            refused("twist")
+        ]
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_a_noisy_view_from_below_stays_refused() {
+    let (rows, dir) = sheet_of_views(
+        "1660-below",
+        &[([1e-17, 0.0, -1.0], 0.0), ([0.0, 0.0, 0.0], 0.0)],
+    );
+    let non_plan = ("refused".to_owned(), Some("non-plan".to_owned()));
+    assert_eq!(rows, [non_plan.clone(), non_plan]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_a_nan_in_the_view_stays_refused() {
+    let (rows, dir) = sheet_of_views(
+        "1660-nan",
+        &[
+            ([f64::NAN, 0.0, 1.0], 0.0),
+            ([0.0, f64::NAN, 1.0], 0.0),
+            ([0.0, 0.0, f64::NAN], 0.0),
+            ([0.0, 0.0, 1.0], f64::NAN),
+            // An infinite x or y next to an infinite z has no lean at all, so it is not a plan
+            // view either, while an infinite z alone still is.
+            ([f64::INFINITY, 0.0, f64::INFINITY], 0.0),
+            ([0.0, f64::INFINITY, f64::INFINITY], 0.0),
+            ([0.0, 0.0, f64::INFINITY], 0.0),
+        ],
+    );
+    let refused = |r: &str| ("refused".to_owned(), Some(r.to_owned()));
+    assert_eq!(
+        rows,
+        [
+            refused("non-plan"),
+            refused("non-plan"),
+            refused("non-plan"),
+            refused("twist"),
+            refused("non-plan"),
+            refused("non-plan"),
+            drawn(),
+        ]
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+// The Langara sheet "2.0 - L0": its model window's whole record as the file stores it. With the
+// noise it has to land every line exactly where the same window with an exact plan view puts it.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1660_the_langara_record_lands_where_an_exact_plan_puts_it() {
+    let target = [118009.37290759973, 17163.150519376555, 12.002926874541707];
+    let view_centre = [-109595.75433365653, 14402.593085276341];
+    let (mx, my) = (target[0] + view_centre[0], target[1] + view_centre[1]);
+    let run = |tag: &str, direction: [f64; 3], twist: f64| {
+        let mut v = vp(
+            0x80,
+            40,
+            [7.602900029947397, 5.594487666949576],
+            [14.060572444668264, 10.119890650615],
+            view_centre,
+            9398.329821360414,
+        );
+        v.view_target = target;
+        v.view_direction = direction;
+        v.twist = twist;
+        let mut mock = drawing(false);
+        mock.viewports = vec![v.clone()];
+        mock.paper = vec![viewport_entity(0x80, &v.layer)];
+        mock.model = vec![line(
+            0x81,
+            "0",
+            [mx - 1000.0, my - 300.0],
+            [mx + 2000.0, my + 500.0],
+        )];
+        let (out, dir) = convert(tag, mock, |c| c);
+        let report = out.expect("the sheet converts").report;
+        let row = sheet_row(&report, 0x80).clone();
+        let at = (row.status == "drawn").then(|| ends(&curve_of(&report, &dir, 0x81, 0x80)));
+        let _ = fs::remove_dir_all(dir);
+        (row, at)
+    };
+    let (exact, want) = run("1660-exact", [0.0, 0.0, 1.0], 0.0);
+    let (noisy, got) = run(
+        "1660-langara",
+        [5.820766091346741e-11, 0.0, 251705.55886499453],
+        1.5700924586837754e-16,
+    );
+    assert_eq!(exact.status, "drawn");
+    assert!(want.is_some());
+    assert_eq!(noisy.status, "drawn", "{:?}", noisy.reason);
+    assert_eq!(noisy.scale.as_deref(), Some("1:928.6987523713277"));
+    assert_eq!(noisy.scale, exact.scale);
+    assert_eq!(
+        got, want,
+        "the noisy window puts the line where the exact one does"
+    );
+}
