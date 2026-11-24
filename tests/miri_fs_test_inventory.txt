@@ -897,6 +897,11 @@ annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_content_draws_
 annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_layer_override_applies
 annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_missing_stays_skipped
 annotated   fs-detected  tests/pvec_1631_xref.rs::issue_1631_xref_nested_depth_capped
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_a_named_state_applies_only_what_its_mask_restores
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_a_state_name_matches_without_regard_to_case
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_a_user_override_still_beats_the_state
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_turning_off_the_layers_a_state_does_not_list_hides_them
+annotated   fs-detected  tests/pvec_1675_model_layer_state.rs::issue_1675_with_no_state_the_saved_layer_table_decides
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
