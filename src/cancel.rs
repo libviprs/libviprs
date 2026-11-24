@@ -40,6 +40,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// A cloneable cooperative-cancellation handle shared with a running engine.
 ///
@@ -49,6 +50,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken {
     flag: Arc<AtomicBool>,
+    /// A wall-clock bound a conversion put on its own copy of the token (#1674). It never reaches the
+    /// shared flag, so a deadline does not cancel the caller's other clones.
+    deadline: Option<Instant>,
 }
 
 impl PartialEq for CancelToken {
@@ -66,7 +70,24 @@ impl CancelToken {
     pub fn new() -> Self {
         Self {
             flag: Arc::new(AtomicBool::new(false)),
+            deadline: None,
         }
+    }
+
+    /// A copy of this token that also reads as cancelled once `at` has passed (the earlier of `at`
+    /// and a deadline it already has). The copy shares the flag, and the deadline stays on the copy.
+    #[cfg(feature = "pvec-convert")]
+    pub(crate) fn with_deadline(&self, at: Instant) -> Self {
+        Self {
+            flag: self.flag.clone(),
+            deadline: Some(self.deadline.map_or(at, |d| d.min(at))),
+        }
+    }
+
+    /// `true` when the deadline passed and the flag was not the reason: a cancel by the caller wins.
+    #[cfg(feature = "pvec-convert")]
+    pub(crate) fn deadline_passed(&self) -> bool {
+        !self.flag.load(Ordering::SeqCst) && self.deadline.is_some_and(|d| Instant::now() >= d)
     }
 
     /// Request cancellation. Idempotent — calling it more than once, or from
@@ -77,9 +98,10 @@ impl CancelToken {
     }
 
     /// Returns `true` once [`cancel`](Self::cancel) has been called on this
-    /// token or any of its clones.
+    /// token or any of its clones (or, for the copy a conversion keeps while it has a
+    /// deadline, once the deadline passed).
     pub fn is_cancelled(&self) -> bool {
-        self.flag.load(Ordering::SeqCst)
+        self.flag.load(Ordering::SeqCst) || self.deadline.is_some_and(|d| Instant::now() >= d)
     }
 }
 

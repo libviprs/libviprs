@@ -61,6 +61,11 @@ fn logo(def_path: &str) -> RasterImage {
 
 /// An A3 sheet, millimetres, 1 : 1, with a line along the bottom of the logo and the IMAGE.
 fn sheet(def_path: &str, image: RasterImage) -> Vec<u8> {
+    sheet_at(def_path, image, [1.0, 1.0])
+}
+
+/// As [`sheet`], plotted at `scale` paper millimetres to `scale[1]` drawing units.
+fn sheet_at(def_path: &str, image: RasterImage, scale: [f64; 2]) -> Vec<u8> {
     let mut doc = CadDocument::new();
     let layout = doc.add_layout(SHEET).expect("layout");
     let Some(ObjectType::Layout(l)) = doc.objects.get_mut(&layout) else {
@@ -71,8 +76,8 @@ fn sheet(def_path: &str, image: RasterImage) -> Vec<u8> {
     l.paper_height = 297.0;
     l.plot_paper_units = 1;
     l.plot_type = 5;
-    l.plot_scale_numerator = 1.0;
-    l.plot_scale_denominator = 1.0;
+    l.plot_scale_numerator = scale[0];
+    l.plot_scale_denominator = scale[1];
     l.plot_rotation = 0;
     l.plot_margin_left = 0.0;
     l.plot_margin_bottom = 0.0;
@@ -369,6 +374,29 @@ fn issue_1667_the_raster_sits_in_the_frame_of_the_linework() {
     let at = |px: f64, py: f64| [a * px + b * py + tx, c * px + e * py + ty];
     near2(at(0.0, 4.0), start);
     near2(at(4.0, 4.0), end);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1667_the_raster_follows_the_plot_scale_like_the_linework() {
+    let dir = scratch("plot-scale");
+    write_logo(&dir);
+    // Two millimetres of paper to a drawing unit (#1665): the linework and the picture both double.
+    let bytes = sheet_at("logo.png", logo("logo.png"), [2.0, 1.0]);
+    let out = convert(&bytes, &dir, Some(&dir));
+    let placed = rasters(&out);
+    assert_eq!(placed.len(), 1, "the IMAGE is placed as one raster");
+    near(
+        placed[0].pixel_to_source,
+        [20.0, 0.0, 0.0, -20.0, 100.0, 160.0],
+    );
+    let curves = open_published(&out.artifact).unwrap().entities().unwrap();
+    let (o, d, len) = segment(&curves[0].1);
+    let [a, b, c, e, tx, ty] = placed[0].pixel_to_source;
+    let at = |px: f64, py: f64| [a * px + b * py + tx, c * px + e * py + ty];
+    near2(at(0.0, 4.0), o);
+    near2(at(4.0, 4.0), [o[0] + d[0] * len, o[1] + d[1] * len]);
     fs::remove_dir_all(&dir).unwrap();
 }
 
