@@ -85,11 +85,11 @@ pub use layouts::{
     paper_sheets,
 };
 pub use manifest::{
-    CadChoices, CadManifest, CadMode, CadText, LayerCounts, ManifestColour, ManifestFile,
-    ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask, ManifestModelSpace,
-    ManifestPaper, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount, PlotsVisibility,
-    ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, apply_choices, cad_manifest,
-    resolve_visibility,
+    CadChoices, CadManifest, CadMode, CadText, LayerCounts, LayerStateNotFound, ManifestColour,
+    ManifestFile, ManifestLayer, ManifestLayerState, ManifestLayout, ManifestMask,
+    ManifestModelSpace, ManifestPaper, ManifestPlot, ManifestViewport, ManifestWarning, PlotsCount,
+    PlotsVisibility, ResolvedLayer, StateLayer, TextSwitch, Visibility, VpRef, apply_choices,
+    cad_manifest, check_layer_state, resolve_visibility,
 };
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]

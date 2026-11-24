@@ -19,7 +19,7 @@ writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the tr
 
 ## Plot settings
 
-`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`.
+`plot_settings(PlotSettings)` (#1628) chooses what a paper sheet plots, over the layout's own plot settings. `PlotSettings::default()` is the layout as it stands, which is what a conversion does without the call. All of it needs plot settings the drawing reports; without them the frame is the extents whatever is asked and the report notes `plot-settings-not-applied`. `PlotSettings::device` (#1673) carries the `PlotDevice` of a PC3 (`PlotDevice::from_pc3`, files loaded with `cad::plot_files::{load_pc3, load_plot_style}`): it fills a paper of no size and missing margins under the layout, never over it, and the notes `plot-device-paper` and `plot-device-margins` say when it did.
 
 | field | effect |
 |---|---|
@@ -100,6 +100,8 @@ switches from `choices.text`, the layer overrides (`LayerVisibility::overrides`)
 layer state folded in where it changes the answer. A user's entry for a layer wins over the state's, and a state's `visible` never thaws a viewport.
 A layer a state only freezes goes in `state_frozen`, a frozen flag like the file's own, so it answers to `frozen` and `frozen_text` and its notes
 follow `frozenLayers`. An entity a layer override hides is counted as `layers.overrides` (`Exclusion::LayerOverridden`, code `LAYER_HIDDEN`).
+
+`check_layer_state(&manifest, &choices)` (#1675) says whether the layer state `choices` names is one the drawing stores (ASCII case-insensitive). When it isn't, it returns `LayerStateNotFound` (`code()` is `LAYER_STATE_NOT_FOUND`) with the name asked for and the states there are, without the ones AutoCAD hides. `apply_choices` itself still falls back to the file's table for an unknown name, so run the check first. In model mode `apply_choices` leaves `viewport_overrides` empty, since those overrides belong to sheets.
 
 ## Every sheet of a drawing
 

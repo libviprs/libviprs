@@ -170,7 +170,10 @@ impl PlotDevice {
         Ok(PlotDevice {
             paper_mm: media.size_mm,
             printable_mm: media.printable_mm,
-            raster_limit_dpi: pc3.custom("Raster_Limit").and_then(|v| v.parse().ok()),
+            raster_limit_dpi: pc3
+                .custom("Raster_Limit")
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|v| v.is_finite() && *v > 0.0),
             text_as_text: match pc3.custom("Font_Capture") {
                 Some("true") => Some(true),
                 Some("false") => Some(false),
