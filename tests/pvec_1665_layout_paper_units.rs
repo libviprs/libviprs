@@ -158,6 +158,8 @@ fn plot(units: i16, paper: [f64; 2], rotation: i16, [n, d]: [f64; 2]) -> LayoutP
         rotation,
         margins: [0.0; 4],
         origin: [0.0; 2],
+        paper_image_origin: [0.0; 2],
+        limits: [0.0; 4],
         style_sheet: "monochrome.ctb".into(),
         print_lineweights: true,
         scale_lineweights: false,
