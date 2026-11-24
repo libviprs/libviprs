@@ -1125,7 +1125,8 @@ impl<'a> PvecConversion<'a> {
                             .filter(|per_mm| *per_mm > 0.0)
                             .map(|per_mm| {
                                 let at = sheet_unit.map_or(1.0, drawn_at) / per_mm;
-                                p.paper_image_origin.map(|v| if v.is_finite() { v * at } else { 0.0 })
+                                p.paper_image_origin
+                                    .map(|v| if v.is_finite() { v * at } else { 0.0 })
                             })
                             .unwrap_or([0.0; 2]);
                         let converted = su([margins[0], margins[1]])

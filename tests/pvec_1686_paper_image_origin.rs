@@ -21,7 +21,7 @@ use libviprs::pvec::{
     ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceFact, SourceUnit,
     ViewProfile,
 };
-use libviprs::pvec_convert::{PlotArea, PlotScale, PlotSettings, PvecConversion};
+use libviprs::pvec_convert::{PlotScale, PlotSettings, PvecConversion};
 use pvec_facade::Curve;
 
 // ---- a hand-built provider ------------------------------------------------------------
@@ -255,16 +255,6 @@ fn measured(dir: &Path) -> ([f64; 2], [f64; 2], [f64; 2], f64) {
     (frame, min, max, mpu)
 }
 
-/// The plot scale as the artifact's calibration record.
-fn stored_scale(dir: &Path) -> pvec_facade::unstable::ScaleClaim {
-    open_published(&dir.join("sheet.pvec"))
-        .unwrap()
-        .calibration()
-        .unwrap()
-        .and_then(|c| c.scale)
-        .expect("the plot scale is the calibration record")
-}
-
 fn assert_close(what: &str, got: [f64; 2], want: [f64; 2]) {
     let off = (got[0] - want[0]).abs().max((got[1] - want[1]).abs());
     assert!(off < 1e-9, "{what}: {got:?} m, expected {want:?} m");
@@ -333,7 +323,12 @@ fn issue_1686_a_layout_with_no_image_origin_does_not_move() {
 fn issue_1686_limits_without_an_image_origin_do_not_move_the_sheet() {
     let mut mock = tabloid();
     mock.plot.limits = [0.0, 0.0266, 17.272, 11.2026];
-    let dir = convert("limits", mock, SourceUnit::Millimeters, PlotSettings::default());
+    let dir = convert(
+        "limits",
+        mock,
+        SourceUnit::Millimeters,
+        PlotSettings::default(),
+    );
     let (_, min, max, _) = measured(&dir);
     assert_close("the lower left", min, [0.025, 0.025]);
     assert_close("the upper right", max, [0.4068, 0.2544]);
@@ -373,7 +368,11 @@ fn issue_1686_the_callers_unit_does_not_change_the_shift() {
         );
         let (_, min, max, _) = measured(&dir);
         assert_close(&format!("{tag}: lower left"), min, [0.025, 0.025 - SHIFT]);
-        assert_close(&format!("{tag}: upper right"), max, [0.4068, 0.2544 - SHIFT]);
+        assert_close(
+            &format!("{tag}: upper right"),
+            max,
+            [0.4068, 0.2544 - SHIFT],
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }
@@ -429,7 +428,12 @@ fn issue_1686_the_position_is_reported_measured_for_the_measured_case() {
 fn issue_1686_a_margin_keeps_the_position_unmeasured() {
     let mut mock = tabloid();
     mock.plot.margins = [5.0, 6.0, 7.0, 8.0];
-    let (dir, row) = converted("margin", mock, SourceUnit::Millimeters, PlotSettings::default());
+    let (dir, row) = converted(
+        "margin",
+        mock,
+        SourceUnit::Millimeters,
+        PlotSettings::default(),
+    );
     assert_eq!(row.position.as_deref(), Some("unmeasured"));
     let _ = fs::remove_dir_all(dir);
 }
@@ -438,7 +442,12 @@ fn issue_1686_a_margin_keeps_the_position_unmeasured() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1686_no_image_origin_no_note() {
-    let (dir, row) = converted("nonote", tabloid(), SourceUnit::Millimeters, PlotSettings::default());
+    let (dir, row) = converted(
+        "nonote",
+        tabloid(),
+        SourceUnit::Millimeters,
+        PlotSettings::default(),
+    );
     assert!(!row.notes.iter().any(|n| n == "paper-image-origin"));
     let _ = fs::remove_dir_all(dir);
 }

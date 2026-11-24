@@ -920,7 +920,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1668 adds 1: `tests/pvec_1668_pdf_decodeparms.rs::the_owners_plan_converts_on_the_pages_that_stopped`, which reads the owner's plan from the path `LIBVIPRS_1668_PDF` names (it is also `#[ignore]`). It said 1365 before this line moved.
 /// #1671 adds 6: the six `tests/pvec_1671_leader_tolerance.rs` cells that write a drawing and convert it into a temp dir. It said 1366 before this line moved.
 /// #1667 adds 18: the `tests/pvec_1667_dwg_image.rs` cells that write a drawing and a picture into a temp dir and convert it. It said 1372 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1390;
+/// #1686 adds 11: the `tests/pvec_1686_paper_image_origin.rs` cells that convert a plotted sheet, mock or written with acadrust, into a temp dir and measure it. It said 1390 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1401;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

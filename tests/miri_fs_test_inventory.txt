@@ -808,6 +808,17 @@ annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_plo
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_upside_down_sheet_at_1_to_0_04_is_scaled_then_turned
 annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_a_layout_at_1_to_1_keeps_its_patterns_as_drawn
 annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_dash_and_dash_dot_periods_are_paper_millimetres_at_1_to_0_04
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_a_callers_plot_scale_carries_the_origin_too
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_a_layout_with_no_image_origin_does_not_move
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_a_margin_keeps_the_position_unmeasured
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_a_real_layout_with_an_image_origin_sits_on_its_paper
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_an_image_origin_at_1_to_0_04_moves_the_sheet_by_its_paper_length
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_an_inch_sheet_moves_by_the_same_paper_length
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_limits_without_an_image_origin_do_not_move_the_sheet
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_no_image_origin_no_note
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_the_callers_unit_does_not_change_the_shift
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_the_position_is_reported_measured_for_the_measured_case
+annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_the_x_of_the_image_origin_moves_the_sheet_the_same_way
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_override_follows_the_layouts_rotation
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_size_override_replaces_the_paper_and_its_margins
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_that_is_not_a_size_is_refused_not_framed
