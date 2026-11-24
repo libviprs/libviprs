@@ -932,7 +932,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1670 adds 6: the `tests/pvec_1670_plot_defaults.rs` cells that plot a drawing written in memory, with no table, into a temp dir and read the PDF back. It said 1490 before this line moved.
 /// #1670 adds 1: the transparent fill cell of `tests/pvec_1670_plot_defaults.rs`, which plots a drawing written in memory into a temp dir. It said 1496 before this line moved.
 /// #1670 adds 1: the generated-ctb plot cell of `tests/plot_files_1670_defaults.rs`, which plots a drawing written in memory into a temp dir. It said 1497 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1498;
+/// #1670 adds 17: the `tests/plot_defaults_1670.rs` cells that store, load and clear the two default files in a temp dir. It said 1498 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1515;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
