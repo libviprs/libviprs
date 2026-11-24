@@ -799,6 +799,13 @@ annotated   not-detected tests/pvec_1630_plot_style_tables.rs::the_grayscale_pol
 annotated   not-detected tests/pvec_1630_plot_style_tables.rs::the_lineweight_list_sets_the_width
 annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::the_recorded_properties_do_not_change_what_is_drawn
 annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::without_a_table_the_conversion_is_what_it_was
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_millimetre_sheet_at_1_to_0_04_draws_at_full_paper_size
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_inch_sheet_at_1_to_1_016_draws_at_full_paper_size
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_the_callers_unit_does_not_change_a_plotted_sheet
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_real_tabloid_layout_draws_at_full_paper_size
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_callers_plot_scale_is_applied_like_the_stored_one
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_plot_window_is_scaled_with_the_linework
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_upside_down_sheet_at_1_to_0_04_is_scaled_then_turned
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_override_follows_the_layouts_rotation
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_size_override_replaces_the_paper_and_its_margins
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_that_is_not_a_size_is_refused_not_framed
