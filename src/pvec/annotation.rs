@@ -24,7 +24,7 @@
 //! part of a region is not the region. A hatch pattern is carried by name, angle and scale, not by
 //! its lines.
 
-use super::components::{FillBody, TextBody};
+use super::components::{FillBody, PlacedPatternLine, TextBody};
 use super::dwg_acadrust::run_advance;
 use super::flatten::FlatEntity;
 use super::provider::{
@@ -182,6 +182,7 @@ pub(crate) fn map(
             pattern,
             rgba,
             unread_loops,
+            pattern_lines,
         } => {
             if unread_loops > 0 {
                 return Err("a boundary loop could not be read as a ring of curves");
@@ -336,7 +337,47 @@ pub(crate) fn map(
                 }
                 return Err("its corners are on one line, so there is no area to fill");
             }
-            Ok((carriers, Body::Fill(FillBody { pattern, rgba })))
+            // The pattern's line families in the drawing's space (a viewport's map included): the
+            // direction and the step by the leaf's linear part, the dash lengths by what it does to
+            // a unit along the line.
+            let lines: Vec<PlacedPatternLine> = if pattern.is_some() {
+                let linear = |v: [f64; 2]| {
+                    let [bx, by, _] = to_block(v[0], v[1]);
+                    [ma * bx + mb * by, mc * bx + md * by]
+                };
+                pattern_lines
+                    .iter()
+                    .filter_map(|l| {
+                        let (s, c) = l.angle.sin_cos();
+                        let along = linear([c, s]);
+                        let length = along[0].hypot(along[1]);
+                        if !(length.is_finite() && length > 0.0) {
+                            return None;
+                        }
+                        let (ox, oy) = (l.offset[0], l.offset[1]);
+                        let step = linear([ox * c - oy * s, ox * s + oy * c]);
+                        let origin = leaf.map_point(to_block(l.base[0], l.base[1]));
+                        let ok = origin.iter().chain(&step).all(|v| v.is_finite())
+                            && l.dashes.iter().all(|d| d.is_finite());
+                        ok.then(|| PlacedPatternLine {
+                            origin,
+                            direction: [along[0] / length, along[1] / length],
+                            step,
+                            dashes: l.dashes.iter().map(|d| d * length).collect(),
+                        })
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            Ok((
+                carriers,
+                Body::Fill(FillBody {
+                    pattern,
+                    rgba,
+                    lines,
+                }),
+            ))
         }
     }
 }

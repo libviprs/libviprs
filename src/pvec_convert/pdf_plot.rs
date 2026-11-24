@@ -10,6 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use super::PlacedPatternLine;
+use super::pdf_hatch;
 use acadrust::plot_style::PlotStyleTable;
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
 use pvec_components::{Band, Fill, HatchStream, TextStream};
@@ -17,6 +19,7 @@ use pvec_facade::Curve;
 use pvec_facade::components::{LineStyleStream, StrokePaintStream, StrokeWidth};
 use pvec_facade::unstable::RasterId;
 use pvec_geometry::{Curve2d, Side};
+use std::collections::BTreeMap;
 
 use super::{PlotSettings, PvecConversion, PvecConvertError};
 use crate::CancelToken;
@@ -285,6 +288,7 @@ impl<'a> PdfPlot<'a> {
                 let mut conversion = PvecConversion::new(self.source, &file)
                     .view_profile(profile)
                     .plot_settings(self.settings.clone())
+                    .project_plan(true)
                     .texts(self.texts)
                     .fills(self.fills)
                     .components(StreamSelection::ALL)
@@ -312,10 +316,17 @@ impl<'a> PdfPlot<'a> {
                     let page = if out.written == 0 {
                         blank_page(sheet.as_ref(), unit)
                     } else {
-                        read_page(&file, rotation, paper_frame(sheet.as_ref(), unit))
-                            .map_err(PvecConvertError::Publish)?
+                        read_page(
+                            &file,
+                            rotation,
+                            paper_frame(sheet.as_ref(), unit),
+                            &out.hatch_patterns,
+                        )
+                        .map_err(PvecConvertError::Publish)?
                     };
-                    Ok((page, sheet.map(|s| s.notes).unwrap_or_default()))
+                    let mut notes = sheet.map(|s| s.notes).unwrap_or_default();
+                    notes.extend(page.notes.iter().cloned());
+                    Ok((page, notes))
                 });
                 let status = match &page {
                     Ok(_) => ("written", None),
@@ -364,6 +375,8 @@ struct Page {
     text: bool,
     /// The rasters the content draws as `/Im<n>`.
     images: Vec<PageImage>,
+    /// What the page could not draw as asked, in the vocabulary of the sheet report's notes.
+    notes: Vec<String>,
 }
 
 /// A raster for the page: RGB bytes, and its alpha when it has any.
@@ -389,6 +402,7 @@ fn read_page(
     artifact: &Path,
     rotation: i16,
     frame: Option<([f64; 2], [f64; 2])>,
+    patterns: &BTreeMap<u32, Vec<PlacedPatternLine>>,
 ) -> Result<Page, crate::pvec::publish::PublishError> {
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
     const DEFAULT_WIDTH_MM: f64 = 0.25;
@@ -518,9 +532,11 @@ fn read_page(
         .collect();
 
     // Fills first, under the strokes.
+    let mut notes: Vec<String> = Vec::new();
     for record in hatches.iter().flat_map(|h| &h.records) {
-        let Fill::Solid { rgba } = &record.fill else {
-            continue;
+        let (rgba, solid_fill) = match &record.fill {
+            Fill::Solid { rgba } => (rgba, true),
+            Fill::Pattern { rgba, .. } => (rgba, false),
         };
         let mut runs: Runs = Vec::new();
         for id in &record.boundary {
@@ -533,9 +549,58 @@ fn read_page(
         let [r, g, b, a] = rgba.to_be_bytes();
         let thin = |c: u8| (255.0 - (255.0 - f64::from(c)) * f64::from(a) / 255.0).round() as u8;
         let word = u32::from_be_bytes([thin(r), thin(g), thin(b), 255]);
-        content.push_str(&format!("{} rg\n", rgb(word)));
-        push_path(&mut content, &runs, true);
-        content.push_str("f*\n");
+        let mut solid = solid_fill;
+        if !solid_fill {
+            // A pattern is the lines of its line families, cut to the boundary; a hatch whose
+            // pattern is too fine to space is filled, and the plot says so.
+            let Some(families) = record
+                .boundary
+                .first()
+                .and_then(|id| patterns.get(&id.index()))
+            else {
+                continue;
+            };
+            let placed: Vec<PlacedPatternLine> = families
+                .iter()
+                .map(|f| PlacedPatternLine {
+                    origin: {
+                        let (x, y) = to_pt(f.origin[0], f.origin[1]);
+                        [x, y]
+                    },
+                    direction: f.direction,
+                    step: [f.step[0] * k, f.step[1] * k],
+                    dashes: f.dashes.iter().map(|d| d * k).collect(),
+                })
+                .collect();
+            match pdf_hatch::expand(&rings_of(&runs), &placed) {
+                Ok(strokes) => {
+                    content.push_str(&format!("0 w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
+                    for s in strokes {
+                        content.push_str(&format!(
+                            "{:.4} {:.4} m\n{:.4} {:.4} l\nS\n",
+                            s[0], s[1], s[2], s[3]
+                        ));
+                    }
+                }
+                Err(pdf_hatch::TooDense) => {
+                    if !notes.iter().any(|n| n == "hatch-too-dense") {
+                        notes.push("hatch-too-dense".into());
+                    }
+                    solid = true;
+                }
+            }
+        }
+        if solid {
+            content.push_str(&format!("{} rg\n", rgb(word)));
+            push_path(&mut content, &runs, true);
+            content.push_str("f*\n");
+            // A solid fill is filled and stroked: its edge, in its own colour, at the thinnest line.
+            if solid_fill {
+                content.push_str(&format!("0 w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
+                push_path(&mut content, &runs, true);
+                content.push_str("S\n");
+            }
+        }
     }
 
     for (id, curve) in &entities {
@@ -593,7 +658,8 @@ fn read_page(
         let (s, c) = t.rotation.sin_cos();
         content.push_str(&format!(
             "BT\n/F1 {:.4} Tf\n{} rg\n{c:.6} {s:.6} {:.6} {c:.6} {x:.4} {y:.4} Tm\n({}) Tj\nET\n",
-            t.height * k,
+            // A text's height is the height of a capital, and Helvetica's stand 0.716 em high.
+            t.height * k / 0.716,
             rgb(word),
             -s,
             pdf_string(&t.text)
@@ -626,7 +692,41 @@ fn read_page(
         content,
         text,
         images,
+        notes,
     })
+}
+
+/// The closed rings of a path's runs, each run one ring, curves sampled.
+fn rings_of(runs: &Runs) -> Vec<Vec<[f64; 2]>> {
+    let mut rings: Vec<Vec<[f64; 2]>> = Vec::new();
+    for seg in runs {
+        match seg {
+            Seg::Move(x, y) => rings.push(vec![[*x, *y]]),
+            Seg::Line(x, y) => {
+                if let Some(r) = rings.last_mut() {
+                    r.push([*x, *y]);
+                }
+            }
+            Seg::Curve(p) => {
+                if let Some(r) = rings.last_mut() {
+                    let a = r.last().copied().unwrap_or([p[4], p[5]]);
+                    for i in 1..=8 {
+                        let t = f64::from(i) / 8.0;
+                        let u = 1.0 - t;
+                        let at = |v0: f64, v1: f64, v2: f64, v3: f64| {
+                            u * u * u * v0
+                                + 3.0 * u * u * t * v1
+                                + 3.0 * u * t * t * v2
+                                + t * t * t * v3
+                        };
+                        r.push([at(a[0], p[0], p[2], p[4]), at(a[1], p[1], p[3], p[5])]);
+                    }
+                }
+            }
+        }
+    }
+    rings.retain(|r| r.len() >= 3);
+    rings
 }
 
 /// A page's content as a PDF literal string: Latin-1, with anything else as `?`.
@@ -696,6 +796,7 @@ fn blank_page(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> Page {
         content: String::new(),
         text: false,
         images: Vec::new(),
+        notes: Vec::new(),
     }
 }
 

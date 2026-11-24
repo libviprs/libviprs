@@ -73,6 +73,7 @@ fn fill(rings: Vec<Vec<RawVertex>>, pattern: Option<(String, f64, f64)>, rgba: u
         pattern,
         rgba,
         unread_loops: 0,
+        pattern_lines: vec![],
     }
 }
 
@@ -157,6 +158,7 @@ impl DwgProvider for Notes {
                 pattern: None,
                 rgba: 0,
                 unread_loops: 1,
+                pattern_lines: vec![],
             }),
             // A disc, as a hatch draws one: two half turns, a ring of two vertices.
             18 => Some(fill(

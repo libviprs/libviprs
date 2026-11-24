@@ -64,6 +64,7 @@ mod dwg_image;
 mod georef;
 mod layouts;
 mod manifest;
+mod pdf_hatch;
 mod pdf_plot;
 pub use pdf_plot::{PdfPlot, PdfPlotOutput};
 #[cfg(feature = "pvec-raster")]
@@ -103,8 +104,8 @@ use crate::pvec::annotation::{self, Body};
 use crate::pvec::bounds::BoundsReport;
 use crate::pvec::classify::{ElementClass, ElementRules};
 use crate::pvec::components::{
-    ComponentSource, ComponentsError, FillBody, StreamSelection, TextBody, annotation_streams,
-    build_streams,
+    ComponentSource, ComponentsError, FillBody, PlacedPatternLine, StreamSelection, TextBody,
+    annotation_streams, build_streams,
 };
 use crate::pvec::curve_clip::{CurveClip, CurveClipError, clip_curve};
 use crate::pvec::diagnostics::{Diagnostic, DiagnosticCode};
@@ -242,6 +243,11 @@ pub struct PvecConversionOutput {
     /// The most outcomes that were waiting for the consumer at once. Never above the capacity set
     /// with [`PvecConversion::queue_capacity`].
     pub peak_queue_depth: u32,
+    /// The line families of each pattern hatch the artifact carries, placed in the artifact's
+    /// space and keyed by the index of the hatch's first boundary entity in the artifact. The PVEC
+    /// hatch stream keeps only a pattern's name, angle and scale, so a plot draws the pattern from
+    /// these. Empty without `fills(true)` and the component streams.
+    pub hatch_patterns: BTreeMap<u32, Vec<PlacedPatternLine>>,
     /// The sheet as a PNG, when [`PvecConversion::thumbnail`] asked for one (#1629).
     #[cfg(feature = "pvec-raster-thumbnail")]
     pub thumbnail: Option<Vec<u8>>,
@@ -443,6 +449,15 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// Draw a LINE whose ends are at different heights as the segment it covers seen from above,
+    /// where a PVec conversion refuses it as 3D (`geometry-3d`): what a plan or a plot shows. Off by
+    /// default.
+    #[must_use]
+    pub fn project_plan(mut self, on: bool) -> Self {
+        self.gate.project_plan = on;
+        self
+    }
+
     /// Carry HATCH and SOLID in PVec's hatch stream (#1624), without text: TEXT, MTEXT, ATTDEF,
     /// MULTILEADER and TOLERANCE stay unmapped, each with a warning saying texts are off, until [`texts`](Self::texts) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
@@ -626,7 +641,9 @@ impl<'a> PvecConversion<'a> {
     /// `Default` (the default) or `Permissive`. Replaces any earlier capability setting.
     #[must_use]
     pub fn profile(mut self, profile: ConversionProfile) -> Self {
+        let project_plan = self.gate.project_plan;
         self.gate = Gate::of(profile);
+        self.gate.project_plan = project_plan;
         self
     }
 
@@ -3107,6 +3124,8 @@ impl<'a> PvecConversion<'a> {
         // change a geometry block.
         // The writer takes what it keeps out of the geometry, so the geometry goes the moment the
         // open call returns, whether it succeeded or not, and the report is built without it.
+        let hatch_patterns: std::cell::RefCell<BTreeMap<u32, Vec<PlacedPatternLine>>> =
+            std::cell::RefCell::new(BTreeMap::new());
         let open = |geometries: Vec<(EntityId, Normalized2DGeometry)>,
                     spill: Option<&SpillConfig>,
                     on_chunk: &mut dyn FnMut(u64, u64)|
@@ -3189,8 +3208,10 @@ impl<'a> PvecConversion<'a> {
                         .insert("line-style.bad-style".to_owned(), style_bad);
                 }
                 streams = built.streams;
-                let (carried, dropped) = annotation_streams(&texts, &fills, &open.source_ids)
-                    .map_err(PvecConvertError::Components)?;
+                let (carried, dropped, patterns) =
+                    annotation_streams(&texts, &fills, &open.source_ids)
+                        .map_err(PvecConvertError::Components)?;
+                *hatch_patterns.borrow_mut() = patterns;
                 streams.extend(carried);
                 for d in &dropped {
                     *made
@@ -3358,6 +3379,7 @@ impl<'a> PvecConversion<'a> {
             fidelity,
             written,
             peak_queue_depth,
+            hatch_patterns: hatch_patterns.into_inner(),
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail,
         })
@@ -3748,12 +3770,16 @@ struct Gate {
     allowed: BTreeSet<CapabilityId>,
     exact_only: bool,
     policy: CapabilityPolicy,
+    /// A LINE whose ends are at different heights is drawn as the segment it covers in plan, not
+    /// refused as 3D. Not part of a profile: a plot asks for it.
+    project_plan: bool,
 }
 
 impl Gate {
     fn of(profile: ConversionProfile) -> Self {
         Self {
             name: profile.name(),
+            project_plan: false,
             allowed: profile.capabilities(),
             exact_only: profile.exact_only(),
             policy: profile.policy(),
@@ -3933,7 +3959,20 @@ fn classify_leaf(
     viewport: Option<crate::cad::ItemHandle>,
 ) -> Result<Done, PvecConvertError> {
     let class = f.entity.provenance.class_name.as_str();
-    let basic = match dwg_basic::extract(&f.entity) {
+    // A plan shows a sloped line as the segment it covers, when the caller asked for that.
+    let flattened = match &f.entity.geometry {
+        RawGeometry::Line { start, end } if gate.project_plan && start[2] != end[2] => {
+            Some(RawEntity {
+                geometry: RawGeometry::Line {
+                    start: [start[0], start[1], 0.0],
+                    end: [end[0], end[1], 0.0],
+                },
+                ..f.entity.clone()
+            })
+        }
+        _ => None,
+    };
+    let basic = match dwg_basic::extract(flattened.as_ref().unwrap_or(&f.entity)) {
         Ok(b) => b,
         Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate, viewport),
         Err(e) => {

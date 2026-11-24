@@ -108,9 +108,26 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
     let started = std::time::Instant::now();
     let dest = out_dir.join("plotted.pdf");
     let observer = Arc::new(SheetClock(started));
+    // `LIBVIPRS_OWNER_PLOT_DRAW=no_plot,frozen,off` draws the layers in those states, to see what the
+    // plotted PDF shows that the print profile leaves out.
+    let mut profile = ViewProfile::print_profile(&paper[0].name);
+    if let Ok(list) = std::env::var("LIBVIPRS_OWNER_PLOT_DRAW") {
+        use libviprs::pvec::LayerStateRule::Ignore;
+        for state in list.split(',') {
+            match state.trim() {
+                "no_plot" => {
+                    profile.layers.no_plot = Ignore;
+                    profile.layers.no_plot_text = Ignore;
+                }
+                "frozen" => profile.layers.frozen = Ignore,
+                "off" => profile.layers.off = Ignore,
+                _ => {}
+            }
+        }
+    }
     let plotted = PdfPlot::new(CadSource::Path(&dwg), &dest)
         .unit(SourceUnit::Millimeters)
-        .view_profile(ViewProfile::print_profile(&paper[0].name))
+        .view_profile(profile)
         .plot_style_table(table)
         .layouts(pages.iter().map(|n| paper[n - 1].name.clone()))
         .texts(true)
