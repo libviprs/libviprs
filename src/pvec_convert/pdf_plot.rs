@@ -212,7 +212,6 @@ impl<'a> PdfPlot<'a> {
         self,
         file_unit: impl FnOnce(&P) -> Option<SourceUnit>,
     ) -> Result<PdfPlotOutput, PvecConvertError> {
-        let _ = self.embedded_font;
         // The deadline counts from here, and rides on this plot's own copy of the cancel token.
         let cancel = match self.deadline.and_then(|d| Instant::now().checked_add(d)) {
             Some(at) => self.cancel.with_deadline(at),
@@ -365,8 +364,12 @@ impl<'a> PdfPlot<'a> {
             }
         }
         let count = pages.len() as u32;
-        write_pdf(self.dest, pages.into_iter().map(|(p, _)| p))
-            .map_err(|e| PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(e)))?;
+        write_pdf(
+            self.dest,
+            pages.into_iter().map(|(p, _)| p),
+            self.embedded_font,
+        )
+        .map_err(|e| PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(e)))?;
         Ok(PdfPlotOutput {
             file: self.dest.to_path_buf(),
             pages: count,
@@ -746,6 +749,17 @@ fn pdf_string(text: &str) -> String {
             '(' | ')' | '\\' => format!("\\{c}"),
             ' '..='~' => c.to_string(),
             c if (c as u32) < 256 => format!("\\{:03o}", c as u32),
+            // The WinAnsi codes in 0x80 to 0x9F that the face has glyphs for.
+            '\u{20AC}' => "\\200".into(),
+            '\u{2026}' => "\\205".into(),
+            '\u{2018}' => "\\221".into(),
+            '\u{2019}' => "\\222".into(),
+            '\u{201C}' => "\\223".into(),
+            '\u{201D}' => "\\224".into(),
+            '\u{2022}' => "\\225".into(),
+            '\u{2013}' => "\\226".into(),
+            '\u{2014}' => "\\227".into(),
+            '\u{2122}' => "\\231".into(),
             _ => "?".to_owned(),
         })
         .collect()
@@ -905,15 +919,66 @@ fn spans_line(ends: [Option<(f64, f64)>; 2]) -> Runs {
 }
 
 /// Writes the pages as one PDF. The Producer names libviprs.
-fn write_pdf(dest: &Path, pages: impl Iterator<Item = Page>) -> std::io::Result<()> {
+fn write_pdf(
+    dest: &Path,
+    pages: impl Iterator<Item = Page>,
+    embedded: bool,
+) -> std::io::Result<()> {
+    /// A subset of Liberation Sans Regular (SIL OFL 1.1, renamed, see `fonts/LIBERATION-OFL.txt`):
+    /// Latin glyphs, with Arial's advance widths.
+    const FACE: &[u8] = include_bytes!("../../fonts/LibviprsLatin-Regular.ttf");
+    /// The face's advance widths in 1/1000 em for the WinAnsi codes 32 to 255 (0 where it has no glyph).
+    const WIDTHS: [i64; 224] = [
+        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
+        556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722,
+        722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722,
+        667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556,
+        556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
+        500, 334, 260, 334, 584, 0, 556, 0, 0, 0, 0, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 222,
+        222, 333, 333, 350, 556, 1000, 0, 1000, 0, 0, 0, 0, 0, 0, 278, 333, 556, 556, 556, 556,
+        260, 556, 333, 737, 370, 556, 584, 333, 737, 552, 400, 549, 333, 333, 333, 576, 537, 333,
+        333, 333, 365, 556, 834, 834, 834, 611, 667, 667, 667, 667, 667, 667, 1000, 722, 667, 667,
+        667, 667, 278, 278, 278, 278, 722, 722, 778, 778, 778, 778, 778, 584, 778, 722, 722, 722,
+        722, 667, 667, 611, 556, 556, 556, 556, 556, 556, 889, 500, 556, 556, 556, 556, 278, 278,
+        278, 278, 556, 556, 556, 556, 556, 556, 556, 549, 611, 556, 556, 556, 556, 500, 556, 500,
+    ];
     let mut doc = Document::with_version("1.7");
     let pages_id = doc.new_object_id();
-    let font = doc.add_object(dictionary! {
-        "Type" => "Font",
-        "Subtype" => "Type1",
-        "BaseFont" => "Helvetica",
-        "Encoding" => "WinAnsiEncoding",
-    });
+    let font = if embedded {
+        let program = doc.add_object(Stream::new(
+            dictionary! { "Length1" => FACE.len() as i64 },
+            FACE.to_vec(),
+        ));
+        let descriptor = doc.add_object(dictionary! {
+            "Type" => "FontDescriptor",
+            "FontName" => "AAAAAA+LibviprsLatin-Regular",
+            "Flags" => 32,
+            "FontBBox" => vec![(-544).into(), (-303).into(), 1302.into(), 980.into()],
+            "ItalicAngle" => 0,
+            "Ascent" => 905,
+            "Descent" => -212,
+            "CapHeight" => 688,
+            "StemV" => 80,
+            "FontFile2" => program,
+        });
+        doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "TrueType",
+            "BaseFont" => "AAAAAA+LibviprsLatin-Regular",
+            "FirstChar" => 32,
+            "LastChar" => 255,
+            "Widths" => WIDTHS.iter().map(|w| Object::Integer(*w)).collect::<Vec<_>>(),
+            "FontDescriptor" => descriptor,
+            "Encoding" => "WinAnsiEncoding",
+        })
+    } else {
+        doc.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type1",
+            "BaseFont" => "Helvetica",
+            "Encoding" => "WinAnsiEncoding",
+        })
+    };
     let mut kids = Vec::new();
     for page in pages {
         let content = doc.add_object(Stream::new(Dictionary::new(), page.content.into_bytes()));
