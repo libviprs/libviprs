@@ -68,6 +68,8 @@ mod pdf_plot;
 pub use pdf_plot::{PdfPlot, PdfPlotOutput};
 #[cfg(feature = "pvec-raster")]
 mod pdf;
+#[cfg(feature = "pdfium")]
+mod pmtiles_plot;
 mod xref;
 pub use crate::pvec::LayerOverride;
 pub use crate::pvec::writer::recalibrate;
@@ -95,6 +97,10 @@ pub use manifest::{
 #[cfg(feature = "pvec-raster")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-raster")))]
 pub use pdf::{PdfConversion, PdfConversionOutput, PdfConvertError};
+#[cfg(feature = "pdfium")]
+pub use pmtiles_plot::{
+    PmTilesPlot, PmTilesPlotError, PmTilesPlotOutput, PmTilesSheet, RasterLimits,
+};
 
 use crate::CancelToken;
 use crate::cad::CadSource;

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A plotted sheet can be written as PMTiles** (issue #1676). `PmTilesPlot` (with `pdfium`) plots each paper layout with `PdfPlot`, renders its page with pdfium at 36 to 600 dpi (300 by default) and writes one XYZ pyramid of 256 px PNG tiles per sheet through `PmTilesSink`, as `<stem>.<NN>-<slug>.pmtiles`. Zoom 0 is the one-pixel level, so a 2000 by 1000 px page runs from zoom 0 to 11. `RasterLimits` bounds the page's long side (14 400 pt), its pixels (2^28), the zoom levels (16) and the tiles (100 000), and each is a typed refusal with a stable code (`PLOT_PAGE_TOO_LARGE`, `PLOT_PIXELS`, `PLOT_ZOOM_LEVELS`, `PLOT_TILE_COUNT`, `PLOT_DPI_OUT_OF_RANGE`) checked on every page before the first is rendered. The stem must be a plain file name (`PLOT_STEM`). Cancel and deadline are honoured, and the archives are written under a scratch directory made inside the destination and moved into place when every sheet is done, so a plot that fails writes nothing and leaves an archive of the same name that was already there. Tests in `tests/pvec_1676_pmtiles_plot.rs`.
+
 ### Fixed
 
 - **The DWG basic extractors use `detmath::hypot` for the planarity length** (issue #1702). #1695 compared a LINE's end Z and an ELLIPSE's major axis Z against a length taken with the libm `hypot`, which differs in the last bit between architectures, and `n_1471_no_geometry_libviprs_computes_goes_through_libm_hypot` caught it on main. Both calls now go through PVec's `detmath::hypot`; the tolerance is 1e-9 of the length, so no conversion changes.
