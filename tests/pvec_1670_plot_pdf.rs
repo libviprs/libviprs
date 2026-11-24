@@ -529,3 +529,33 @@ fn issue_1670_a_fill_behind_a_viewport_is_drawn_where_the_viewport_puts_it() {
     assert!(xs.iter().any(|x| (x - 220.0).abs() < 0.5), "{xs:?}");
     assert!(xs.iter().any(|x| (x - 250.0).abs() < 0.5), "{xs:?}");
 }
+
+// ---- the lineweight a CTB style names (#1692) -------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1692_a_ctb_lineweight_is_one_more_than_the_index_of_the_list() {
+    // The editor's list is "use the object's", then the table from its first entry, so style 1 is the
+    // table's 0.0 mm (the thinnest line) and style 2 its 0.5 mm. ACI 1 is style 1, ACI 5 is style 2.
+    let mut t = PlotStyleTable::identity("list.ctb");
+    t.lineweights = vec![0.0, 0.5];
+    t.aci_entries[1].lineweight = 1;
+    t.aci_entries[5].lineweight = 2;
+    let (out, pdf) = plot("list", |p| p.plot_style_table(t));
+    out.unwrap();
+    let s = strokes(&ops(&pdf, 1));
+    let red = s
+        .iter()
+        .find(|(c, _, _)| *c == [255, 0, 0] || *c == [0, 0, 0] && false);
+    let _ = red;
+    // ACI 1 keeps its colour here (no colour set), ACI 5 is blue
+    assert!(
+        s.iter().any(|(c, w, _)| *c == [255, 0, 0] && *w == 0.0),
+        "ACI 1 is not at 0 w in {s:?}"
+    );
+    assert!(
+        s.iter()
+            .any(|(c, w, _)| *c == [0, 0, 255] && (w - 0.5 * PT_PER_MM).abs() < 0.01),
+        "ACI 5 is not at 0.5 mm in {s:?}"
+    );
+}
