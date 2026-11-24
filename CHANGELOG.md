@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A plotted sheet can be written as PMTiles** (issue #1676). `PmTilesPlot` (with `pdfium`) plots each paper layout with `PdfPlot`, renders its page with pdfium at 36 to 600 dpi (150 by default) and writes one XYZ pyramid of 256 px PNG tiles per sheet through `PmTilesSink`, as `<stem>.<NN>-<slug>.pmtiles`. Zoom 0 is the one-pixel level, so a 2000 by 1000 px page runs from zoom 0 to 11. `RasterLimits` bounds the page's long side (14 400 pt), its pixels (2^28), the zoom levels (16) and the tiles (100 000), and each is a typed refusal with a stable code (`PLOT_PAGE_TOO_LARGE`, `PLOT_PIXELS`, `PLOT_ZOOM_LEVELS`, `PLOT_TILE_COUNT`, `PLOT_DPI_OUT_OF_RANGE`) checked on every page before the first is rendered. Cancel and deadline are honoured, and a plot that fails writes no archive. Tests in `tests/pvec_1676_pmtiles_plot.rs`.
+
 ### Fixed
 
 - **A LINE, ELLIPSE or SPLINE whose Z differs by float noise converts as 2D** (issue #1695). The planarity test compared the two end Z values of a LINE (and an ELLIPSE's major axis Z against 0, and a SPLINE's control point Zs) exactly, so a line whose ends came back as 1.87e-13 and -1.75e-13 was refused as `geometry-3d` and dropped from the sheet, while a line whose ends happened to share the tiny Z converted. Two Z values now count as one plane when they differ by at most 1e-9 of the largest of the entity's plan length (the spline's control point extent), either Z and 1.0, the factor #1660 uses for a viewport's direction. The floor of 1.0 gives a zero length line a tolerance of a billionth of a unit (it is still reported as coincident vertices), and a real out of plane segment, such as 1.0 of Z on a 300 unit line or any rise on a vertical one, keeps the `geometry-3d` refusal. CIRCLE, ARC and the 2D polylines hold one elevation and had nothing to fix.

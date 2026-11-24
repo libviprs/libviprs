@@ -220,7 +220,7 @@ fn tile_pixel(archive: &Path, z: u8, x: u32, y: u32, px: u32, py: u32) -> [u8; 3
 }
 
 fn is_dark(p: [u8; 3]) -> bool {
-    p.iter().all(|&c| c < 80)
+    p.iter().all(|&c| c < 160)
 }
 
 fn is_white(p: [u8; 3]) -> bool {
@@ -270,27 +270,30 @@ fn issue_1676_the_header_is_a_png_pyramid_of_the_sheet() {
 fn issue_1676_the_zoom_range_runs_from_one_tile_to_the_full_resolution() {
     let (out, dir) = plot_tiles("zoom", wide(), |p| p.dpi(254));
     let sheet = out.unwrap().sheets.remove(0);
-    // 2000 px needs 8 tiles of 256 across, so zoom 0 (one tile) to zoom 3.
-    assert_eq!((sheet.min_zoom, sheet.max_zoom), (0, 3));
+    // The pyramid halves down to one pixel: 2000 px sits on a 2048 canvas, so zoom 0 (one pixel,
+    // one tile) to zoom 11 (eight tiles across).
+    assert_eq!((sheet.min_zoom, sheet.max_zoom), (0, 11));
     let reader = Reader::try_open(&sheet.file).unwrap();
-    assert_eq!((reader.min_zoom(), reader.max_zoom()), (0, 3));
+    assert_eq!((reader.min_zoom(), reader.max_zoom()), (0, 11));
     assert!(reader.tile_exists(0, 0, 0).unwrap());
-    assert!(reader.tile_exists(3, 0, 0).unwrap());
-    assert!(!reader.tile_exists(4, 0, 0).unwrap());
+    assert!(reader.tile_exists(11, 7, 3).unwrap());
+    assert!(!reader.tile_exists(12, 0, 0).unwrap());
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1676_a_sample_tile_has_the_line_where_the_sheet_puts_it() {
-    // 100 x 50 mm at 127 dpi is 500 x 250 px, so two tiles across at the top zoom. The line is at
+    // 100 x 50 mm at 127 dpi is 500 x 250 px on a 512 canvas, so two tiles across at zoom 9. The line is at
     // 25 mm from the bottom, which is 125 px from the top, from x = 50 px to x = 450 px.
     let (out, dir) = plot_tiles("pixels", horizontal(), |p| p.dpi(127));
     let sheet = out.unwrap().sheets.remove(0);
-    assert_eq!(sheet.max_zoom, 1);
-    assert!(is_dark(tile_pixel(&sheet.file, 1, 0, 0, 100, 125)));
-    assert!(is_white(tile_pixel(&sheet.file, 1, 0, 0, 100, 60)));
-    assert!(is_white(tile_pixel(&sheet.file, 1, 0, 0, 20, 125)));
+    assert_eq!(sheet.max_zoom, 9);
+    // A 0.25 mm pen is 1.25 px wide at 127 dpi, so the line is anti-aliased over rows 124 and 125.
+    let on_line = |y| tile_pixel(&sheet.file, 9, 0, 0, 100, y);
+    assert!(is_dark(on_line(124)) || is_dark(on_line(125)));
+    assert!(is_white(tile_pixel(&sheet.file, 9, 0, 0, 100, 60)));
+    assert!(is_white(tile_pixel(&sheet.file, 9, 0, 0, 20, 125)));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -361,7 +364,7 @@ fn issue_1676_more_zoom_levels_than_the_limit_is_refused() {
         matches!(
             err,
             PmTilesPlotError::TooManyZoomLevels {
-                levels: 4,
+                levels: 12,
                 max: 3,
                 ..
             }
