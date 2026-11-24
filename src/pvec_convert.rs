@@ -2925,7 +2925,23 @@ impl<'a> PvecConversion<'a> {
                 }
                 match pending {
                     Some(Body::Text(lines)) => texts.extend(carried_ids.into_iter().zip(lines)),
-                    Some(Body::Fill(f)) => fills.push((carried_ids, f)),
+                    Some(Body::Fill(mut f)) => {
+                        // The plot style table's colour and screening for the fill's ACI, as a stroke
+                        // gets them: a table that plots ACI 9 black plots a fill in ACI 9 black (#1670).
+                        if let (Some(t), Some(LeafPaint::Colour(SourceColour::Aci(aci)))) =
+                            (table, paints.get(&leaf_key_of(&raw.provenance)))
+                        {
+                            let [r, g, b, a] = f.rgba.to_be_bytes();
+                            let [r, g, b] = t.resolve_color(*aci).map_or([r, g, b], |c| {
+                                c.map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)
+                            });
+                            let s = f64::from(t.resolve_screening(*aci));
+                            let [r, g, b] = [r, g, b]
+                                .map(|c| (255.0 - (255.0 - f64::from(c)) * s).round() as u8);
+                            f.rgba = u32::from_be_bytes([r, g, b, a]);
+                        }
+                        fills.push((carried_ids, f));
+                    }
                     None => {}
                 }
                 if stop {
