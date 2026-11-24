@@ -586,6 +586,7 @@ fn issue_1670_a_transparent_fill_is_thinned_toward_the_paper() {
         .unit(SourceUnit::Millimeters)
         .view_profile(ViewProfile::print_profile("A3"))
         .layouts(["A3"])
+        .plot_style_table(PlotStyleTable::identity("own.ctb"))
         .fills(true)
         .convert_with::<AcadrustProvider>()
         .unwrap();

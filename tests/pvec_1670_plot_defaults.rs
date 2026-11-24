@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use acadrust::entities::{Line, Solid, Text};
 use acadrust::objects::ObjectType;
 use acadrust::plot_style::PlotStyleTable;
-use acadrust::types::{Color, LineWeight, Vector3};
+use acadrust::types::{Color, LineWeight, Transparency, Vector3};
 use acadrust::{CadDocument, DwgWriter, EntityType};
 use libviprs::cad::CadSource;
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
@@ -252,4 +252,37 @@ fn issue_1670_the_notes_name_the_built_in_default_only_when_it_was_used() {
         "{:?}",
         some.notes
     );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_no_table_a_transparent_fill_is_still_thinned_toward_the_paper() {
+    // A red SOLID that is 60 percent transparent is 40 percent black on white: (153, 153, 153).
+    let dir = scratch("alpha");
+    let mut doc = CadDocument::new();
+    doc.add_layout("A3").unwrap();
+    let mut solid = Solid::new(
+        Vector3::new(300.0, 50.0, 0.0),
+        Vector3::new(330.0, 50.0, 0.0),
+        Vector3::new(300.0, 80.0, 0.0),
+        Vector3::new(330.0, 80.0, 0.0),
+    );
+    solid.common.color = Color::Index(1);
+    solid.common.transparency = Transparency::Explicit(153);
+    doc.add_entity_to_layout(EntityType::Solid(solid), "A3")
+        .unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dest = dir.join("out.pdf");
+    PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"])
+        .fills(true)
+        .convert_with::<AcadrustProvider>()
+        .unwrap();
+    let doc = Document::load(&dest).unwrap();
+    let id = doc.get_pages()[&1];
+    let ops = doc.get_and_decode_page_content(id).unwrap().operations;
+    let f = fills_and_texts(&ops);
+    assert_eq!(f, [("fill", [153, 153, 153])]);
 }
