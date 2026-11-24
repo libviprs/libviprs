@@ -44,6 +44,8 @@ fn set_plot(doc: &mut CadDocument, s: &Sheet) {
     layout.paper_width = s.1;
     layout.paper_height = s.2;
     layout.plot_rotation = s.3;
+    layout.plot_flags.print_lineweights = true;
+    layout.plot_flags.plot_plot_styles = true;
     layout.plot_paper_units = 1;
     layout.plot_type = 5;
     layout.plot_scale_numerator = 1.0;

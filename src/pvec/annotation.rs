@@ -212,7 +212,8 @@ pub(crate) fn map(
             if rings.is_empty() {
                 return Err("it has no boundary");
             }
-            z_axis_flip(normal).ok_or("its normal is not the Z axis")?;
+            let flip = z_axis_flip(normal).ok_or("its normal is not the Z axis")?;
+            let to_block = |x: f64, y: f64| if flip { [-x, y, 0.0] } else { [x, y, 0.0] };
             // PVec's container stores straight polylines and refuses a ring with arcs in it, so an
             // arc becomes short chords. A corner repeated up to rounding noise is one corner, and
             // a ring left with fewer than three has no area, so it adds nothing to the fill.
@@ -265,6 +266,14 @@ pub(crate) fn map(
                         .map(|[x, y]| RawVertex { x, y, bulge: 0.0 })
                         .collect()
                 })
+            }
+            // A fill is carried whole or not at all: one with a corner outside the sheet is not.
+            if !rings
+                .iter()
+                .flatten()
+                .all(|v| keep(leaf.map_point(to_block(v.x, v.y))))
+            {
+                return Err(CLIPPED);
             }
             let carriers: Vec<RawEntity> = rings
                 .iter()

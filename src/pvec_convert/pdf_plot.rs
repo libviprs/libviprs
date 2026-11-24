@@ -5,19 +5,20 @@
 //! the paper, and its curves are drawn as stroked polylines, black, at the drawing's default
 //! lineweight. No text is written (it waits for #1621) and no font is put on the page.
 
-use crate::CancelToken;
-use crate::pvec::SourceLimits;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use acadrust::plot_style::PlotStyleTable;
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
+use pvec_components::{Fill, HatchStream, TextStream};
 use pvec_facade::Curve;
 use pvec_facade::components::{LineStyleStream, StrokePaintStream, StrokeWidth};
-use pvec_geometry::Curve2d;
+use pvec_geometry::{Curve2d, Side};
 
 use super::{PlotSettings, PvecConversion, PvecConvertError};
+use crate::CancelToken;
 use crate::cad::CadSource;
+use crate::pvec::SourceLimits;
 use crate::pvec::components::StreamSelection;
 use crate::pvec::publish::open_published;
 use crate::pvec::report::SheetSummary;
@@ -111,7 +112,7 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
-    /// Stops the plot once `cancel` is cancelled.
+    /// Stops the plot at the next layout once `cancel` is cancelled; no file is left.
     #[must_use]
     pub fn cancel(mut self, cancel: CancelToken) -> Self {
         self.cancel = cancel;
@@ -132,7 +133,7 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
-    /// Fill solids.
+    /// Fill solids and wide strokes.
     #[must_use]
     pub fn fills(mut self, on: bool) -> Self {
         self.fills = on;
@@ -145,8 +146,7 @@ impl<'a> PdfPlot<'a> {
     ///
     /// As [`convert_with`](Self::convert_with).
     pub fn convert(self) -> Result<PdfPlotOutput, PvecConvertError> {
-        let _ = (&self.cancel, &self.limits, self.texts, self.fills);
-        self.convert_with::<crate::pvec::dwg_acadrust::AcadrustProvider>()
+        self.run::<crate::pvec::dwg_acadrust::AcadrustProvider>(|p| Some(p.source_unit()))
     }
 
     /// Writes the PDF with provider `P`.
@@ -157,8 +157,21 @@ impl<'a> PdfPlot<'a> {
     /// [`PvecConvertError::View`], and a layout that has nothing to draw fails as its conversion
     /// does.
     pub fn convert_with<P: DwgProvider>(self) -> Result<PdfPlotOutput, PvecConvertError> {
-        let unit = self.unit.ok_or(PvecConvertError::UnitRequired)?;
+        self.run::<P>(|_| None)
+    }
+
+    fn run<P: DwgProvider>(
+        self,
+        file_unit: impl FnOnce(&P) -> Option<SourceUnit>,
+    ) -> Result<PdfPlotOutput, PvecConvertError> {
+        if self.cancel.is_cancelled() {
+            return Err(PvecConvertError::Cancelled);
+        }
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
+        let unit = self
+            .unit
+            .or_else(|| file_unit(&provider))
+            .ok_or(PvecConvertError::UnitRequired)?;
         let paper: Vec<String> = provider
             .layouts()
             .map_err(|e| PvecConvertError::View(e.into()))?
@@ -203,6 +216,9 @@ impl<'a> PdfPlot<'a> {
             .iter()
             .enumerate()
             .map(|(n, name)| {
+                if self.cancel.is_cancelled() {
+                    return Err(PvecConvertError::Cancelled);
+                }
                 let mut profile = self.profile.clone();
                 profile.space = SpaceSelection::PaperLayout((*name).clone());
                 let file = work.join(format!("{n}.pvec"));
@@ -210,17 +226,26 @@ impl<'a> PdfPlot<'a> {
                     .view_profile(profile)
                     .plot_settings(self.settings.clone());
                 conversion.empty_sheet_ok = true;
+                conversion = conversion
+                    .limits(self.limits)
+                    .cancel(self.cancel.clone())
+                    .texts(self.texts)
+                    .fills(self.fills)
+                    .components(StreamSelection::ALL);
                 if let Some(table) = &self.table {
-                    conversion = conversion
-                        .plot_style_table(table.clone())
-                        .components(StreamSelection::ALL);
+                    conversion = conversion.plot_style_table(table.clone());
                 }
                 let out = conversion.run(&provider, unit)?;
                 let sheet = out.report.sheet;
+                let rotation = sheet
+                    .as_ref()
+                    .filter(|s| s.frame == "paper")
+                    .and_then(|s| s.plot.as_ref())
+                    .map_or(0, |p| p.rotation);
                 let page = if out.written == 0 {
                     blank_page(sheet.as_ref(), unit)
                 } else {
-                    read_page(&file).map_err(PvecConvertError::Publish)?
+                    read_page(&file, rotation).map_err(PvecConvertError::Publish)?
                 };
                 Ok((page, sheet.map(|s| s.notes).unwrap_or_default()))
             })
@@ -246,14 +271,28 @@ impl<'a> PdfPlot<'a> {
     }
 }
 
-/// One page: its size in points and the content stream that draws it.
+/// One page: its box in points, the content stream that draws it, and the fonts it uses.
 struct Page {
+    /// The box, in points: the sheet's frame.
     size: [f64; 2],
+    /// `/Rotate`: 0, 90 or 270. A layout rotated a quarter turn is displayed turned.
+    rotate: i64,
     content: String,
+    text: bool,
 }
 
+/// A path segment in page points.
+enum Seg {
+    Move(f64, f64),
+    Line(f64, f64),
+    Curve([f64; 6]),
+}
+
+/// A stroke or a fill's outline as segments, each run starting with a [`Seg::Move`].
+type Runs = Vec<Seg>;
+
 /// Reads a scratch artifact into a page: the frame is the paper, the curves are the strokes.
-fn read_page(artifact: &Path) -> Result<Page, crate::pvec::publish::PublishError> {
+fn read_page(artifact: &Path, rotation: i16) -> Result<Page, crate::pvec::publish::PublishError> {
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
     const DEFAULT_WIDTH_MM: f64 = 0.25;
     let other = |e: &dyn std::fmt::Display| {
@@ -271,44 +310,155 @@ fn read_page(artifact: &Path) -> Result<Page, crate::pvec::publish::PublishError
         .and_then(|s| StrokePaintStream::decode(&s.payload).ok());
     let style =
         payload(LineStyleStream::CAPABILITY).and_then(|s| LineStyleStream::decode(&s.payload).ok());
+    let texts = payload(TextStream::CAPABILITY).and_then(|s| TextStream::decode(&s.payload).ok());
+    let hatches =
+        payload(HatchStream::CAPABILITY).and_then(|s| HatchStream::decode(&s.payload).ok());
     let width_pt = |mm: f64| mm / 1000.0 * POINTS_PER_METRE;
-    let mut content = String::new();
-    for (id, curve) in reader.entities().map_err(|e| other(&e))? {
-        // Stroke widths are in millimetres, as a lineweight is.
-        let mm = style
-            .as_ref()
-            .and_then(|s| {
-                let at = s.assignments.iter().find(|(e, _)| *e == id)?.1;
-                match s.styles.get(at as usize)?.width? {
-                    StrokeWidth::Width(w) => Some(w),
-                    StrokeWidth::Thinnest => Some(0.0),
-                }
-            })
-            .unwrap_or(DEFAULT_WIDTH_MM);
-        let [r, g, b, _] = paint
-            .as_ref()
-            .and_then(|p| p.colour_of(id))
-            .unwrap_or(0x0000_00ff)
-            .to_be_bytes();
-        content.push_str(&format!(
-            "{:.4} w\n{:.4} {:.4} {:.4} RG\n",
-            width_pt(mm),
+    let rgb = |word: u32| {
+        let [r, g, b, _] = word.to_be_bytes();
+        format!(
+            "{:.4} {:.4} {:.4}",
             f64::from(r) / 255.0,
             f64::from(g) / 255.0,
             f64::from(b) / 255.0
-        ));
-        for run in polylines(&curve) {
-            for (i, (x, y)) in run.into_iter().enumerate() {
-                let (x, y) = to_pt(x, y);
-                content.push_str(&format!(
-                    "{x:.4} {y:.4} {}\n",
-                    if i == 0 { "m" } else { "l" }
-                ));
+        )
+    };
+    let entities = reader.entities().map_err(|e| other(&e))?;
+    let boundary: std::collections::HashSet<_> = hatches
+        .iter()
+        .flat_map(|h| h.records.iter().flat_map(|r| r.boundary.iter().copied()))
+        .collect();
+    let mut content = String::new();
+
+    // Fills first, under the strokes.
+    for record in hatches.iter().flat_map(|h| &h.records) {
+        let Fill::Solid { rgba } = &record.fill else {
+            continue;
+        };
+        let mut runs: Runs = Vec::new();
+        for id in &record.boundary {
+            if let Some((_, curve)) = entities.iter().find(|(e, _)| e == id) {
+                runs.extend(segments(curve, &to_pt));
             }
-            content.push_str("S\n");
+        }
+        let word = record
+            .boundary
+            .first()
+            .and_then(|id| paint.as_ref()?.colour_of(*id))
+            .unwrap_or(*rgba);
+        content.push_str(&format!("{} rg\n", rgb(word)));
+        push_path(&mut content, &runs, true);
+        content.push_str("f*\n");
+    }
+
+    for (id, curve) in &entities {
+        if boundary.contains(id) {
+            continue;
+        }
+        let def = style.as_ref().and_then(|s| {
+            let at = s.assignments.iter().find(|(e, _)| e == id)?.1;
+            s.styles.get(at as usize)
+        });
+        // Stroke widths are in millimetres, as a lineweight is.
+        let mm = match def.and_then(|d| d.width) {
+            Some(StrokeWidth::Width(w)) => w,
+            Some(StrokeWidth::Thinnest) => 0.0,
+            None => DEFAULT_WIDTH_MM,
+        };
+        let word = paint
+            .as_ref()
+            .and_then(|p| p.colour_of(*id))
+            .unwrap_or(0x0000_00ff);
+        content.push_str(&format!(
+            "{:.4} w\n{} RG\n1 J 1 j\n",
+            width_pt(mm),
+            rgb(word)
+        ));
+        // Dashes are in the sheet's unit, as the coordinates are.
+        let dashes = def.map(|d| d.dashes.as_slice()).unwrap_or_default();
+        if dashes.is_empty() {
+            content.push_str("[] 0 d\n");
+        } else {
+            let list: Vec<String> = dashes.iter().map(|d| format!("{:.4}", d * k)).collect();
+            content.push_str(&format!(
+                "[{}] {:.4} d\n",
+                list.join(" "),
+                def.map_or(0.0, |d| d.phase) * k
+            ));
+        }
+        let runs = segments(curve, &to_pt);
+        push_path(&mut content, &runs, false);
+        content.push_str("S\n");
+    }
+
+    let mut text = false;
+    for t in texts.iter().flat_map(|t| &t.records) {
+        let word = paint
+            .as_ref()
+            .and_then(|p| p.colour_of(t.entity))
+            .unwrap_or(0x0000_00ff);
+        let (x, y) = to_pt(t.x, t.y);
+        let (s, c) = t.rotation.sin_cos();
+        content.push_str(&format!(
+            "BT\n/F1 {:.4} Tf\n{} rg\n{c:.6} {s:.6} {:.6} {c:.6} {x:.4} {y:.4} Tm\n({}) Tj\nET\n",
+            t.height * k,
+            rgb(word),
+            -s,
+            pdf_string(&t.text)
+        ));
+        text = true;
+    }
+
+    // A layout rotated a quarter turn is plotted with the page turned: the box is the sheet's
+    // frame, as the plotter feeds it, and `/Rotate` shows it the way the paper is held. This is
+    // what a plotter's own PDF does (a portrait Tabloid sheet at rotation 1 is a landscape box
+    // rotated 270).
+    let rotate = match rotation {
+        1 => 270,
+        3 => 90,
+        _ => 0,
+    };
+    Ok(Page {
+        size,
+        rotate,
+        content,
+        text,
+    })
+}
+
+/// A page's content as a PDF literal string: Latin-1, with anything else as `?`.
+fn pdf_string(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '(' | ')' | '\\' => format!("\\{c}"),
+            ' '..='~' => c.to_string(),
+            c if (c as u32) < 256 => format!("\\{:03o}", c as u32),
+            _ => "?".to_owned(),
+        })
+        .collect()
+}
+
+fn push_path(content: &mut String, runs: &Runs, close: bool) {
+    let mut open = false;
+    for seg in runs {
+        match seg {
+            Seg::Move(x, y) => {
+                if close && open {
+                    content.push_str("h\n");
+                }
+                open = true;
+                content.push_str(&format!("{x:.4} {y:.4} m\n"));
+            }
+            Seg::Line(x, y) => content.push_str(&format!("{x:.4} {y:.4} l\n")),
+            Seg::Curve(p) => content.push_str(&format!(
+                "{:.4} {:.4} {:.4} {:.4} {:.4} {:.4} c\n",
+                p[0], p[1], p[2], p[3], p[4], p[5]
+            )),
         }
     }
-    Ok(Page { size, content })
+    if close {
+        content.push_str("h\n");
+    }
 }
 
 /// A paper with nothing on it: the sheet's box in its unit, which is inches, millimetres or the
@@ -327,29 +477,104 @@ fn blank_page(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> Page {
         .unwrap_or([0.0; 2]);
     Page {
         size: side,
+        rotate: 0,
         content: String::new(),
+        text: false,
     }
 }
 
-/// A curve as polylines. A bare line has no ends (a trimmed one does), so it has nothing to draw.
-fn polylines(curve: &Curve) -> Vec<Vec<(f64, f64)>> {
-    // Segments a curved piece is drawn with.
-    const CURVED: usize = 96;
-    let along = |c: &dyn Curve2d, n: usize| {
+/// A curve as segments in page points. A bare line has no ends (a trimmed one does), so it has
+/// nothing to draw. Circles, ellipses and trimmed pieces of them are cubic Beziers, a quarter turn
+/// each; splines and Beziers are cubic Hermite spans of their own derivative.
+fn segments(curve: &Curve, to_pt: &dyn Fn(f64, f64) -> (f64, f64)) -> Runs {
+    let pt = |c: &dyn Curve2d, t: f64| {
         let d = c.domain();
-        (0..=n)
-            .filter_map(|i| {
-                let t = d.lo() + d.width() * (i as f64) / (n as f64);
-                c.eval(t.min(d.hi())).ok().map(|p| (p.x, p.y))
-            })
-            .collect::<Vec<_>>()
+        c.eval(t.clamp(d.lo(), d.hi()))
+            .ok()
+            .map(|p| to_pt(p.x, p.y))
+    };
+    // Cubic spans over the curve's domain; `angular` curves follow the circle rule for the
+    // handle length (4/3 tan(a/4) of the speed), the others the Hermite one (a third of it).
+    let spans = |c: &dyn Curve2d, n: usize, angular: bool| -> Runs {
+        let d = c.domain();
+        let h = d.width() / n as f64;
+        let handle = if angular {
+            4.0 / 3.0 * (h / 4.0).tan()
+        } else {
+            h / 3.0
+        };
+        let mut out = Vec::new();
+        for i in 0..n {
+            let (t0, t1) = (d.lo() + h * i as f64, d.lo() + h * (i + 1) as f64);
+            let (Some(p0), Some(p1)) = (pt(c, t0), pt(c, t1)) else {
+                continue;
+            };
+            if i == 0 {
+                out.push(Seg::Move(p0.0, p0.1));
+            }
+            let slope = |t: f64, sign: f64| {
+                let dd = c.derivative(t.clamp(d.lo(), d.hi()), 1, Side::Right).ok()?;
+                // the derivative is in drawing units; the page is the same map scaled
+                let (ox, oy) = to_pt(0.0, 0.0);
+                let (ex, ey) = to_pt(dd.x * sign, dd.y * sign);
+                Some((ex - ox, ey - oy))
+            };
+            let (Some(d0), Some(d1)) = (slope(t0, 1.0), slope(t1, -1.0)) else {
+                out.push(Seg::Line(p1.0, p1.1));
+                continue;
+            };
+            out.push(Seg::Curve([
+                p0.0 + d0.0 * handle,
+                p0.1 + d0.1 * handle,
+                p1.0 + d1.0 * handle,
+                p1.1 + d1.1 * handle,
+                p1.0,
+                p1.1,
+            ]));
+        }
+        out
+    };
+    let quarter_turns = |c: &dyn Curve2d| {
+        (c.domain().width() / std::f64::consts::FRAC_PI_2)
+            .ceil()
+            .max(1.0) as usize
     };
     match curve {
         Curve::Line(_) => Vec::new(),
-        Curve::Trimmed(t) if matches!(t.basis(), Curve::Line(_)) => vec![along(t, 1)],
-        Curve::Polyline(p) => vec![p.vertices().iter().map(|v| (v.x, v.y)).collect()],
-        Curve::Composite(c) => c.segments().iter().flat_map(polylines).collect(),
-        other => vec![along(other, CURVED)],
+        Curve::Trimmed(t) => match t.basis() {
+            Curve::Line(_) => spans_line(t, &pt),
+            Curve::Circle(_) | Curve::Ellipse(_) => spans(t, quarter_turns(t), true),
+            _ => spans(t, 16, false),
+        },
+        Curve::Polyline(p) => {
+            let mut out = Vec::new();
+            for (i, v) in p.vertices().iter().enumerate() {
+                let (x, y) = to_pt(v.x, v.y);
+                out.push(if i == 0 {
+                    Seg::Move(x, y)
+                } else {
+                    Seg::Line(x, y)
+                });
+            }
+            out
+        }
+        Curve::Composite(c) => {
+            let mut out: Runs = Vec::new();
+            for s in c.segments() {
+                out.extend(segments(s, to_pt));
+            }
+            out
+        }
+        Curve::Circle(_) | Curve::Ellipse(_) => spans(curve, 4, true),
+        other => spans(other, 16, false),
+    }
+}
+
+fn spans_line(t: &dyn Curve2d, pt: &dyn Fn(&dyn Curve2d, f64) -> Option<(f64, f64)>) -> Runs {
+    let d = t.domain();
+    match (pt(t, d.lo()), pt(t, d.hi())) {
+        (Some(a), Some(b)) => vec![Seg::Move(a.0, a.1), Seg::Line(b.0, b.1)],
+        _ => Vec::new(),
     }
 }
 
@@ -357,15 +582,27 @@ fn polylines(curve: &Curve) -> Vec<Vec<(f64, f64)>> {
 fn write_pdf(dest: &Path, pages: impl Iterator<Item = Page>) -> std::io::Result<()> {
     let mut doc = Document::with_version("1.7");
     let pages_id = doc.new_object_id();
+    let font = doc.add_object(dictionary! {
+        "Type" => "Font",
+        "Subtype" => "Type1",
+        "BaseFont" => "Helvetica",
+        "Encoding" => "WinAnsiEncoding",
+    });
     let mut kids = Vec::new();
     for page in pages {
         let content = doc.add_object(Stream::new(Dictionary::new(), page.content.into_bytes()));
+        let [w, h] = page.size;
+        let resources = if page.text {
+            dictionary! { "Font" => dictionary! { "F1" => font } }
+        } else {
+            Dictionary::new()
+        };
         let id = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,
-            "MediaBox" => vec![0.into(), 0.into(), Object::Real(page.size[0] as f32), Object::Real(page.size[1] as f32)],
-            "Rotate" => 0,
-            "Resources" => Dictionary::new(),
+            "MediaBox" => vec![0.into(), 0.into(), Object::Real(w as f32), Object::Real(h as f32)],
+            "Rotate" => page.rotate,
+            "Resources" => resources,
             "Contents" => content,
         });
         kids.push(Object::Reference(id));

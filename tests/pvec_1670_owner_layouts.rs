@@ -91,6 +91,23 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
             std::env::temp_dir().join(format!("libviprs-1670-{}", std::process::id()))
         });
     fs::create_dir_all(&out_dir).unwrap();
+    // One layout on its own first, so a slow plot says which part is slow.
+    let started = std::time::Instant::now();
+    let one = out_dir.join("first.pdf");
+    PdfPlot::new(CadSource::Path(&dwg), &one)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile(&paper[0].name))
+        .plot_style_table(
+            PlotStyleTable::from_bytes("owner.ctb", &fs::read(&ctb).unwrap()).unwrap(),
+        )
+        .layouts([paper[0].name.clone()])
+        .convert_with::<AcadrustProvider>()
+        .unwrap();
+    eprintln!(
+        "first layout alone: {:.1} s",
+        started.elapsed().as_secs_f64()
+    );
+    let started = std::time::Instant::now();
     let dest = out_dir.join("plotted.pdf");
     let plotted = PdfPlot::new(CadSource::Path(&dwg), &dest)
         .unit(SourceUnit::Millimeters)
@@ -99,7 +116,11 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
         .layouts(paper.iter().map(|l| l.name.clone()))
         .convert_with::<AcadrustProvider>()
         .unwrap();
-    eprintln!("notes {:?}", plotted.notes);
+    eprintln!(
+        "all layouts: {:.1} s, notes {:?}",
+        started.elapsed().as_secs_f64(),
+        plotted.notes
+    );
 
     let got = libviprs::pdf_info(&dest).unwrap();
     let want = libviprs::pdf_info(&reference).unwrap();
