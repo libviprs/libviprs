@@ -2353,7 +2353,20 @@ impl<'a> PvecConversion<'a> {
                     // The table's lineweight and linetype for the stroke's ACI beat the
                     // object's; an entry that says "object" leaves them (#1630).
                     if let (Some(t), Some(aci)) = (table, effective_aci) {
-                        if let Some(mm) = t.resolve_lineweight(aci) {
+                        // A style's lineweight is one more than the list's index: the editor's
+                        // list is "use the object's" and then the table from its first entry
+                        // (#1692, acadrust#73), so 0 and 255 leave the object's and N is entry N - 1.
+                        let style = t.aci_entries[usize::from(aci)].lineweight;
+                        if let Some(mm) = usize::from(style)
+                            .checked_sub(1)
+                            .filter(|_| style != 255)
+                            .and_then(|i| t.lineweights.get(i))
+                        {
+                            let mm = if t.apply_factor {
+                                mm * t.scale_factor.max(0.0)
+                            } else {
+                                *mm
+                            };
                             input.lineweight = Some(DwgLineweight::Hundredths(
                                 (f64::from(mm) * 100.0).round() as i16,
                             ));

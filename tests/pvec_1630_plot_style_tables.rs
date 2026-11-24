@@ -228,19 +228,20 @@ fn print_profile_applies_ctb_colour_screening_lineweight_linetype() {
         w[&h[0]], wp[&h[0]],
         "without the table ACI 1 is red, so the table is what changed it"
     );
-    // The table gives every ACI an explicit lineweight: 0.05 mm, and 0.13 mm for ACI 7 (the
-    // object's own lines are 0.25 mm).
+    // The table gives every ACI an explicit lineweight: style 1, the list's first entry, 0.00 mm
+    // (the thinnest line), and style 4, 0.10 mm, for ACI 7 (the object's own lines are 0.25 mm).
     let s = styles(&run);
     let sp = styles(&plain);
     let object = width(&sp, h[1]);
     assert!(
-        (width(&s, h[3]) / object - 0.13 / 0.25).abs() < 1e-9,
-        "ACI 7 is 0.13 mm"
+        (width(&s, h[3]) / object - 0.10 / 0.25).abs() < 1e-9,
+        "ACI 7 is 0.10 mm"
     );
     for i in [0, 1, 2, 4, 5, 6, 7, 8] {
-        assert!(
-            (width(&s, h[i]) / object - 0.05 / 0.25).abs() < 1e-9,
-            "ACI {} is 0.05 mm",
+        assert_eq!(
+            s.get(&h[i]).and_then(|d| d.0),
+            Some(StrokeWidth::Thinnest),
+            "ACI {} is the thinnest line",
             acis[i]
         );
     }
@@ -310,9 +311,9 @@ fn screening_lightens_the_stroke() {
 #[cfg_attr(miri, ignore)]
 fn the_lineweight_list_sets_the_width() {
     let mut t = identity();
-    // Index 13 of the standard list is 0.50 mm.
+    // Index 13 of the standard list is 0.50 mm, which is style 14 (#1692).
     assert!((t.lineweights[13] - 0.50).abs() < 1e-6);
-    t.aci_entries[6].lineweight = 13;
+    t.aci_entries[6].lineweight = 14;
     let (bytes, h) = drawing(&[case(6), case(8)]);
     let s = styles(&convert("lineweight", &bytes, Some(t)));
     assert!(
@@ -325,7 +326,7 @@ fn the_lineweight_list_sets_the_width() {
 #[cfg_attr(miri, ignore)]
 fn apply_factor_scales_a_table_lineweight_and_not_the_object_one() {
     let mut t = identity();
-    t.aci_entries[6].lineweight = 13;
+    t.aci_entries[6].lineweight = 14;
     t.apply_factor = true;
     t.scale_factor = 2.0;
     let (bytes, h) = drawing(&[case(6), case(8)]);
