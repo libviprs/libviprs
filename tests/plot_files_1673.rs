@@ -348,6 +348,8 @@ fn layout_plot(paper: [f64; 2], margins: [f64; 4]) -> LayoutPlot {
         rotation: 0,
         margins,
         origin: [0.0; 2],
+        paper_image_origin: [0.0; 2],
+        limits: [0.0; 4],
         style_sheet: "monochrome.ctb".into(),
         print_lineweights: true,
         scale_lineweights: false,
