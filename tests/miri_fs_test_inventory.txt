@@ -824,6 +824,8 @@ annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_fill_behind_a
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1692_a_ctb_lineweight_is_one_more_than_the_index_of_the_list
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_transparent_fill_is_thinned_toward_the_paper
 annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_fill_crossing_the_viewport_edge_is_cut_to_it
+annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_a_solid_fill_is_outlined_at_the_thinnest_line_in_its_own_colour
+annotated   fs-detected  tests/pvec_1670_plot_pdf.rs::issue_1670_text_is_sized_so_a_capital_stands_one_text_height
 annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_a_two_line_custom_pattern_is_drawn_inside_its_boundary
 annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_a_dashed_pattern_line_is_cut_into_dashes
 annotated   fs-detected  tests/pvec_1670_hatch_patterns.rs::issue_1670_an_ansi_style_pattern_is_45_degree_lines_at_its_spacing

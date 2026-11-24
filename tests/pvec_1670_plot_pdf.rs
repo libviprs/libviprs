@@ -651,3 +651,54 @@ fn issue_1670_a_fill_crossing_the_viewport_edge_is_cut_to_it() {
         "{xs:?}"
     );
 }
+
+// ---- a solid fill's outline ---------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_solid_fill_is_outlined_at_the_thinnest_line_in_its_own_colour() {
+    // A plotter draws a solid hatch or SOLID filled and stroked, so its edge is the same colour as the
+    // fill and as thin as a line gets: a closed path stroked at 0 w right after the fill.
+    let (out, pdf) = plot("outline", |p| p);
+    out.unwrap();
+    let o = ops(&pdf, 1);
+    let at = o.iter().position(|o| o.operator == "f*").expect("a fill");
+    let fill = o[..at].iter().rev().find(|o| o.operator == "rg").unwrap();
+    let after = &o[at..];
+    let stroke = after
+        .iter()
+        .position(|o| o.operator == "S")
+        .expect("an outline");
+    let outline = &after[..stroke];
+    assert!(
+        outline
+            .iter()
+            .any(|o| o.operator == "RG" && o.operands == fill.operands),
+        "the outline is not in the fill's colour: {outline:?}"
+    );
+    assert!(
+        outline
+            .iter()
+            .any(|o| o.operator == "w" && real(&o.operands[0]) == 0.0),
+        "the outline is not at 0 w: {outline:?}"
+    );
+    assert!(
+        outline.iter().any(|o| o.operator == "h"),
+        "the outline is not closed"
+    );
+}
+
+// ---- the size of text -------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_text_is_sized_so_a_capital_stands_one_text_height() {
+    // A text height in a drawing is the height of a capital, and Helvetica's capitals stand 0.716 em
+    // high, so a 5 mm text is set in a 5 / 0.716 mm face.
+    let (out, pdf) = plot("textsize", |p| p);
+    out.unwrap();
+    let o = ops(&pdf, 1);
+    let tf = o.iter().find(|o| o.operator == "Tf").expect("text is set");
+    let size = real(&tf.operands[1]) / PT_PER_MM;
+    assert!((size - 5.0 / 0.716).abs() < 0.05, "{size} mm");
+}
