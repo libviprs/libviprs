@@ -801,6 +801,15 @@ annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::the_recorded_prop
 annotated   fs-detected  tests/pvec_1630_plot_style_tables.rs::without_a_table_the_conversion_is_what_it_was
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_millimetre_sheet_at_1_to_0_04_draws_at_full_paper_size
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_millimetre_sheet_at_1_to_1_is_unchanged
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_viewport_and_what_it_shows_scale_together
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_lineweight_is_not_scaled
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_one_to_one_sheet_is_bit_identical
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_upside_down_sheet_turns_about_the_scaled_frame
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_plot_window_is_scaled_with_the_sheet
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_the_record_still_states_the_plot_scale
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_paper_units_that_are_not_a_length_are_left_alone
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_callers_plot_scale_is_applied_like_the_stored_one
+annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_fitted_sheet_does_not_take_the_stored_scale_twice
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_inch_sheet_at_1_to_1_016_draws_at_full_paper_size
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_the_callers_unit_does_not_change_a_plotted_sheet
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_real_tabloid_layout_draws_at_full_paper_size
