@@ -32,14 +32,14 @@ fn table() -> PlotStyleTable {
     for aci in 1..=4u8 {
         t.aci_entries[usize::from(aci)].lineweight = aci;
     }
+    t.aci_entries[5].lineweight = 0;
+    t.aci_entries[6].lineweight = 9;
     t
 }
 
 /// The width in millimetres each of ACI 1 to 6 is plotted at, for lines the object draws at 0.25 mm,
 /// or `None` for a thinnest line. ACI 5 and 6 are the styles the table leaves at 0 and past its end.
-fn widths(tag: &str, mut t: PlotStyleTable) -> Vec<Option<f64>> {
-    t.aci_entries[5].lineweight = 0;
-    t.aci_entries[6].lineweight = 9;
+fn widths(tag: &str, t: PlotStyleTable) -> Vec<Option<f64>> {
     let mut doc = CadDocument::new();
     doc.add_layout("Sheet").unwrap();
     for aci in 1..=6u8 {
@@ -120,4 +120,16 @@ fn issue_1692_zero_and_a_number_past_the_list_keep_the_objects_lineweight() {
         (w[5].unwrap() - 0.25).abs() < 1e-6,
         "style past the end: {w:?}"
     );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1692_style_255_keeps_the_objects_lineweight_even_with_a_list_that_long() {
+    // 255 means "use the object's" like 0. With 255 entries the style would name the last one (index
+    // 254, 0.90 mm) if it were read as a list number, so the object's 0.25 mm shows it is not.
+    let mut t = table();
+    t.lineweights = vec![0.90; 255];
+    t.aci_entries[6].lineweight = 255;
+    let w = widths("s255", t);
+    assert!((w[5].unwrap() - 0.25).abs() < 1e-6, "style 255: {w:?}");
 }
