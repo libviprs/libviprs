@@ -12,7 +12,9 @@
 //!   over the entity's `size` when they differ: the frame stays where the drawing puts it and the
 //!   pixels fill it, as AutoCAD does.
 //! * The clip is in the entity's pixel units (top-left origin, y down, an edge is a stored vertex
-//!   plus one half). A pixel is kept when its centre is inside the boundary (outside it for an
+//!   plus one half). That origin is an open assumption: acadrust (pinned rev 5bf63c7) only says
+//!   "image pixel space", the default boundary is symmetric so it does not tell, and I found no
+//!   spec text on hand that settles it, so it wants checking against a drawing with an off-centre clip. A pixel is kept when its centre is inside the boundary (outside it for an
 //!   inverted clip), inside the box the conversion cuts to and inside the viewport's polygon. A kept
 //!   area that is a pixel rectangle only sets `visible_box`; anything else is baked into alpha.
 //! * The file is looked up by the last component of the path the drawing carries, in the directory
@@ -23,7 +25,7 @@ use std::fs;
 use std::io::Cursor;
 use std::path::Path;
 
-use ::image::{DynamicImage, ImageReader};
+use ::image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 
 use crate::pixel::PixelFormat;
 use crate::planner::{Layout, PyramidPlanner};
@@ -34,28 +36,34 @@ use crate::raster_pvec::pyramid::{
 };
 
 /// The most pixels one placed image may have, as for a PDF image.
-const MAX_PIXELS: u64 = 64 << 20;
+pub(super) const MAX_PIXELS: u64 = 64 << 20;
+/// The most images one conversion places.
+pub(super) const MAX_IMAGES: usize = 256;
+/// The most pixels all the images of one conversion may have together.
+pub(super) const MAX_TOTAL_PIXELS: u64 = 256 << 20;
+/// The most memory the decoder may allocate for one image, bytes.
+const MAX_ALLOC: u64 = 1 << 30;
 /// The largest file read.
 const MAX_FILE_BYTES: u64 = 256 << 20;
 
 /// The pyramid of `frame`'s picture read from `dir`, or why the image is not placed. `map` is the
 /// leaf's map from block space into the artifact's frame; `clip_box` and `ring` are what the
-/// conversion cuts to there (the sheet or a viewport's rectangle, and its polygon).
+/// conversion cuts to there (the sheet or a viewport's rectangle, and its polygon). `max_pixels` is
+/// what this image may have: the per-image cap, or what is left of the conversion's total. The size
+/// is read from the header and refused before a pixel is allocated.
 pub(super) fn place(
     frame: &ImageFrame,
     map: impl Fn(Point3) -> [f64; 2],
     dir: &Path,
     clip_box: Option<[f64; 4]>,
     ring: Option<&[[f64; 2]]>,
+    max_pixels: u64,
 ) -> Result<RasterPyramid, String> {
     if !frame.visible {
         return Err("its display is switched off".to_owned());
     }
-    let picture = read(dir, &frame.file_name)?;
+    let picture = read(dir, &frame.file_name, max_pixels.min(MAX_PIXELS))?;
     let (w, h) = (picture.width(), picture.height());
-    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
-        return Err(format!("{w} x {h} pixels is not a size it places"));
-    }
     let (wf, hf) = (f64::from(w), f64::from(h));
 
     // Pixel (0, 0), and one pixel along each axis, through the leaf's map.
@@ -170,14 +178,17 @@ pub(super) fn place(
     Ok(pyramid)
 }
 
-/// The picture the drawing's path names, from `dir` by its last component.
-fn read(dir: &Path, path: &str) -> Result<DynamicImage, String> {
+/// The picture the drawing's path names, from `dir` by its last component. The file has to resolve,
+/// symlinks followed, to a regular file inside `dir`, and its header size has to be within
+/// `max_pixels` before anything is decoded.
+fn read(dir: &Path, path: &str, max_pixels: u64) -> Result<DynamicImage, String> {
     let name = path.rsplit(['\\', '/']).next().unwrap_or_default();
     if name.is_empty() || name == "." || name == ".." || name.contains('\0') {
         return Err(format!("the path {path:?} names no file"));
     }
+    let root = fs::canonicalize(dir).map_err(|e| format!("the image directory: {e}"))?;
     let exact = dir.join(name);
-    let file = if exact.is_file() {
+    let found = if fs::symlink_metadata(&exact).is_ok() {
         exact
     } else {
         fs::read_dir(dir)
@@ -185,23 +196,40 @@ fn read(dir: &Path, path: &str) -> Result<DynamicImage, String> {
             .filter_map(Result::ok)
             .find(|e| e.file_name().to_string_lossy().eq_ignore_ascii_case(name))
             .map(|e| e.path())
-            .filter(|p| p.is_file())
             .ok_or_else(|| format!("{name} is not in the image directory"))?
     };
-    let size = fs::metadata(&file)
-        .map_err(|e| format!("{name}: {e}"))?
-        .len();
-    if size > MAX_FILE_BYTES {
+    let file = fs::canonicalize(&found).map_err(|e| format!("{name}: {e}"))?;
+    if !file.starts_with(&root) {
+        return Err(format!("{name} resolves outside the image directory"));
+    }
+    let meta = fs::metadata(&file).map_err(|e| format!("{name}: {e}"))?;
+    if !meta.is_file() {
+        return Err(format!("{name} is not a regular file"));
+    }
+    if meta.len() > MAX_FILE_BYTES {
         return Err(format!(
-            "{name} is {size} bytes, over the {MAX_FILE_BYTES} limit"
+            "{name} is {} bytes, over the {MAX_FILE_BYTES} limit",
+            meta.len()
         ));
     }
     let bytes = fs::read(&file).map_err(|e| format!("{name}: {e}"))?;
-    ImageReader::new(Cursor::new(bytes))
+    let mut decoder = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| format!("{name}: {e}"))?
-        .decode()
-        .map_err(|e| format!("{name} does not decode ({e})"))
+        .into_decoder()
+        .map_err(|e| format!("{name} does not decode ({e})"))?;
+    let (w, h) = decoder.dimensions();
+    if w == 0 || h == 0 || u64::from(w) * u64::from(h) > max_pixels {
+        return Err(format!(
+            "{name} declares {w} x {h} pixels, over the {max_pixels} it may have"
+        ));
+    }
+    let mut limits = Limits::default();
+    limits.max_alloc = Some(MAX_ALLOC);
+    decoder
+        .set_limits(limits)
+        .map_err(|e| format!("{name}: {e}"))?;
+    DynamicImage::from_decoder(decoder).map_err(|e| format!("{name} does not decode ({e})"))
 }
 
 /// Even-odd crossing count of `p` against the closed polygon `poly`.

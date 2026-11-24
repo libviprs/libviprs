@@ -111,6 +111,91 @@ fn sheet_at(def_path: &str, image: RasterImage, scale: [f64; 2]) -> Vec<u8> {
     bytes
 }
 
+/// A sheet with `n` IMAGEs of the same picture, side by side.
+fn sheet_many(n: usize) -> Vec<u8> {
+    let mut doc = CadDocument::new();
+    let layout = doc.add_layout(SHEET).expect("layout");
+    let Some(ObjectType::Layout(l)) = doc.objects.get_mut(&layout) else {
+        panic!("the layout object");
+    };
+    l.paper_size = "ISO_A3_(420.00_x_297.00_MM)".into();
+    l.paper_width = 420.0;
+    l.paper_height = 297.0;
+    l.plot_paper_units = 1;
+    l.plot_type = 5;
+    l.plot_scale_numerator = 1.0;
+    l.plot_scale_denominator = 1.0;
+    let mut def = ImageDefinition::new("logo.png");
+    def.handle = doc.allocate_handle();
+    def.size_in_pixels = (4, 4);
+    def.is_loaded = true;
+    let def_handle = def.handle;
+    doc.objects
+        .insert(def_handle, ObjectType::ImageDefinition(def));
+    doc.add_entity_to_layout(
+        EntityType::Line(Line::from_points(
+            Vector3::new(0.0, 0.0, 0.0),
+            Vector3::new(10.0, 0.0, 0.0),
+        )),
+        SHEET,
+    )
+    .expect("line");
+    for _ in 0..n {
+        let mut image = logo("logo.png");
+        image.definition_handle = Some(def_handle);
+        doc.add_entity_to_layout(EntityType::RasterImage(image), SHEET)
+            .expect("image");
+    }
+    let mut bytes = Vec::new();
+    DwgWriter::write_to_writer(std::io::Cursor::new(&mut bytes), &doc).expect("write");
+    bytes
+}
+
+/// A PNG of `w` by `h` declared pixels with no pixel data behind it: the header is real, the rest
+/// is not there. A reader that trusts the header allocates for it.
+fn bomb_png(w: u32, h: u32) -> Vec<u8> {
+    fn crc(data: &[u8]) -> u32 {
+        let mut c = 0xFFFF_FFFFu32;
+        for b in data {
+            c ^= u32::from(*b);
+            for _ in 0..8 {
+                c = if c & 1 == 1 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
+            }
+        }
+        !c
+    }
+    let mut ihdr = b"IHDR".to_vec();
+    ihdr.extend(w.to_be_bytes());
+    ihdr.extend(h.to_be_bytes());
+    ihdr.extend([8, 2, 0, 0, 0]);
+    let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    png.extend(13u32.to_be_bytes());
+    png.extend(&ihdr);
+    png.extend(crc(&ihdr).to_be_bytes());
+    // One empty deflate stream as the only IDAT, so the header is followed by a chunk.
+    let mut idat = b"IDAT".to_vec();
+    idat.extend([0x78, 0x9C, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01]);
+    png.extend(8u32.to_be_bytes());
+    png.extend(&idat);
+    png.extend(crc(&idat).to_be_bytes());
+    png.extend(0u32.to_be_bytes());
+    png.extend(b"IEND");
+    png.extend(crc(b"IEND").to_be_bytes());
+    png
+}
+
+fn image_row(out: &PvecConversionOutput) -> &libviprs::pvec::report::EntityRow {
+    out.report
+        .entities
+        .iter()
+        .find(|r| r.source_class == "IMAGE")
+        .expect("a row for the IMAGE")
+}
+
 fn convert(bytes: &[u8], dir: &Path, images: Option<&Path>) -> PvecConversionOutput {
     let dest = dir.join("sheet.pvec");
     let mut c = PvecConversion::new(CadSource::Bytes(bytes), &dest)
@@ -118,7 +203,12 @@ fn convert(bytes: &[u8], dir: &Path, images: Option<&Path>) -> PvecConversionOut
     if let Some(images) = images {
         c = c.images(images);
     }
-    c.convert().expect("the sheet converts")
+    c.convert().unwrap_or_else(|e| {
+        panic!(
+            "the sheet converts: {e:?} / {:?}",
+            std::error::Error::source(&e)
+        )
+    })
 }
 
 /// One raster read back from an artifact: its placement and the full-resolution tile.
@@ -441,8 +531,8 @@ fn issue_1667_the_drawings_own_path_is_never_followed() {
     let dir = scratch("path");
     write_logo(&dir);
     let bytes = sheet(
-        "C:\\clients\\oct\\logos\\logo.png",
-        logo("C:\\clients\\oct\\logos\\logo.png"),
+        "C:\\projects\\site\\logos\\logo.png",
+        logo("C:\\projects\\site\\logos\\logo.png"),
     );
     assert_eq!(rasters(&convert(&bytes, &dir, Some(&dir))).len(), 1);
     // A path that climbs out of the directory finds nothing.
@@ -506,6 +596,94 @@ fn issue_1667_a_placed_image_says_so_on_its_row() {
             .iter()
             .any(|w| w.contains("placed as a raster")),
         "{row:#?}"
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+// ---- hostile images and files ----
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1667_a_huge_declared_size_is_refused_before_it_is_allocated() {
+    let dir = scratch("bomb");
+    fs::write(dir.join("logo.png"), bomb_png(60_000, 60_000)).unwrap();
+    let bytes = sheet("logo.png", logo("logo.png"));
+    let out = convert(&bytes, &dir, Some(&dir));
+    assert!(rasters(&out).is_empty());
+    let row = image_row(&out);
+    assert!(
+        row.warnings
+            .iter()
+            .any(|w| w.contains("not drawn") && w.contains("60000 x 60000")),
+        "{row:#?}"
+    );
+    // The sheet itself still converts, with its line.
+    assert_eq!(out.written, 1);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1667_a_drawing_of_many_images_places_a_bounded_number() {
+    let dir = scratch("many");
+    write_logo(&dir);
+    let bytes = sheet_many(260);
+    let out = convert(&bytes, &dir, Some(&dir));
+    assert_eq!(rasters(&out).len(), 256);
+    let refused = out
+        .report
+        .entities
+        .iter()
+        .filter(|r| r.source_class == "IMAGE")
+        .filter(|r| r.warnings.iter().any(|w| w.contains("already placed 256")))
+        .count();
+    assert_eq!(refused, 4);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1667_a_symlink_out_of_the_directory_is_not_followed() {
+    let dir = scratch("symlink");
+    let (outside, inside) = (dir.join("outside"), dir.join("inside"));
+    fs::create_dir_all(&outside).unwrap();
+    fs::create_dir_all(&inside).unwrap();
+    write_logo(&outside);
+    std::os::unix::fs::symlink(outside.join("logo.png"), inside.join("logo.png")).unwrap();
+    let bytes = sheet("logo.png", logo("logo.png"));
+    let out = convert(&bytes, &dir, Some(&inside));
+    assert!(rasters(&out).is_empty());
+    let row = image_row(&out);
+    assert!(
+        row.warnings
+            .iter()
+            .any(|w| w.contains("outside the image directory")),
+        "{row:#?}"
+    );
+    // A symlink that stays inside is fine.
+    fs::remove_file(inside.join("logo.png")).unwrap();
+    fs::copy(outside.join("logo.png"), inside.join("real.png")).unwrap();
+    std::os::unix::fs::symlink(inside.join("real.png"), inside.join("logo.png")).unwrap();
+    assert_eq!(rasters(&convert(&bytes, &dir, Some(&inside))).len(), 1);
+    fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1667_a_directory_named_like_the_file_is_not_read() {
+    let dir = scratch("notfile");
+    fs::create_dir(dir.join("logo.png")).unwrap();
+    let bytes = sheet("logo.png", logo("logo.png"));
+    let out = convert(&bytes, &dir, Some(&dir));
+    assert!(rasters(&out).is_empty());
+    assert!(
+        image_row(&out)
+            .warnings
+            .iter()
+            .any(|w| w.contains("not a regular file")),
+        "{:#?}",
+        image_row(&out)
     );
     fs::remove_dir_all(&dir).unwrap();
 }

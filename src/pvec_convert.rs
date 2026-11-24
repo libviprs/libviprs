@@ -403,7 +403,9 @@ impl<'a> PvecConversion<'a> {
     /// drawing cannot point at a file outside `dir`), decoded, and written at the IMAGE's
     /// insertion point, scale and rotation, cut to its clip, in the frame of the linework around
     /// it. An IMAGE whose file is not in `dir`, or does not decode, or is switched off, is not
-    /// placed and its row says why. Off by default, and then an IMAGE is only counted (#1328).
+    /// placed and its row says why. A file that resolves outside `dir` (a symlink), is not a regular file,
+    /// declares more than 64 Mpixel, or would take the conversion past 256 images or 256 Mpixel in
+    /// all, is refused the same way. Off by default, and then an IMAGE is only counted (#1328).
     #[must_use]
     pub fn images(mut self, dir: impl Into<PathBuf>) -> Self {
         self.images = Some(dir.into());
@@ -1573,6 +1575,7 @@ impl<'a> PvecConversion<'a> {
         }
         // The IMAGEs placed as rasters (#1667), in the order they were met.
         let mut rasters: Vec<crate::raster_pvec::pyramid::RasterPyramid> = Vec::new();
+        let mut placed_pixels = 0u64;
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         /// The pieces of a line or straight polyline inside the sheet `b`, `[min x, min y, max x,
@@ -2430,14 +2433,27 @@ impl<'a> PvecConversion<'a> {
                         .rsplit(['\\', '/'])
                         .next()
                         .unwrap_or_default();
-                    match dwg_image::place(
-                        &frame,
-                        |p| f.map_point(p),
-                        dir,
-                        clip_box,
-                        ring.map(Vec::as_slice),
-                    ) {
+                    // What the conversion has left: a count and a total of pixels, so a drawing
+                    // of many pictures cannot take the memory (#1667).
+                    let left = dwg_image::MAX_TOTAL_PIXELS.saturating_sub(placed_pixels);
+                    let placed = if rasters.len() >= dwg_image::MAX_IMAGES {
+                        Err(format!(
+                            "the conversion already placed {} images",
+                            dwg_image::MAX_IMAGES
+                        ))
+                    } else {
+                        dwg_image::place(
+                            &frame,
+                            |p| f.map_point(p),
+                            dir,
+                            clip_box,
+                            ring.map(Vec::as_slice),
+                            left,
+                        )
+                    };
+                    match placed {
                         Ok(pyramid) => {
+                            placed_pixels += u64::from(pyramid.width) * u64::from(pyramid.height);
                             rasters.push(pyramid);
                             done.warnings
                                 .push(format!("IMAGE: placed as a raster from {named}"));
