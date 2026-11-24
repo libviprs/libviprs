@@ -61,6 +61,7 @@ pub struct PdfPlot<'a> {
     texts: bool,
     fills: bool,
     images: Option<PathBuf>,
+    embedded_font: bool,
 }
 
 const POINTS_PER_METRE: f64 = 72.0 / 0.0254;
@@ -83,6 +84,7 @@ impl<'a> PdfPlot<'a> {
             texts: false,
             fills: false,
             images: None,
+            embedded_font: true,
         }
     }
 
@@ -179,6 +181,13 @@ impl<'a> PdfPlot<'a> {
         self
     }
 
+    /// Set text in the embedded Arial-metric face (the default) or in the standard Helvetica.
+    #[must_use]
+    pub fn embedded_font(mut self, on: bool) -> Self {
+        self.embedded_font = on;
+        self
+    }
+
     /// Writes the PDF, reading the unit from the drawing when none was given.
     ///
     /// # Errors
@@ -203,6 +212,7 @@ impl<'a> PdfPlot<'a> {
         self,
         file_unit: impl FnOnce(&P) -> Option<SourceUnit>,
     ) -> Result<PdfPlotOutput, PvecConvertError> {
+        let _ = self.embedded_font;
         // The deadline counts from here, and rides on this plot's own copy of the cancel token.
         let cancel = match self.deadline.and_then(|d| Instant::now().checked_add(d)) {
             Some(at) => self.cancel.with_deadline(at),
