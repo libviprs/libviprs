@@ -380,6 +380,29 @@ fn issue_1665_a_plot_window_is_scaled_with_the_linework() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// Plotting upside-down at 1 : 0.04: the linework is drawn at 25 mm a unit, then turned 180
+/// degrees about the frame's centre. A rectangle 25 mm in from the lower left, 225 by 100 mm,
+/// lands 25 mm in from the upper right. Written after the fix, as a guard on the order of the
+/// scale and the turn.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1665_an_upside_down_sheet_at_1_to_0_04_is_scaled_then_turned() {
+    let dir = convert(
+        "flip",
+        Mock {
+            plot: plot(1, [279.4, 431.8], 3, [1.0, 0.04]),
+            paper: vec![rectangle(0x10, [1.0, 1.0], [10.0, 5.0])],
+        },
+        SourceUnit::Millimeters,
+        PlotSettings::default(),
+    );
+    let (frame, min, max, _) = measured(&dir);
+    assert_close("the frame", frame, [0.4318, 0.2794]);
+    assert_close("the rectangle's lower left", min, [0.1818, 0.1544]);
+    assert_close("the rectangle's upper right", max, [0.4068, 0.2544]);
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// The same Tabloid sheet written as a real DWG with acadrust and read back by the default
 /// provider, so the plot scale makes it through the decoder as well as the converter.
 #[test]

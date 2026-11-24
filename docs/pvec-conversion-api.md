@@ -101,6 +101,8 @@ layer state folded in where it changes the answer. A user's entry for a layer wi
 A layer a state only freezes goes in `state_frozen`, a frozen flag like the file's own, so it answers to `frozen` and `frozen_text` and its notes
 follow `frozenLayers`. An entity a layer override hides is counted as `layers.overrides` (`Exclusion::LayerOverridden`, code `LAYER_HIDDEN`).
 
+`check_layer_state(&manifest, &choices)` (#1675) says whether the layer state `choices` names is one the drawing stores (ASCII case-insensitive). When it isn't, it returns `LayerStateNotFound` (`code()` is `LAYER_STATE_NOT_FOUND`) with the name asked for and the states there are, without the ones AutoCAD hides. `apply_choices` itself still falls back to the file's table for an unknown name, so run the check first. In model mode `apply_choices` leaves `viewport_overrides` empty, since those overrides belong to sheets.
+
 ## Every sheet of a drawing
 
 `PvecLayoutSet` (#1564) converts each paper layout to its own artifact, one call for the drawing. It opens the drawing once, walks the paper
