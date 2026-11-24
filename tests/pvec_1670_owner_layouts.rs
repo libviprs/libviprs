@@ -118,6 +118,76 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
     // `LIBVIPRS_OWNER_PLOT_DRAW=no_plot,frozen,off` draws the layers in those states, to see what the
     // plotted PDF shows that the print profile leaves out.
     let mut profile = ViewProfile::print_profile(&paper[0].name);
+    // `LIBVIPRS_OWNER_PLOT_LAYER_INDEX=3` draws only the fourth no-plot layer of the drawing.
+    if let Some(i) = std::env::var("LIBVIPRS_OWNER_PLOT_LAYER_INDEX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        let layers: Vec<String> = provider
+            .layers()
+            .unwrap()
+            .into_iter()
+            .filter(|l| !l.plottable)
+            .map(|l| l.name)
+            .collect();
+        eprintln!("no-plot layer {i} of {}", layers.len());
+        profile.layers.no_plot = libviprs::pvec::LayerStateRule::Ignore;
+        profile.layers.no_plot_text = libviprs::pvec::LayerStateRule::Ignore;
+        for (n, name) in layers.iter().enumerate() {
+            if n != i {
+                profile
+                    .layers
+                    .overrides
+                    .push((name.clone(), libviprs::pvec::LayerOverride::Hidden));
+            }
+        }
+    }
+    // The plotted PDF names the layers it plotted (its optional content groups). A layer the drawing
+    // flags no-plot but the PDF names was plottable when the PDF was made, so it is drawn and the other
+    // no-plot layers are not. `LIBVIPRS_OWNER_PLOT_PDF_LAYERS=0` keeps the print rule.
+    if std::env::var("LIBVIPRS_OWNER_PLOT_PDF_LAYERS").is_ok_and(|v| v == "0") {
+    } else {
+        let bytes = fs::read(&reference).unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        let mut plotted: Vec<String> = Vec::new();
+        for (at, _) in text
+            .match_indices("/Type/OCG")
+            .chain(text.match_indices("/Type /OCG"))
+        {
+            let from = at.saturating_sub(200);
+            let seg = &text[text.floor_char_boundary(from)
+                ..text.floor_char_boundary((at + 200).min(text.len()))];
+            if let Some(i) = seg.find("/Name(").or_else(|| seg.find("/Name (")) {
+                let rest = &seg[seg[i..].find('(').unwrap() + i + 1..];
+                if let Some(j) = rest.find(')') {
+                    plotted.push(rest[..j].to_string());
+                }
+            }
+        }
+        let layers: Vec<String> = provider
+            .layers()
+            .unwrap()
+            .into_iter()
+            .filter(|l| !l.plottable)
+            .map(|l| l.name)
+            .collect();
+        let named: Vec<&String> = layers.iter().filter(|l| plotted.contains(l)).collect();
+        eprintln!(
+            "no-plot layers {}, named by the plotted PDF {}",
+            layers.len(),
+            named.len()
+        );
+        if !named.is_empty() {
+            profile.layers.no_plot = libviprs::pvec::LayerStateRule::Ignore;
+            profile.layers.no_plot_text = libviprs::pvec::LayerStateRule::Ignore;
+            for l in layers.iter().filter(|l| !plotted.contains(l)) {
+                profile
+                    .layers
+                    .overrides
+                    .push((l.clone(), libviprs::pvec::LayerOverride::Hidden));
+            }
+        }
+    }
     if let Ok(list) = std::env::var("LIBVIPRS_OWNER_PLOT_DRAW") {
         use libviprs::pvec::LayerStateRule::Ignore;
         for state in list.split(',') {
