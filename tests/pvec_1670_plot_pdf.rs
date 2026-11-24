@@ -1,0 +1,375 @@
+//! Issue #1670: a drawing's print layouts plotted to one PDF with a plot style table, as the page a
+//! plotter would draw. The drawing, the .ctb and the .pc3 are all built in memory (acadrust writes the
+//! DWG, `PlotStyleTable::to_bytes` the CTB), so the suite is hermetic and needs no private file. The
+//! owner's own drawing is checked by `pvec_1670_owner_layouts.rs`, which skips unless it is pointed at
+//! the files. Needs `--features pvec-convert`.
+//!
+//! Page sizes and strokes are `PdfPlot`'s from #1636. What these tests pin is the rest of the page: a
+//! circle is a Bezier path and not 96 chords, a dashed linetype is dashed, a zero lineweight is the
+//! thinnest line, a SOLID is filled, text is text, a rotated layout is a rotated page, and a plot
+//! can be cancelled, bounded and read its unit from the file.
+
+#![cfg(feature = "pvec-convert")]
+
+use std::fs;
+use std::path::PathBuf;
+
+use acadrust::entities::{Circle, Line, Solid, Text};
+use acadrust::objects::ObjectType;
+use acadrust::plot_style::PlotStyleTable;
+use acadrust::tables::{LineType, LineTypeElement};
+use acadrust::types::{Color, LineWeight, Vector3};
+use acadrust::{CadDocument, DwgWriter, EntityType};
+use libviprs::cad::CadSource;
+use libviprs::pvec::dwg_acadrust::AcadrustProvider;
+use libviprs::pvec::{SourceLimits, SourceUnit, ViewProfile};
+use libviprs::pvec_convert::{PdfPlot, PdfPlotOutput, PvecConvertError};
+use lopdf::Document;
+use lopdf::content::Operation;
+
+const PT_PER_MM: f64 = 72.0 / 25.4;
+
+/// One layout's page setup: name, paper in mm, rotation code.
+struct Sheet(&'static str, f64, f64, i16);
+
+fn set_plot(doc: &mut CadDocument, s: &Sheet) {
+    let layout = doc
+        .objects
+        .values_mut()
+        .find_map(|o| match o {
+            ObjectType::Layout(l) if l.name == s.0 => Some(l),
+            _ => None,
+        })
+        .unwrap();
+    layout.paper_width = s.1;
+    layout.paper_height = s.2;
+    layout.plot_rotation = s.3;
+    layout.plot_paper_units = 1;
+    layout.plot_type = 5;
+    layout.plot_scale_numerator = 1.0;
+    layout.plot_scale_denominator = 1.0;
+    layout.paper_size = format!("USER_({:.2}_x_{:.2}_MM)", s.1, s.2);
+}
+
+fn line(x0: f64, y0: f64, x1: f64, y1: f64, aci: u8, linetype: &str) -> EntityType {
+    let mut l = Line::from_coords(x0, y0, 0.0, x1, y1, 0.0);
+    l.common.color = Color::Index(aci);
+    l.common.line_weight = LineWeight::Value(25);
+    l.common.linetype = linetype.into();
+    EntityType::Line(l)
+}
+
+/// Two paper layouts: `A3` (420 x 297, landscape, unrotated) holding a circle, a red line, a dashed
+/// blue line, a SOLID and a TEXT, and `A4` (210 x 297, rotation 1) holding one line.
+fn drawing() -> Vec<u8> {
+    let mut doc = CadDocument::new();
+    let mut dashed = LineType::new("DASHED");
+    dashed.elements = vec![LineTypeElement::dash(10.0), LineTypeElement::space(5.0)];
+    doc.line_types.add(dashed).unwrap();
+    doc.add_layout("A3").unwrap();
+    doc.add_layout("A4").unwrap();
+    set_plot(&mut doc, &Sheet("A3", 420.0, 297.0, 0));
+    set_plot(&mut doc, &Sheet("A4", 210.0, 297.0, 1));
+    let mut circle = Circle::from_coords(200.0, 150.0, 0.0, 40.0);
+    circle.common.color = Color::Index(7);
+    let mut text = Text::with_value("Plan", Vector3::new(20.0, 20.0, 0.0)).with_height(5.0);
+    text.common.color = Color::Index(7);
+    let solid = Solid::new(
+        Vector3::new(300.0, 50.0, 0.0),
+        Vector3::new(330.0, 50.0, 0.0),
+        Vector3::new(300.0, 80.0, 0.0),
+        Vector3::new(330.0, 80.0, 0.0),
+    );
+    for e in [
+        EntityType::Circle(circle),
+        line(10.0, 10.0, 100.0, 10.0, 1, "Continuous"),
+        line(10.0, 30.0, 100.0, 30.0, 5, "DASHED"),
+        EntityType::Solid(solid),
+        EntityType::Text(text),
+    ] {
+        doc.add_entity_to_layout(e, "A3").unwrap();
+    }
+    doc.add_entity_to_layout(line(10.0, 10.0, 100.0, 200.0, 7, "Continuous"), "A4")
+        .unwrap();
+    DwgWriter::write_to_vec(&doc).unwrap()
+}
+
+/// A CTB: ACI 1 plots black at 0.35 mm, ACI 5 keeps its colour at lineweight index 0 (the object's,
+/// then the thinnest the device draws once the object's own is zero), the rest is the object's.
+fn ctb() -> PlotStyleTable {
+    let mut t = PlotStyleTable::identity("mono.ctb");
+    t.lineweights = vec![0.0, 0.35, 0.5];
+    t.aci_entries[1].color = Some([0, 0, 0]);
+    t.aci_entries[1].lineweight = 2;
+    t
+}
+
+fn scratch(tag: &str) -> PathBuf {
+    let d = std::env::temp_dir().join(format!("libviprs-1670-{tag}-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
+fn plot(
+    tag: &str,
+    configure: impl for<'a> FnOnce(PdfPlot<'a>) -> PdfPlot<'a>,
+) -> (Result<PdfPlotOutput, PvecConvertError>, PathBuf) {
+    let dir = scratch(tag);
+    let bytes = drawing();
+    let dest = dir.join("out.pdf");
+    let p = PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .plot_style_table(ctb())
+        .layouts(["A3", "A4"])
+        .texts(true)
+        .fills(true);
+    (
+        configure(p).convert_with::<AcadrustProvider>(),
+        dir.join("out.pdf"),
+    )
+}
+
+fn ops(pdf: &PathBuf, page: u32) -> Vec<Operation> {
+    let doc = Document::load(pdf).unwrap();
+    let id = doc.get_pages()[&page];
+    doc.get_and_decode_page_content(id).unwrap().operations
+}
+
+fn count(ops: &[Operation], name: &str) -> usize {
+    ops.iter().filter(|o| o.operator == name).count()
+}
+
+fn real(o: &lopdf::Object) -> f64 {
+    o.as_float()
+        .map(f64::from)
+        .unwrap_or_else(|_| o.as_i64().unwrap() as f64)
+}
+
+// ---- the page ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_one_page_per_layout_at_the_layouts_paper() {
+    let (out, pdf) = plot("pages", |p| p);
+    assert_eq!(out.unwrap().pages, 2);
+    let info = libviprs::pdf_info(&pdf).unwrap();
+    let near = |i: usize, w: f64, h: f64| {
+        let p = &info.pages[i];
+        assert!(
+            (p.width_pts - w * PT_PER_MM).abs() < 0.2 && (p.height_pts - h * PT_PER_MM).abs() < 0.2,
+            "page {i}: {} x {} pt is not {w} x {h} mm",
+            p.width_pts,
+            p.height_pts
+        );
+    };
+    near(0, 420.0, 297.0);
+    // stored 210 x 297 at rotation 1: shown as the stored paper, the box turned
+    near(1, 210.0, 297.0);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_circle_is_bezier_segments_not_chords() {
+    let (out, pdf) = plot("circle", |p| p);
+    out.unwrap();
+    let o = ops(&pdf, 1);
+    let curves = count(&o, "c");
+    let lines = count(&o, "l");
+    assert!(
+        (4..=16).contains(&curves),
+        "{curves} curve operators for a circle"
+    );
+    assert!(
+        lines < 40,
+        "{lines} line operators: the circle is drawn as chords"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_dashed_linetype_sets_a_dash_pattern() {
+    let (out, pdf) = plot("dash", |p| p);
+    out.unwrap();
+    let o = ops(&pdf, 1);
+    let dashes: Vec<&Operation> = o
+        .iter()
+        .filter(|o| o.operator == "d" && o.operands[0].as_array().is_ok_and(|a| !a.is_empty()))
+        .collect();
+    assert_eq!(dashes.len(), 1, "one dashed stroke");
+    let pattern: Vec<f64> = dashes[0].operands[0]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(real)
+        .collect();
+    assert!(
+        (pattern[0] - 10.0 * PT_PER_MM).abs() < 0.1 && (pattern[1] - 5.0 * PT_PER_MM).abs() < 0.1,
+        "{pattern:?} pt is not the 10 mm dash and 5 mm gap"
+    );
+}
+
+/// Each stroked path's colour (as 0 to 255 bytes), width in points and dash array.
+fn strokes(ops: &[Operation]) -> Vec<([u8; 3], f64, Vec<f64>)> {
+    let (mut rgb, mut w, mut dash) = ([0u8; 3], 0.0, Vec::new());
+    let mut out = Vec::new();
+    for o in ops {
+        match o.operator.as_str() {
+            "RG" => {
+                let v: Vec<f64> = o.operands.iter().map(real).collect();
+                rgb = [v[0], v[1], v[2]].map(|c| (c * 255.0).round() as u8);
+            }
+            "w" => w = real(&o.operands[0]),
+            "d" => dash = o.operands[0].as_array().unwrap().iter().map(real).collect(),
+            "S" => out.push((rgb, w, dash.clone())),
+            _ => {}
+        }
+    }
+    out
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_the_ctb_sets_each_colours_stroke_colour_and_width() {
+    // ACI 1 plots black at the table's second weight and ACI 5 keeps blue at the object's 0.25 mm.
+    let mut t = ctb();
+    t.lineweights = vec![0.0, 0.35, 0.35];
+    let (out, pdf) = plot("ctb", |p| p.plot_style_table(t));
+    out.unwrap();
+    let s = strokes(&ops(&pdf, 1));
+    assert!(
+        s.iter()
+            .any(|(c, w, _)| *c == [0, 0, 0] && (w - 0.35 * PT_PER_MM).abs() < 0.01),
+        "no black 0.35 mm stroke in {s:?}"
+    );
+    assert!(
+        s.iter()
+            .any(|(c, w, _)| *c == [0, 0, 255] && (w - 0.25 * PT_PER_MM).abs() < 0.01),
+        "no blue 0.25 mm stroke in {s:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_zero_lineweight_is_the_thinnest_line() {
+    // The table's weight for ACI 5 is its first entry, 0.0 mm: the thinnest line the device draws.
+    let mut t = ctb();
+    t.aci_entries[5].lineweight = 1;
+    t.lineweights = vec![0.0, 0.0, 0.5];
+    let (out, pdf) = plot("zero", |p| p.plot_style_table(t));
+    out.unwrap();
+    let s = strokes(&ops(&pdf, 1));
+    assert!(
+        s.iter().any(|(c, w, _)| *c == [0, 0, 255] && *w == 0.0),
+        "no blue 0 w stroke in {s:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_solid_is_filled() {
+    let (out, pdf) = plot("fill", |p| p);
+    out.unwrap();
+    let o = ops(&pdf, 1);
+    assert!(count(&o, "f") + count(&o, "f*") >= 1, "no fill operator");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_text_is_text() {
+    let (out, pdf) = plot("text", |p| p);
+    out.unwrap();
+    let o = ops(&pdf, 1);
+    assert_eq!(count(&o, "BT"), 1);
+    let shown: Vec<u8> = o
+        .iter()
+        .filter(|o| o.operator == "Tj")
+        .flat_map(|o| o.operands[0].as_str().unwrap().to_vec())
+        .collect();
+    assert_eq!(shown, b"Plan");
+    let doc = Document::load(&pdf).unwrap();
+    let id = doc.get_pages()[&1];
+    let fonts = doc.get_page_fonts(id).unwrap();
+    assert_eq!(fonts.len(), 1, "one font on the page");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_rotated_layout_is_a_rotated_page() {
+    // Layout A4 is portrait paper with plot rotation 1: the plotted sheet (the frame) is landscape, and
+    // the page carries /Rotate the way a plotter's own PDF does, so it shows as the portrait paper.
+    let (out, pdf) = plot("rotate", |p| p);
+    out.unwrap();
+    let doc = Document::load(&pdf).unwrap();
+    let id = doc.get_pages()[&2];
+    let page = doc.get_dictionary(id).unwrap();
+    let rotate = page.get(b"Rotate").and_then(|r| r.as_i64()).unwrap();
+    assert!(rotate == 90 || rotate == 270, "/Rotate {rotate}");
+    let media: Vec<f64> = page
+        .get(b"MediaBox")
+        .unwrap()
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(real)
+        .collect();
+    assert!(
+        (media[2] - 297.0 * PT_PER_MM).abs() < 0.2 && (media[3] - 210.0 * PT_PER_MM).abs() < 0.2,
+        "{media:?}"
+    );
+    let first = doc.get_dictionary(doc.get_pages()[&1]).unwrap();
+    assert_eq!(first.get(b"Rotate").and_then(|r| r.as_i64()).unwrap(), 0);
+}
+
+// ---- bounds, cancel and the unit --------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_cancelled_plot_stops_and_leaves_no_file() {
+    let token = libviprs::CancelToken::new();
+    token.cancel();
+    let (out, pdf) = plot("cancel", |p| p.cancel(token));
+    assert!(matches!(out, Err(PvecConvertError::Cancelled)), "{out:?}");
+    assert!(!pdf.exists());
+    assert!(!pdf.with_extension("plot-work").exists());
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_source_limits_bound_the_plot() {
+    let mut limits = SourceLimits::default();
+    limits.max_entities = 2;
+    let (out, pdf) = plot("limit", |p| p.limits(limits));
+    assert!(
+        out.is_err(),
+        "a limit of two entities plots a layout of five"
+    );
+    assert!(!pdf.exists());
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_the_unit_comes_from_the_file_when_none_is_given() {
+    let dir = scratch("unit");
+    let bytes = drawing();
+    let dest = dir.join("out.pdf");
+    let out = PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"])
+        .convert()
+        .unwrap();
+    assert_eq!(out.pages, 1);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_without_unit_convert_with_still_asks_for_one() {
+    let dir = scratch("nounit");
+    let bytes = drawing();
+    let dest = dir.join("out.pdf");
+    let out = PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .convert_with::<AcadrustProvider>();
+    assert!(matches!(out, Err(PvecConvertError::UnitRequired)));
+}

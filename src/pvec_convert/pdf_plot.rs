@@ -5,6 +5,8 @@
 //! the paper, and its curves are drawn as stroked polylines, black, at the drawing's default
 //! lineweight. No text is written (it waits for #1621) and no font is put on the page.
 
+use crate::CancelToken;
+use crate::pvec::SourceLimits;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -44,6 +46,10 @@ pub struct PdfPlot<'a> {
     settings: PlotSettings,
     table: Option<PlotStyleTable>,
     layouts: Option<Vec<String>>,
+    cancel: CancelToken,
+    limits: SourceLimits,
+    texts: bool,
+    fills: bool,
 }
 
 const POINTS_PER_METRE: f64 = 72.0 / 0.0254;
@@ -59,6 +65,10 @@ impl<'a> PdfPlot<'a> {
             settings: PlotSettings::default(),
             table: None,
             layouts: None,
+            cancel: CancelToken::new(),
+            limits: SourceLimits::default(),
+            texts: false,
+            fills: false,
         }
     }
 
@@ -99,6 +109,44 @@ impl<'a> PdfPlot<'a> {
     pub fn layouts<S: Into<String>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
         self.layouts = Some(names.into_iter().map(Into::into).collect());
         self
+    }
+
+    /// Stops the plot once `cancel` is cancelled.
+    #[must_use]
+    pub fn cancel(mut self, cancel: CancelToken) -> Self {
+        self.cancel = cancel;
+        self
+    }
+
+    /// The reader's limits, as a PVec conversion takes them.
+    #[must_use]
+    pub fn limits(mut self, limits: SourceLimits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Draw text as text.
+    #[must_use]
+    pub fn texts(mut self, on: bool) -> Self {
+        self.texts = on;
+        self
+    }
+
+    /// Fill solids.
+    #[must_use]
+    pub fn fills(mut self, on: bool) -> Self {
+        self.fills = on;
+        self
+    }
+
+    /// Writes the PDF, reading the unit from the drawing when none was given.
+    ///
+    /// # Errors
+    ///
+    /// As [`convert_with`](Self::convert_with).
+    pub fn convert(self) -> Result<PdfPlotOutput, PvecConvertError> {
+        let _ = (&self.cancel, &self.limits, self.texts, self.fills);
+        self.convert_with::<crate::pvec::dwg_acadrust::AcadrustProvider>()
     }
 
     /// Writes the PDF with provider `P`.

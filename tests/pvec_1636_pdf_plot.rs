@@ -240,12 +240,14 @@ fn issue_1636_a_paper_override_sets_the_page_size() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1636_rotation_one_swaps_the_page_width_and_height() {
+    // The box is the swapped sheet (50 x 100) and the page is rotated, so it shows at the paper's own
+    // 100 x 50, as a plotter's PDF of a rotated layout does (#1670).
     let mock = one_sheet(
         plot(100.0, 50.0, 1),
         vec![line(1, [10.0, 25.0], [90.0, 25.0], 7, 100)],
     );
     let (out, dir) = plot_pdf("rotated", mock, |p| p);
-    near(page_sizes(&out.unwrap().file)[0], 50.0, 100.0);
+    near(page_sizes(&out.unwrap().file)[0], 100.0, 50.0);
     let _ = fs::remove_dir_all(dir);
 }
 
