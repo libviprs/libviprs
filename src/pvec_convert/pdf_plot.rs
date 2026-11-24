@@ -53,7 +53,7 @@ pub struct PdfPlot<'a> {
     cancel: CancelToken,
     observer: Option<Arc<dyn EngineObserver>>,
     deadline: Option<Duration>,
-    limits: SourceLimits,
+    limits: Option<SourceLimits>,
     texts: bool,
     fills: bool,
 }
@@ -74,7 +74,7 @@ impl<'a> PdfPlot<'a> {
             cancel: CancelToken::new(),
             observer: None,
             deadline: None,
-            limits: SourceLimits::default(),
+            limits: None,
             texts: false,
             fills: false,
         }
@@ -147,7 +147,7 @@ impl<'a> PdfPlot<'a> {
     /// The reader's limits, as a PVec conversion takes them.
     #[must_use]
     pub fn limits(mut self, limits: SourceLimits) -> Self {
-        self.limits = limits;
+        self.limits = Some(limits);
         self
     }
 
@@ -274,7 +274,6 @@ impl<'a> PdfPlot<'a> {
                 let mut conversion = PvecConversion::new(self.source, &file)
                     .view_profile(profile)
                     .plot_settings(self.settings.clone())
-                    .limits(self.limits)
                     .texts(self.texts)
                     .fills(self.fills)
                     .components(StreamSelection::ALL)
@@ -283,6 +282,9 @@ impl<'a> PdfPlot<'a> {
                     conversion = conversion.observer(o.clone());
                 }
                 conversion.empty_sheet_ok = true;
+                if let Some(limits) = self.limits {
+                    conversion = conversion.limits(limits);
+                }
                 if let Some(table) = &self.table {
                     conversion = conversion.plot_style_table(table.clone());
                 }
@@ -608,7 +610,7 @@ fn segments(curve: &Curve, to_pt: &dyn Fn(f64, f64) -> (f64, f64)) -> Runs {
     match curve {
         Curve::Line(_) => Vec::new(),
         Curve::Trimmed(t) => match t.basis() {
-            Curve::Line(_) => spans_line(t, &pt),
+            Curve::Line(_) => spans_line([pt(t, t.domain().lo()), pt(t, t.domain().hi())]),
             Curve::Circle(_) | Curve::Ellipse(_) => spans(t, quarter_turns(t), true),
             _ => spans(t, 16, false),
         },
@@ -636,10 +638,9 @@ fn segments(curve: &Curve, to_pt: &dyn Fn(f64, f64) -> (f64, f64)) -> Runs {
     }
 }
 
-fn spans_line(t: &dyn Curve2d, pt: &dyn Fn(&dyn Curve2d, f64) -> Option<(f64, f64)>) -> Runs {
-    let d = t.domain();
-    match (pt(t, d.lo()), pt(t, d.hi())) {
-        (Some(a), Some(b)) => vec![Seg::Move(a.0, a.1), Seg::Line(b.0, b.1)],
+fn spans_line(ends: [Option<(f64, f64)>; 2]) -> Runs {
+    match ends {
+        [Some(a), Some(b)] => vec![Seg::Move(a.0, a.1), Seg::Line(b.0, b.1)],
         _ => Vec::new(),
     }
 }

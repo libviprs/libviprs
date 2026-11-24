@@ -45,6 +45,7 @@ fn files() -> Option<[PathBuf; 4]> {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1670_owner_layouts_match_the_plotted_pdf() {
     let Some([dwg, reference, ctb, pc3]) = files() else {
         eprintln!(
