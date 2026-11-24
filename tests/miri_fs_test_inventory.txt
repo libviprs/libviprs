@@ -806,6 +806,8 @@ annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_rea
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_callers_plot_scale_is_applied_like_the_stored_one
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_a_plot_window_is_scaled_with_the_linework
 annotated   fs-detected  tests/pvec_1665_layout_paper_units.rs::issue_1665_an_upside_down_sheet_at_1_to_0_04_is_scaled_then_turned
+annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_a_layout_at_1_to_1_keeps_its_patterns_as_drawn
+annotated   fs-detected  tests/pvec_1683_dash_plot_scale.rs::issue_1683_dash_and_dash_dot_periods_are_paper_millimetres_at_1_to_0_04
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_override_follows_the_layouts_rotation
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_size_override_replaces_the_paper_and_its_margins
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_that_is_not_a_size_is_refused_not_framed
@@ -1615,3 +1617,4 @@ annotated   not-detected tests/plot_files_1673.rs::issue_1673_a_pc3_that_does_no
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_bytes_that_are_no_plot_file_are_unrecognised
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_every_refusal_has_its_own_stable_code
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_the_device_facts_are_paper_printable_area_raster_limit_and_text_mode
+annotated   fs-detected  tests/pvec_1668_pdf_decodeparms.rs::the_owners_plan_converts_on_the_pages_that_stopped
