@@ -15,7 +15,7 @@ use pvec_geometry::{
 use pvec_numeric::{MAX_POLYLINE_VERTICES, NumericError};
 
 use super::fidelity::{Basis, Classification, ReasonCode};
-use super::provider::{Point3, RawEntity, RawGeometry, RawVertex, z_axis_flip};
+use super::provider::{Point3, RawEntity, RawGeometry, RawVertex, same_z, z_axis_flip};
 
 /// Which basic source class an extraction came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,7 +254,12 @@ pub fn extract_line(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
         return Err(BasicError::NotBasic);
     };
     let elevation = z_of("start", start[2])?;
-    if z_of("end", end[2])? != elevation {
+    // Float noise between the two z values is the same plane (#1695), against the plan length.
+    if !same_z(
+        elevation,
+        z_of("end", end[2])?,
+        (end[0] - start[0]).hypot(end[1] - start[1]),
+    ) {
         return Err(BasicError::NonPlanar);
     }
     let p0 = point("start", start[0], start[1])?;
@@ -507,7 +512,12 @@ pub fn extract_ellipse(entity: &RawEntity) -> Result<ExactBasic, BasicError> {
     };
     let mirrored = ocs_mirrored(*normal)?;
     let elevation = z_of("centre", center[2])?;
-    if z_of("major_axis", major_axis[2])? != 0.0 {
+    // Float noise in the axis' z is the plane (#1695), against the axis' plan length.
+    if !same_z(
+        0.0,
+        z_of("major_axis", major_axis[2])?,
+        major_axis[0].hypot(major_axis[1]),
+    ) {
         return Err(BasicError::NonPlanar);
     }
     let origin = point("centre", center[0], center[1])?;

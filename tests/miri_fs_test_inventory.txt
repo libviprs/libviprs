@@ -1677,6 +1677,17 @@ annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_an_open_polylin
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_every_side_keeps_the_entitys_linetype_and_a_line_is_untouched
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_the_entitys_flag_wins_over_the_headers
 annotated   fs-detected  tests/pvec_1691_plinegen.rs::issue_1691_the_same_polyline_with_plinegen_on_keeps_its_one_continuous_pattern
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_line_that_really_leaves_the_plane_is_still_geometry_3d
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_line_whose_z_differs_by_float_noise_converts
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_line_with_the_same_tiny_z_at_both_ends_converts
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_short_line_is_judged_against_the_floor_not_its_own_length
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_spline_with_a_real_z_spread_is_still_spline_3d
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_spline_with_float_noise_in_its_control_point_z_converts
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_vertical_segment_is_not_noise
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_a_zero_length_line_with_noise_is_coincident_not_3d
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_an_ellipse_whose_major_axis_has_float_noise_in_z_converts
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_an_ellipse_with_a_tilted_major_axis_is_still_geometry_3d
+annotated   fs-detected  tests/pvec_1695_float_noise_z.rs::issue_1695_noise_is_relative_to_the_coordinates_far_from_the_origin
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_a_2d_polyline_is_fitted_the_same_way
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_a_line_keeps_its_pattern_as_drawn
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1694_a_polyline_with_plinegen_on_keeps_its_pattern_as_drawn
