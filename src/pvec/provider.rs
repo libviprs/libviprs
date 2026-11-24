@@ -302,6 +302,13 @@ pub struct LayoutPlot {
     pub margins: [f64; 4],
     /// The plot origin in millimetres.
     pub origin: [f64; 2],
+    /// The paper image origin (DXF groups 148 and 149), `[x, y]` in paper-space drawing units;
+    /// zero when the drawing does not say. It places the paper on the plot, at the plot scale.
+    pub paper_image_origin: [f64; 2],
+    /// The layout's limits (the Layout object's minimum and maximum), `[min_x, min_y, max_x,
+    /// max_y]` in paper-space drawing units; zero when the drawing does not say. Read and carried;
+    /// the paper image origin is what places the sheet.
+    pub limits: [f64; 4],
     /// The plot style table the layout names (`monochrome.ctb`), empty when it names none. The
     /// file itself is not read.
     pub style_sheet: String,

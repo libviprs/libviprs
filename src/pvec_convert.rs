@@ -968,6 +968,9 @@ impl<'a> PvecConversion<'a> {
             let mut written = None;
             let mut place = None;
             let mut windowed = false;
+            // What the paper's place rests on: `measured` for a sheet with no margins and no plot
+            // origin, whose paper image origin was checked against a plotted sheet (#1686).
+            let mut position = "unmeasured";
             let mut flip = false;
             let mut per_unit = 1.0;
             match &fact {
@@ -1105,10 +1108,11 @@ impl<'a> PvecConversion<'a> {
                             lw - layout_margins[0] - layout_margins[2],
                             lh - layout_margins[1] - layout_margins[3],
                         ];
-                        // UNMEASURED (the print profile ADR's open item): the paper's lower left
-                        // is taken to sit at -(margin + plot origin) from the paper-space origin.
-                        // No fixture with non-zero margins and origin has measured it, so the
-                        // report says `position: unmeasured`.
+                        // The paper's lower left sits at -(margin + plot origin + paper image
+                        // origin) from the paper-space origin. The image origin is in drawing units,
+                        // so it goes to the paper at the plot scale, in millimetres here like the
+                        // rest (#1686). No fixture with non-zero margins or plot origin has
+                        // measured the rest, so those sheets report `position: unmeasured`.
                         let su = |v: [f64; 2]| to_unit(v[0]).zip(to_unit(v[1]));
                         // The window is in paper-space drawing units, so it goes to the paper at
                         // the plot scale, the way the linework does (#1665).
@@ -1117,12 +1121,23 @@ impl<'a> PvecConversion<'a> {
                             PlotArea::Layout if p.plot_type == 4 => Some(p.window),
                             _ => None,
                         };
+                        let image = to_unit(1.0)
+                            .filter(|per_mm| *per_mm > 0.0)
+                            .map(|per_mm| {
+                                let at = sheet_unit.map_or(1.0, drawn_at) / per_mm;
+                                p.paper_image_origin
+                                    .map(|v| if v.is_finite() { v * at } else { 0.0 })
+                            })
+                            .unwrap_or([0.0; 2]);
                         let converted = su([margins[0], margins[1]])
                             .zip(su([margins[2], margins[3]]))
                             .zip(su([w, h]))
                             .zip(su(own))
                             // The margin and the shift added in millimetres, then converted once.
-                            .zip(su([margins[0] + shift[0], margins[1] + shift[1]]));
+                            .zip(su([
+                                margins[0] + shift[0] + image[0],
+                                margins[1] + shift[1] + image[1],
+                            ]));
                         if let Some(w) = window_box {
                             if w.iter().all(|v| v.is_finite()) && w[2] > w[0] && w[3] > w[1] {
                                 let k = sheet_unit.map_or(1.0, drawn_at);
@@ -1174,6 +1189,12 @@ impl<'a> PvecConversion<'a> {
                                         Some([x0, y0, x0 + at.size[0] * k, y0 + at.size[1] * k]);
                                     plot_unit = sheet_unit;
                                     place = Some(at);
+                                    if image != [0.0; 2] {
+                                        summary.notes.push("paper-image-origin".into());
+                                    }
+                                    if margins == [0.0; 4] && shift == [0.0; 2] {
+                                        position = "measured";
+                                    }
                                 }
                                 None => summary.frame_reason = Some("unit-not-declarable".into()),
                             }
@@ -1181,7 +1202,7 @@ impl<'a> PvecConversion<'a> {
                     }
                     if let (Some(b), Some(sheet_unit)) = (frame_box, plot_unit) {
                         summary.frame = "paper".into();
-                        summary.position = Some("unmeasured".into());
+                        summary.position = Some(position.into());
                         summary.sheet_box = Some(b.map(text));
                         if matches!(p.paper_units, 0 | 1) {
                             summary.unit_source = "plot-paper-units".into();
