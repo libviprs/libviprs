@@ -14,8 +14,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use acadrust::entities::{Circle, Line, Solid, Text};
-use acadrust::objects::ObjectType;
+use acadrust::entities::{Circle, Line, RasterImage, Solid, Text, Viewport};
+use acadrust::objects::{ImageDefinition, ObjectType};
 use acadrust::plot_style::PlotStyleTable;
 use acadrust::tables::{LineType, LineTypeElement};
 use acadrust::types::{Color, LineWeight, Vector3};
@@ -374,4 +374,158 @@ fn issue_1670_without_unit_convert_with_still_asks_for_one() {
         .view_profile(ViewProfile::print_profile("A3"))
         .convert_with::<AcadrustProvider>();
     assert!(matches!(out, Err(PvecConvertError::UnitRequired)));
+}
+
+// ---- images -----------------------------------------------------------------------------
+
+/// A sheet like `A3` with a 4 x 4 pixel IMAGE of 10 mm a pixel, its lower-left corner at (50, 40), whose
+/// file is `logo.png` in the returned directory.
+fn image_plot(tag: &str, with_dir: bool) -> PathBuf {
+    let dir = scratch(tag);
+    image::RgbaImage::from_fn(4, 4, |x, y| {
+        image::Rgba([(60 * x + 30) as u8, (60 * y + 30) as u8, 128, 255])
+    })
+    .save(dir.join("logo.png"))
+    .unwrap();
+    let mut doc = CadDocument::new();
+    doc.add_layout("A3").unwrap();
+    set_plot(&mut doc, &Sheet("A3", 420.0, 297.0, 0));
+    let mut def = ImageDefinition::new("logo.png");
+    def.handle = doc.allocate_handle();
+    def.size_in_pixels = (4, 4);
+    def.pixel_size = (1.0, 1.0);
+    def.is_loaded = true;
+    let handle = def.handle;
+    doc.objects.insert(handle, ObjectType::ImageDefinition(def));
+    let mut img = RasterImage::new("logo.png", Vector3::new(50.0, 40.0, 0.0), 4.0, 4.0);
+    img.u_vector = Vector3::new(10.0, 0.0, 0.0);
+    img.v_vector = Vector3::new(0.0, 10.0, 0.0);
+    img.definition_handle = Some(handle);
+    doc.add_entity_to_layout(EntityType::RasterImage(img), "A3")
+        .unwrap();
+    doc.add_entity_to_layout(line(10.0, 10.0, 100.0, 10.0, 1, "Continuous"), "A3")
+        .unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dest = dir.join("out.pdf");
+    let mut p = PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"]);
+    if with_dir {
+        p = p.images(&dir);
+    }
+    p.convert_with::<AcadrustProvider>().unwrap();
+    dest
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_placed_image_is_an_image_on_the_page() {
+    let pdf = image_plot("image", true);
+    let o = ops(&pdf, 1);
+    assert_eq!(count(&o, "Do"), 1, "one image drawn");
+    // the cm before the Do places the unit square: 40 mm across and up from (50, 40) mm
+    let at = o.iter().position(|o| o.operator == "Do").unwrap();
+    let cm = o[..at].iter().rev().find(|o| o.operator == "cm").unwrap();
+    let m: Vec<f64> = cm.operands.iter().map(real).collect();
+    let mm = |v: f64| v / PT_PER_MM;
+    assert!(
+        (mm(m[0]) - 40.0).abs() < 0.1 && mm(m[1]).abs() < 0.1,
+        "{m:?}"
+    );
+    assert!(
+        mm(m[2]).abs() < 0.1 && (mm(m[3]) - 40.0).abs() < 0.1,
+        "{m:?}"
+    );
+    assert!(
+        (mm(m[4]) - 50.0).abs() < 0.1 && (mm(m[5]) - 40.0).abs() < 0.1,
+        "{m:?}"
+    );
+    let doc = Document::load(&pdf).unwrap();
+    let page = doc.get_pages()[&1];
+    let (resources, _) = doc.get_page_resources(page).unwrap();
+    let xobjects = resources
+        .unwrap()
+        .get(b"XObject")
+        .unwrap()
+        .as_dict()
+        .unwrap();
+    let (_, id) = xobjects.iter().next().unwrap();
+    let image = &doc
+        .get_object(id.as_reference().unwrap())
+        .unwrap()
+        .as_stream()
+        .unwrap()
+        .dict;
+    assert_eq!(image.get(b"Width").unwrap().as_i64().unwrap(), 4);
+    assert_eq!(image.get(b"Height").unwrap().as_i64().unwrap(), 4);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_without_an_image_directory_no_image_is_drawn() {
+    let pdf = image_plot("noimage", false);
+    assert_eq!(count(&ops(&pdf, 1), "Do"), 0);
+}
+
+// ---- fills behind a viewport ------------------------------------------------------------
+
+/// Sheet `A3` with a 200 x 150 mm viewport centred at (210, 148) showing model space at 1 : 1 around the
+/// origin, and in model space a SOLID of 30 mm sides at (10, 10): wholly inside the window.
+fn viewport_fill_plot(tag: &str) -> PathBuf {
+    let dir = scratch(tag);
+    let mut doc = CadDocument::new();
+    doc.add_layout("A3").unwrap();
+    set_plot(&mut doc, &Sheet("A3", 420.0, 297.0, 0));
+    let mut window = Viewport::with_size(Vector3::new(210.0, 148.0, 0.0), 200.0, 150.0);
+    window.id = 2;
+    window.view_height = 150.0;
+    window.view_center = Vector3::new(0.0, 0.0, 0.0);
+    doc.add_entity_to_layout(EntityType::Viewport(Box::new(window)), "A3")
+        .unwrap();
+    let solid = Solid::new(
+        Vector3::new(10.0, 10.0, 0.0),
+        Vector3::new(40.0, 10.0, 0.0),
+        Vector3::new(10.0, 40.0, 0.0),
+        Vector3::new(40.0, 40.0, 0.0),
+    );
+    doc.add_entity(EntityType::Solid(solid)).unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dest = dir.join("out.pdf");
+    PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"])
+        .fills(true)
+        .convert_with::<AcadrustProvider>()
+        .unwrap();
+    dest
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_fill_behind_a_viewport_is_drawn_where_the_viewport_puts_it() {
+    let pdf = viewport_fill_plot("vpfill");
+    let o = ops(&pdf, 1);
+    assert_eq!(
+        count(&o, "f*"),
+        1,
+        "the SOLID is filled through the viewport"
+    );
+    // its corners are the viewport's: model (10, 10) is paper (210 + 10, 148 + 10) mm
+    let at = o.iter().position(|o| o.operator == "f*").unwrap();
+    let first_move = o[..at]
+        .iter()
+        .rev()
+        .take_while(|o| o.operator != "rg")
+        .last()
+        .unwrap();
+    let _ = first_move;
+    let xs: Vec<f64> = o[..at]
+        .iter()
+        .filter(|o| o.operator == "m" || o.operator == "l")
+        .map(|o| real(&o.operands[0]) / PT_PER_MM)
+        .collect();
+    assert!(xs.iter().any(|x| (x - 220.0).abs() < 0.5), "{xs:?}");
+    assert!(xs.iter().any(|x| (x - 250.0).abs() < 0.5), "{xs:?}");
 }

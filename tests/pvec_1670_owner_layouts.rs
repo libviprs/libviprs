@@ -12,10 +12,12 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use acadrust::plot_style::PlotStyleTable;
 use libviprs::cad::CadSource;
 use libviprs::cad::plot_files::Pc3;
+use libviprs::observe::{EngineEvent, EngineObserver};
 use libviprs::pvec::dwg_acadrust::AcadrustProvider;
 use libviprs::pvec::{DwgProvider, LayoutKind, SourceFact, SourceUnit, ViewProfile};
 use libviprs::pvec_convert::PdfPlot;
@@ -87,39 +89,33 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
     }
 
     // The owner plotted the first layouts in tab order and left the last ones out, so the plot
-    // takes as many as the reference has pages.
-    let want_pages = libviprs::pdf_info(&reference).unwrap().page_count;
+    // takes as many as the reference has pages. `LIBVIPRS_OWNER_PLOT_PAGES=2,4,21` plots only
+    // those pages (1-based, as the reference numbers them) for a quicker look.
+    let want = libviprs::pdf_info(&reference).unwrap();
+    let pages: Vec<usize> = match std::env::var("LIBVIPRS_OWNER_PLOT_PAGES") {
+        Ok(list) => list
+            .split(',')
+            .filter_map(|n| n.trim().parse().ok())
+            .collect(),
+        Err(_) => (1..=want.page_count).collect(),
+    };
     let out_dir = std::env::var_os("LIBVIPRS_OWNER_PLOT_OUT")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             std::env::temp_dir().join(format!("libviprs-1670-{}", std::process::id()))
         });
     fs::create_dir_all(&out_dir).unwrap();
-    // One layout on its own first, so a slow plot says which part is slow.
-    let started = std::time::Instant::now();
-    let one = out_dir.join("first.pdf");
-    PdfPlot::new(CadSource::Path(&dwg), &one)
-        .unit(SourceUnit::Millimeters)
-        .view_profile(ViewProfile::print_profile(&paper[0].name))
-        .plot_style_table(
-            PlotStyleTable::from_bytes("owner.ctb", &fs::read(&ctb).unwrap()).unwrap(),
-        )
-        .layouts([paper[0].name.clone()])
-        .convert_with::<AcadrustProvider>()
-        .unwrap();
-    eprintln!(
-        "first layout alone: {:.1} s",
-        started.elapsed().as_secs_f64()
-    );
     let started = std::time::Instant::now();
     let dest = out_dir.join("plotted.pdf");
+    let observer = Arc::new(SheetClock(started));
     let plotted = PdfPlot::new(CadSource::Path(&dwg), &dest)
         .unit(SourceUnit::Millimeters)
         .view_profile(ViewProfile::print_profile(&paper[0].name))
         .plot_style_table(table)
-        .layouts(paper.iter().take(want_pages).map(|l| l.name.clone()))
+        .layouts(pages.iter().map(|n| paper[n - 1].name.clone()))
         .texts(true)
         .fills(true)
+        .observer(observer)
         .convert_with::<AcadrustProvider>()
         .unwrap();
     eprintln!(
@@ -129,15 +125,15 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
     );
 
     let got = libviprs::pdf_info(&dest).unwrap();
-    let want = libviprs::pdf_info(&reference).unwrap();
     let mut size_mismatch = 0;
-    for (g, w) in got.pages.iter().zip(&want.pages) {
+    for (g, n) in got.pages.iter().zip(&pages) {
+        let w = &want.pages[n - 1];
         let ok = (g.width_pts - w.width_pts).abs() <= SIZE_TOLERANCE_PT
             && (g.height_pts - w.height_pts).abs() <= SIZE_TOLERANCE_PT;
         size_mismatch += usize::from(!ok);
         eprintln!(
             "page {:>3} got {:>8.2} x {:>8.2} want {:>8.2} x {:>8.2} {}",
-            g.page_number,
+            n,
             g.width_pts,
             g.height_pts,
             w.width_pts,
@@ -147,8 +143,27 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
     }
     eprintln!(
         "pages got {} want {}, size mismatches {size_mismatch}",
-        got.page_count, want.page_count
+        got.page_count,
+        pages.len()
     );
-    assert_eq!(got.page_count, want.page_count, "page count");
+    assert_eq!(got.page_count, pages.len(), "page count");
     assert_eq!(size_mismatch, 0, "page sizes");
+}
+
+/// Prints when each sheet starts and finishes, in seconds since the plot began.
+struct SheetClock(std::time::Instant);
+
+impl EngineObserver for SheetClock {
+    fn on_event(&self, event: EngineEvent) {
+        let at = self.0.elapsed().as_secs_f64();
+        match event {
+            EngineEvent::ConversionSheetStarted { index, layout, .. } => {
+                eprintln!("sheet {index:>3} start {at:>8.1} s {layout}");
+            }
+            EngineEvent::ConversionSheetFinished { index, status, .. } => {
+                eprintln!("sheet {index:>3} done  {at:>8.1} s {status}");
+            }
+            _ => {}
+        }
+    }
 }

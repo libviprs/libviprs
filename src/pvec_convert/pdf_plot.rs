@@ -56,6 +56,7 @@ pub struct PdfPlot<'a> {
     limits: Option<SourceLimits>,
     texts: bool,
     fills: bool,
+    images: Option<PathBuf>,
 }
 
 const POINTS_PER_METRE: f64 = 72.0 / 0.0254;
@@ -77,6 +78,7 @@ impl<'a> PdfPlot<'a> {
             limits: None,
             texts: false,
             fills: false,
+            images: None,
         }
     }
 
@@ -162,6 +164,14 @@ impl<'a> PdfPlot<'a> {
     #[must_use]
     pub fn fills(mut self, on: bool) -> Self {
         self.fills = on;
+        self
+    }
+
+    /// Place DWG IMAGEs as rasters, looking each up by file name in `dir` as
+    /// [`PvecConversion::images`] does (#1667).
+    #[must_use]
+    pub fn images(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.images = Some(dir.into());
         self
     }
 
@@ -282,6 +292,9 @@ impl<'a> PdfPlot<'a> {
                     conversion = conversion.observer(o.clone());
                 }
                 conversion.empty_sheet_ok = true;
+                if let Some(dir) = &self.images {
+                    conversion = conversion.images(dir.clone());
+                }
                 if let Some(limits) = self.limits {
                     conversion = conversion.limits(limits);
                 }
