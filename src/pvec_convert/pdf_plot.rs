@@ -282,9 +282,32 @@ impl<'a> PdfPlot<'a> {
             (None, _) => return Err(not_found("")),
         };
 
-        let work = self.dest.with_extension("plot-work");
-        fs::create_dir_all(&work)
-            .map_err(|e| PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(e)))?;
+        // The plot writes only to names it makes itself, beside the destination: a scratch directory
+        // that did not exist before and a temporary file the PDF is renamed from.
+        let io = |e| PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(e));
+        let dest_dir = match self.dest.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p,
+            _ => Path::new("."),
+        };
+        let stem = self
+            .dest
+            .file_stem()
+            .map_or_else(|| "plot".to_owned(), |s| s.to_string_lossy().into_owned());
+        fs::create_dir_all(dest_dir).map_err(io)?;
+        let (work, tmp) = {
+            let mut attempt = 0u32;
+            loop {
+                let id = format!("{}-{attempt}", std::process::id());
+                let work = dest_dir.join(format!(".{stem}.work-{id}"));
+                match fs::create_dir(&work) {
+                    Ok(()) => break (work, dest_dir.join(format!(".{stem}.pdf-{id}.tmp"))),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 1000 => {
+                        attempt += 1;
+                    }
+                    Err(e) => return Err(io(e)),
+                }
+            }
+        };
         let total = wanted.len() as u32;
         let tell = |event: EngineEvent| {
             if let Some(o) = &self.observer {
@@ -345,10 +368,11 @@ impl<'a> PdfPlot<'a> {
                             paper_frame(sheet.as_ref(), unit),
                             &out.hatch_patterns,
                             self.hairline_below_mm,
+                            &cancel,
                             mono,
-                        )
-                        .map_err(PvecConvertError::Publish)?
+                        )?
                     };
+                    check_page(&page)?;
                     let mut notes = sheet.map(|s| s.notes).unwrap_or_default();
                     notes.extend(page.notes.iter().cloned());
                     if mono {
@@ -374,7 +398,7 @@ impl<'a> PdfPlot<'a> {
             .collect::<Result<Vec<_>, PvecConvertError>>();
         // The scratch artifacts are this call's own, so they go whether or not it worked.
         let _ = fs::remove_dir_all(&work);
-        let pages = pages?;
+        let pages = pages.map_err(|e| e.settled(&cancel))?;
 
         let mut notes: Vec<String> = Vec::new();
         for n in pages.iter().flat_map(|(_, notes)| notes) {
@@ -383,12 +407,14 @@ impl<'a> PdfPlot<'a> {
             }
         }
         let count = pages.len() as u32;
-        write_pdf(
-            self.dest,
-            pages.into_iter().map(|(p, _)| p),
-            self.embedded_font,
-        )
-        .map_err(|e| PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(e)))?;
+        // The PDF goes to a name of the plot's own and is renamed over the destination only once it is
+        // whole, so a failed plot leaves what was there alone.
+        if let Err(e) = write_pdf(&tmp, pages.into_iter().map(|(p, _)| p), self.embedded_font)
+            .and_then(|()| fs::rename(&tmp, self.dest))
+        {
+            let _ = fs::remove_file(&tmp);
+            return Err(io(e));
+        }
         Ok(PdfPlotOutput {
             file: self.dest.to_path_buf(),
             pages: count,
@@ -436,13 +462,18 @@ fn read_page(
     frame: Option<([f64; 2], [f64; 2])>,
     patterns: &BTreeMap<u32, Vec<PlacedPatternLine>>,
     hairline_below_mm: f64,
+    cancel: &CancelToken,
     monochrome: bool,
-) -> Result<Page, crate::pvec::publish::PublishError> {
+) -> Result<Page, PvecConvertError> {
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
     const DEFAULT_WIDTH_MM: f64 = 0.25;
     let other = |e: &dyn std::fmt::Display| {
-        crate::pvec::publish::PublishError::Io(std::io::Error::other(e.to_string()))
+        PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(
+            std::io::Error::other(e.to_string()),
+        ))
     };
+    // Strokes drawn by every pattern hatch of the page together.
+    let mut stroke_budget = pdf_hatch::MAX_PAGE_STROKES;
     let reader = open_published(artifact).map_err(|e| other(&e))?;
     let manifest = reader.manifest();
     // The page is the paper, even when a text or fill carrier reaches past its edge and widens what
@@ -574,6 +605,9 @@ fn read_page(
     // Fills first, under the strokes.
     let mut notes: Vec<String> = Vec::new();
     for record in hatches.iter().flat_map(|h| &h.records) {
+        if cancel.is_cancelled() {
+            return Err(PvecConvertError::Cancelled);
+        }
         let (rgba, solid_fill) = match &record.fill {
             Fill::Solid { rgba } => (rgba, true),
             Fill::Pattern { rgba, .. } => (rgba, false),
@@ -613,7 +647,12 @@ fn read_page(
                     dashes: f.dashes.iter().map(|d| d * k).collect(),
                 })
                 .collect();
-            match pdf_hatch::expand(&rings_of(&runs), &placed) {
+            match pdf_hatch::expand(
+                &rings_of(&runs),
+                &placed,
+                &|| cancel.is_cancelled(),
+                &mut stroke_budget,
+            ) {
                 Ok(strokes) => {
                     content.push_str(&format!("{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
                     for s in strokes {
@@ -623,7 +662,8 @@ fn read_page(
                         ));
                     }
                 }
-                Err(pdf_hatch::TooDense) => {
+                Err(pdf_hatch::Refused::Stopped) => return Err(PvecConvertError::Cancelled),
+                Err(pdf_hatch::Refused::TooDense) => {
                     if !notes.iter().any(|n| n == "hatch-too-dense") {
                         notes.push("hatch-too-dense".into());
                     }
@@ -644,7 +684,10 @@ fn read_page(
         }
     }
 
-    for (id, curve) in &entities {
+    for (n, (id, curve)) in entities.iter().enumerate() {
+        if n % 4096 == 0 && cancel.is_cancelled() {
+            return Err(PvecConvertError::Cancelled);
+        }
         if boundary.contains(id) {
             continue;
         }
@@ -798,9 +841,33 @@ fn pdf_string(text: &str) -> String {
         .collect()
 }
 
+/// A PDF page is at most this many points on a side.
+const MAX_PAGE_POINTS: f64 = 14_400.0;
+
+/// Refuses a page that is not a PDF page: a side that is not finite, is negative, or is over the
+/// 14400 point limit.
+fn check_page(page: &Page) -> Result<(), PvecConvertError> {
+    let [w, h] = page.size;
+    let bad = |v: f64| !v.is_finite() || !(0.0..=MAX_PAGE_POINTS).contains(&v);
+    if bad(w) || bad(h) {
+        return Err(PvecConvertError::PageRefused {
+            reason: "a side is not a finite length of at most 14400 points",
+        });
+    }
+    Ok(())
+}
+
 fn push_path(content: &mut String, runs: &Runs, close: bool) {
     let mut open = false;
     for seg in runs {
+        // A coordinate that is not finite is left out, as a number a PDF cannot hold.
+        let finite = match seg {
+            Seg::Move(x, y) | Seg::Line(x, y) => x.is_finite() && y.is_finite(),
+            Seg::Curve(p) => p.iter().all(|v| v.is_finite()),
+        };
+        if !finite {
+            continue;
+        }
         match seg {
             Seg::Move(x, y) => {
                 if close && open {

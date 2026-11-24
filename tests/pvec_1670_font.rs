@@ -153,6 +153,11 @@ fn issue_1670_the_licence_text_is_in_the_repository_and_packaged() {
     }) {
         assert!(!line.contains("fonts"), "{line}");
     }
+    // The crate declares the face's licence too.
+    assert!(
+        manifest.contains("OFL-1.1"),
+        "license in Cargo.toml does not name the font's licence"
+    );
     // The renamed face does not carry the reserved name as its family.
     let ttf = fs::read(root().join("fonts/LibviprsLatin-Regular.ttf")).unwrap();
     let as_utf16: Vec<u8> = "Liberation Sans"
@@ -164,4 +169,60 @@ fn issue_1670_the_licence_text_is_in_the_repository_and_packaged() {
             .any(|w| w == as_utf16.as_slice()),
         "the reserved name is still a name in the font"
     );
+}
+
+/// The name records of a TrueType font as (name id, text), read from its `name` table.
+fn name_records(ttf: &[u8]) -> Vec<(u16, String)> {
+    let be16 = |at: usize| u16::from_be_bytes([ttf[at], ttf[at + 1]]);
+    let be32 = |at: usize| u32::from_be_bytes([ttf[at], ttf[at + 1], ttf[at + 2], ttf[at + 3]]);
+    let tables = usize::from(be16(4));
+    let table = (0..tables)
+        .map(|i| 12 + 16 * i)
+        .find(|&at| &ttf[at..at + 4] == b"name")
+        .expect("a name table");
+    let base = be32(table + 8) as usize;
+    let count = usize::from(be16(base + 2));
+    let strings = base + usize::from(be16(base + 4));
+    (0..count)
+        .map(|i| {
+            let r = base + 6 + 12 * i;
+            let (platform, id, len, off) = (
+                be16(r),
+                be16(r + 6),
+                usize::from(be16(r + 8)),
+                usize::from(be16(r + 10)),
+            );
+            let raw = &ttf[strings + off..strings + off + len];
+            let text = if platform == 3 || platform == 0 {
+                String::from_utf16_lossy(
+                    &raw.chunks(2)
+                        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                String::from_utf8_lossy(raw).into_owned()
+            };
+            (id, text)
+        })
+        .collect()
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_the_faces_names_carry_no_reserved_name() {
+    // Name ids 1 (family), 3 (unique id), 4 (full name), 6 (PostScript name), 10 (description) and 16
+    // (typographic family) name the font, and a modified font may not use a reserved name there: the
+    // licence reserves Liberation, Arimo, Tinos and Cousine. The copyright (0) and trademark (7) notices
+    // stay as the licence asks.
+    let ttf = fs::read(root().join("fonts/LibviprsLatin-Regular.ttf")).unwrap();
+    let records = name_records(&ttf);
+    for (id, text) in &records {
+        if [1u16, 3, 4, 6, 10, 16].contains(id) {
+            for reserved in ["Liberation", "Arimo", "Tinos", "Cousine"] {
+                assert!(!text.contains(reserved), "name {id} reads {text:?}");
+            }
+        }
+    }
+    let family = records.iter().find(|(id, _)| *id == 1).unwrap();
+    assert_eq!(family.1, "Libviprs Latin");
 }
