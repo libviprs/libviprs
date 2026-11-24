@@ -1597,3 +1597,4 @@ annotated   not-detected tests/plot_files_1673.rs::issue_1673_a_pc3_that_does_no
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_bytes_that_are_no_plot_file_are_unrecognised
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_every_refusal_has_its_own_stable_code
 annotated   not-detected tests/plot_files_1673.rs::issue_1673_the_device_facts_are_paper_printable_area_raster_limit_and_text_mode
+annotated   fs-detected  tests/pvec_1668_pdf_decodeparms.rs::the_owners_plan_converts_on_the_pages_that_stopped

@@ -187,6 +187,7 @@ fn an_unknown_predictor_is_a_typed_refusal_that_names_the_predictor() {
 
 /// The owner's plan: pages 1, 2, 11, 32 and 64 of 64 all stopped on /DecodeParms.
 #[test]
+#[cfg_attr(miri, ignore)]
 #[ignore = "needs LIBVIPRS_1668_PDF, the owner's plan, which is never committed"]
 fn the_owners_plan_converts_on_the_pages_that_stopped() {
     let path = std::env::var("LIBVIPRS_1668_PDF").expect("LIBVIPRS_1668_PDF");

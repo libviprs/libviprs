@@ -339,7 +339,10 @@ fn unfilter(
         };
         let mut inflated = crate::pdf::flate_decompress(&data, cap).map_err(PdfImageError::Pdf)?;
         if codec.is_none() {
-            inflated = unpredict(parms_for(&raw.dict, 0), inflated, usize::MAX).map_err(bad)?;
+            inflated = {
+                let max_row = inflated.len();
+                unpredict(parms_for(&raw.dict, 0), inflated, max_row).map_err(bad)?
+            };
         }
         data = std::borrow::Cow::Owned(inflated);
     }
