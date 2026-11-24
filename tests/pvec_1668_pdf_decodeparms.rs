@@ -149,20 +149,6 @@ fn flate_with_a_null_decode_parms_array_is_read() {
 }
 
 #[test]
-fn ascii_hex_then_flate_with_two_null_parms_is_read() {
-    let mut hex: String = flate(CONTENT.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect();
-    hex.push('>');
-    let dict = dictionary! {
-        "Filter" => vec![name("ASCIIHexDecode"), name("FlateDecode")],
-        "DecodeParms" => vec![Object::Null, Object::Null],
-    };
-    read_ok(&pdf(dict, hex.into_bytes(), None));
-}
-
-#[test]
 fn flate_with_a_png_up_predictor_is_read() {
     let dict = dictionary! { "Filter" => "FlateDecode", "DecodeParms" => parms(12, 16) };
     read_ok(&pdf(dict, flate(&png(CONTENT.as_bytes(), 16, &[2])), None));

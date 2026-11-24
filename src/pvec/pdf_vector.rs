@@ -44,6 +44,7 @@ use lopdf::content::{Content, Operation};
 use lopdf::{Dictionary, Document, Object};
 use thiserror::Error;
 
+use super::pdf_image_decode::{parms_for, unpredict};
 use super::pdf_layers::{OcModel, PdfLayerMode};
 use super::pdf_shading::{PdfFillPattern, PdfShading, PdfShadingPaint, read_shading};
 use super::pdf_text::{PdfTextRun, TextContext, TextParams, TextTracker};
@@ -1170,18 +1171,44 @@ fn stream_bytes(
                 ),
             ));
         }
-        if stream.dict.get(b"DecodeParms").is_ok() || stream.dict.get(b"DP").is_ok() {
-            return Err(stream_error(
-                page,
-                "stream filter: /DecodeParms is not supported",
-            ));
+        // `/DecodeParms` follows the filter chain by position. A `null`, a missing entry or an
+        // empty dictionary is no parameters, and only the Flate stage may carry any, which is a
+        // `/Predictor`. What cannot be read exactly (an indirect entry, a parameter on an ASCII
+        // stage, `/DP`) is refused, never skipped, because skipping would decode wrong bytes.
+        let entries: Vec<&Object> = match stream.dict.get(b"DecodeParms") {
+            Err(_) => Vec::new(),
+            Ok(Object::Array(a)) => a.iter().collect(),
+            Ok(one) => vec![one],
+        };
+        if stream.dict.get(b"DP").is_ok() {
+            return Err(stream_error(page, "stream filter: /DP is not supported"));
         }
+        for (i, entry) in entries.iter().enumerate() {
+            let ok = match entry {
+                Object::Null => true,
+                Object::Dictionary(d) => {
+                    d.is_empty()
+                        || (i == head.len()
+                            && flate
+                            && d.iter().all(|(_, v)| !matches!(v, Object::Reference(_))))
+                }
+                _ => false,
+            };
+            if !ok {
+                return Err(stream_error(
+                    page,
+                    "stream filter: this /DecodeParms entry is not supported",
+                ));
+            }
+        }
+        let flate_parms = parms_for(&stream.dict, head.len()).filter(|_| flate);
         // The ASCII stages run through lopdf on a copy of the stream with the
         // trailing Flate filter removed, so what they hand on is at most the raw size.
         let packed = if head.is_empty() && flate {
             stream.content.clone()
         } else {
             let mut d = stream.dict.clone();
+            d.remove(b"DecodeParms");
             if flate {
                 d.set(
                     "Filter",
@@ -1204,7 +1231,9 @@ fn stream_bytes(
             if out.len() as u64 > remaining {
                 return Err(over(*used));
             }
-            out
+            let max_row = out.len();
+            unpredict(flate_parms, out, max_row)
+                .map_err(|e| stream_error(page, format!("stream filter: {e}")))?
         } else {
             *used = used.saturating_add(packed.len() as u64);
             if packed.len() as u64 > remaining {
