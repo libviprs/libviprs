@@ -503,8 +503,9 @@ fn issue_1658_multileader_text_is_a_text_record() {
     }
     assert_eq!(count(&run, "MULTILEADER.mapped"), with_text as u64);
     for row in rows(&run, "MULTILEADER") {
+        // The lines are drawn too since #1671, so the row no longer says they are left out.
         assert!(
-            row.warnings
+            !row.warnings
                 .iter()
                 .any(|w| w.contains("leader lines are not drawn")),
             "{:?}",
@@ -625,9 +626,10 @@ fn issue_1658_tolerance_text_is_a_text_record_without_codes() {
         })
         .collect();
     assert_eq!(carried.len(), run.records.len(), "a row per printed row");
+    // The frame is drawn too since #1671, so the rows no longer say it is left out.
     for row in carried {
         assert!(
-            row.warnings
+            !row.warnings
                 .iter()
                 .any(|w| w.contains("its frame is not drawn")),
             "{:?}",
@@ -643,7 +645,11 @@ fn issue_1658_with_texts_off_they_stay_unmapped_and_say_so() {
     let run = convert_fixture("texts-off", "cad/sample_AC1018.dwg", false, true);
     assert!(run.records.is_empty(), "{:?}", texts(&run));
     for class in ["MULTILEADER", "TOLERANCE"] {
-        for row in rows(&run, class) {
+        // The entity's own rows: its lines (#1671) are geometry and are drawn either way.
+        for row in rows(&run, class)
+            .into_iter()
+            .filter(|r| r.semantic_type.is_none())
+        {
             assert_eq!(row.reason.as_deref(), Some("unmapped-source-class"));
             assert!(
                 row.warnings.iter().any(|w| w.contains("texts are off")),

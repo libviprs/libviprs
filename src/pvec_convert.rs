@@ -431,8 +431,9 @@ impl<'a> PvecConversion<'a> {
     /// stay unmapped, each with a warning saying fills are off, until [`fills`](Self::fills) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
     ///
-    /// A MULTILEADER's text and a TOLERANCE's frame text are carried the same way, each row saying
-    /// its leader lines or its frame are not drawn (#1658). A DIMENSION needs neither option: the
+    /// A MULTILEADER's text and a TOLERANCE's frame text are carried the same way (#1658). Their
+    /// lines (a MULTILEADER's and a LEADER's lines with arrowheads, a TOLERANCE's frame) are
+    /// geometry and come through whatever this choice is (#1671). A DIMENSION needs neither option: the
     /// provider reports it as an INSERT of its anonymous block, so its lines are geometry and its
     /// printed value is an MTEXT in that block. Only a dimension whose block is missing comes here,
     /// with its text rebuilt from the measurement and its style (decimal units only).
@@ -1260,6 +1261,7 @@ impl<'a> PvecConversion<'a> {
                 &mut LineageStore::new(),
             )
             .map_err(PvecConvertError::Flatten)?;
+        let (flat_lines, leader_lines) = line_leaves(provider, &flat.entities);
 
         // The leaves the profile kept. The view pass decides visibility and the flatten pass owns
         // the composed maps, so a flattened leaf is drawn when the view pass kept the same one.
@@ -1292,13 +1294,18 @@ impl<'a> PvecConversion<'a> {
             .collect();
 
         let mut items: Vec<Item<'_>> = Vec::new();
-        for f in &flat.entities {
+        for f in flat.entities.iter().chain(&flat_lines) {
             let p = &f.entity.provenance;
-            if kept.contains_key(&(
-                p.handle.map(|h| h.get()),
-                p.block_path.to_string(),
-                p.class_name.clone(),
-            )) {
+            // A LEADER whose line is drawn is that line and not an unmapped entity as well (#1671).
+            let replaced = matches!(f.entity.geometry, RawGeometry::Unmapped { .. })
+                && leader_lines.contains(&flat_key(f));
+            if !replaced
+                && kept.contains_key(&(
+                    p.handle.map(|h| h.get()),
+                    p.block_path.to_string(),
+                    p.class_name.clone(),
+                ))
+            {
                 items.push(Item::Leaf(f));
             }
         }
@@ -1344,6 +1351,8 @@ impl<'a> PvecConversion<'a> {
             .collect();
         let mut model_view = None;
         let mut model_flat = None;
+        let mut model_lines: Vec<FlatEntity> = Vec::new();
+        let mut model_leader_lines = BTreeSet::new();
         // The own layer of every INSERT a model leaf is reached through, so a freeze on an INSERT's
         // layer takes its whole block with it inside that viewport, as the view pass does for a
         // frozen layer (P-3).
@@ -1393,6 +1402,9 @@ impl<'a> PvecConversion<'a> {
                     )
                     .map_err(PvecConvertError::Flatten)?,
             );
+            if let Some(mf) = &model_flat {
+                (model_lines, model_leader_lines) = line_leaves(provider, &mf.entities);
+            }
             if drawn
                 .iter()
                 .any(|&k| !windows[k].0.frozen_layers.is_empty())
@@ -1483,7 +1495,12 @@ impl<'a> PvecConversion<'a> {
                 for f in mf
                     .entities
                     .iter()
+                    .chain(&model_lines)
                     .filter(|f| model_layers.contains_key(&flat_key(f)))
+                    .filter(|f| {
+                        !(matches!(f.entity.geometry, RawGeometry::Unmapped { .. })
+                            && model_leader_lines.contains(&flat_key(f)))
+                    })
                 {
                     items.push(Item::Leaf(f));
                     via.push((u32::try_from(k).unwrap_or(u32::MAX - 2) + 1, Some(k)));
@@ -2387,8 +2404,6 @@ impl<'a> PvecConversion<'a> {
                         Ok(Some((mut pieces, body))) => {
                             // What the stream does not carry of the entity (#1658).
                             let left_out = match class {
-                                "MULTILEADER" => Some("its leader lines are not drawn"),
-                                "TOLERANCE" => Some("its frame is not drawn"),
                                 _ if dimension => Some(
                                     "its block is missing, so its text is rebuilt from the measurement and nothing else is drawn",
                                 ),
@@ -3601,8 +3616,54 @@ struct Done {
     warnings: Vec<String>,
 }
 
+/// The lines a LEADER, MULTILEADER or TOLERANCE leaf draws (#1671), each as a leaf of its own with
+/// the entity's provenance, style and placement, so the layer rules, the view pass and any viewport
+/// it is seen through treat them as they do the entity. A MULTILEADER's or TOLERANCE's own leaf
+/// stays for its text; a LEADER has nothing else to say, so the keys of the LEADER leaves whose
+/// lines are drawn come back too, and those leaves are left out.
+fn line_leaves<P: DwgProvider>(
+    provider: &P,
+    leaves: &[FlatEntity],
+) -> (Vec<FlatEntity>, BTreeSet<LeafKey>) {
+    let (mut lines, mut replaced) = (Vec::new(), BTreeSet::new());
+    for f in leaves {
+        let class = f.entity.provenance.class_name.as_str();
+        if !matches!(f.entity.geometry, RawGeometry::Unmapped { .. })
+            || !matches!(class, "LEADER" | "MULTILEADER" | "TOLERANCE")
+        {
+            continue;
+        }
+        let Some(handle) = f.entity.provenance.handle else {
+            continue;
+        };
+        let drawn = provider.annotation_lines(handle);
+        if class == "LEADER" && !drawn.is_empty() {
+            replaced.insert(flat_key(f));
+        }
+        // No entity draws more than this many lines: a frame of rows and cells or a leader's
+        // lines and arrowheads are a few dozen at most.
+        const MAX_LINES_PER_ENTITY: usize = 4096;
+        lines.extend(
+            drawn
+                .into_iter()
+                .take(MAX_LINES_PER_ENTITY)
+                .map(|geometry| {
+                    f.carrying(RawEntity {
+                        geometry,
+                        provenance: f.entity.provenance.clone(),
+                        style: f.entity.style.clone(),
+                    })
+                }),
+        );
+    }
+    (lines, replaced)
+}
+
+/// A leaf's handle, block path and class, which says which view pass decision is its own.
+type LeafKey = (Option<u64>, String, String);
+
 /// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
-fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
+fn flat_key(f: &FlatEntity) -> LeafKey {
     leaf_key_of(&f.entity.provenance)
 }
 
