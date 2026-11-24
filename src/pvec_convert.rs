@@ -297,6 +297,9 @@ pub struct PvecConversion<'a> {
     xref_note: Arc<Mutex<xref::XrefNote>>,
     /// The directory a DWG IMAGE's file is read from (#1667); `None` places no image.
     images: Option<PathBuf>,
+    /// Whether an OLE2FRAME is drawn from its cached preview (#1705).
+    #[allow(dead_code)]
+    ole_previews: bool,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -414,7 +417,17 @@ impl<'a> PvecConversion<'a> {
             xrefs: Vec::new(),
             xref_note: Arc::default(),
             images: None,
+            ole_previews: false,
         }
+    }
+
+    /// Draw an OLE2FRAME from the preview it carries (#1705): an EMF is played as vectors (lines,
+    /// solid cells and text) and a raster or DIB is placed like an IMAGE, both at the frame's
+    /// corners, behind the limits of #1667. Off by default, and then an OLE2FRAME is only counted.
+    #[must_use]
+    pub fn ole_previews(mut self, on: bool) -> Self {
+        self.ole_previews = on;
+        self
     }
 
     /// Place a DWG IMAGE as a raster (#1667). The file its definition names is looked up by file

@@ -61,6 +61,7 @@ pub struct PdfPlot<'a> {
     texts: bool,
     fills: bool,
     images: Option<PathBuf>,
+    ole_previews: bool,
     embedded_font: bool,
     hairline_below_mm: f64,
 }
@@ -85,6 +86,7 @@ impl<'a> PdfPlot<'a> {
             texts: false,
             fills: false,
             images: None,
+            ole_previews: false,
             embedded_font: true,
             hairline_below_mm: 0.0,
         }
@@ -180,6 +182,13 @@ impl<'a> PdfPlot<'a> {
     #[must_use]
     pub fn images(mut self, dir: impl Into<PathBuf>) -> Self {
         self.images = Some(dir.into());
+        self
+    }
+
+    /// Draw an OLE2FRAME from its cached preview, as [`PvecConversion::ole_previews`] does (#1705).
+    #[must_use]
+    pub fn ole_previews(mut self, on: bool) -> Self {
+        self.ole_previews = on;
         self
     }
 
@@ -333,6 +342,7 @@ impl<'a> PdfPlot<'a> {
                     .project_plan(true)
                     .texts(self.texts)
                     .fills(self.fills)
+                    .ole_previews(self.ole_previews)
                     .components(StreamSelection::ALL)
                     .cancel(cancel.clone());
                 if let Some(o) = &self.observer {
