@@ -56,7 +56,7 @@ It means nobody told us. A consumer must treat the coordinates as numbers in an 
 
 ## Geometry is never rescaled on ingest
 
-Geometry is never rescaled on ingest. There is no scale factor, no normalise-to-metres step, and no georeferencing transform composed into normalised geometry anywhere under `src/pvec/`. For a drawing authored at exactly representable `f64` coordinates, the values reaching `pvec` are bit-identical to the source, and the test compares raw bit patterns. The same drawing saved in inches and in millimetres gives identical coordinate values and a different `SourceUnit`.
+Geometry is never rescaled on ingest. There is no scale factor, no normalise-to-metres step, and no georeferencing transform composed into normalised geometry anywhere under `src/pvec/`. For a drawing authored at exactly representable `f64` coordinates, the values reaching `pvec` are bit-identical to the source, and the test compares raw bit patterns. The same drawing saved in inches and in millimetres gives identical coordinate values and a different `SourceUnit`. One exception: a plotted paper sheet whose plot scale is not 1:1 has its linework scaled into the paper unit (#1665, see the print profile ADR), and one plotted 1:1 is still bit-identical.
 
 The unit and the source-space drawing bounds are handed to the georeference contract (N7.3) as `SourceSpace` metadata. The raster-side georeference types in `src/geo.rs` stay on the raster side, and a test scans `src/pvec/` to make sure nothing there refers to them.
 

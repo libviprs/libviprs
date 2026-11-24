@@ -296,7 +296,8 @@ pub struct PlotSettings {
     /// fit ratio is a note in the report.
     pub fit_to_paper: bool,
     /// The plot scale in place of the layout's own: a preset and a custom scale are both a
-    /// [`PlotScale`]. `None` is the layout's own.
+    /// [`PlotScale`]. `None` is the layout's own. It scales the sheet's linework into the paper
+    /// unit (#1665), except under a fit, which works out its own ratio.
     pub scale: Option<PlotScale>,
     /// The plot offset in millimetres, in place of the layout's own plot origin. `None` is the
     /// layout's own.
@@ -313,7 +314,8 @@ pub struct PlotSettings {
 /// A plot scale as the plot dialog's custom row gives it: `paper` paper units of `paper_unit` to
 /// `drawing` drawing units, each the size of the conversion's own unit. `1 inch = 50 units` is
 /// `{ paper: 1.0, paper_unit: Inches, drawing: 50.0 }`, whatever the sheet's own unit is. The
-/// calibration record carries `paper_unit` as its paper unit.
+/// calibration record carries `paper_unit` as its paper unit. It also scales the sheet's linework
+/// from drawing units into the sheet's unit, so `1 mm : 0.04` makes a drawing unit 25 mm of paper.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PlotScale {
     /// Paper units, in `paper_unit`.
@@ -902,6 +904,7 @@ impl<'a> PvecConversion<'a> {
             let mut place = None;
             let mut windowed = false;
             let mut flip = false;
+            let mut scale_k = 1.0;
             match &fact {
                 SourceFact::Absent => summary.frame_reason = Some("plot-settings-absent".into()),
                 SourceFact::Present(p) => {
@@ -1054,7 +1057,46 @@ impl<'a> PvecConversion<'a> {
                             }
                         }
                     }
-                    if let (Some(b), Some(sheet_unit)) = (frame_box, plot_unit) {
+                    if let (Some(mut b), Some(sheet_unit)) = (frame_box, plot_unit) {
+                        let [n, d] = plot_settings
+                            .scale
+                            .map_or([p.scale_numerator, p.scale_denominator], |s| {
+                                [s.paper, s.drawing]
+                            });
+                        // #1665: the linework is in paper-space drawing units, and the plot scale
+                        // says how many paper units one of them prints as. A fit works out its own
+                        // ratio, so the scale does not move anything under one. A layout whose
+                        // paper units are not a length has no unit to scale into.
+                        let paper_unit = plot_settings.scale.map_or(sheet_unit, |s| s.paper_unit);
+                        let by_length =
+                            plot_settings.scale.is_some() || matches!(p.paper_units, 0 | 1);
+                        if sized(n) && sized(d) && !(fit && !windowed) {
+                            // Paper units to the sheet unit, from PVec's metres.
+                            let along = if paper_unit == sheet_unit {
+                                Some(1.0)
+                            } else {
+                                metres_per_unit(paper_unit)
+                                    .ok()
+                                    .zip(metres_per_unit(sheet_unit).ok())
+                                    .map(|(paper, sheet)| paper / sheet)
+                            };
+                            match along.map(|a| n / d * a) {
+                                _ if !by_length => {
+                                    if n != d {
+                                        summary.notes.push("plot-scale-not-applied".into());
+                                    }
+                                }
+                                Some(k) if k.is_finite() && k > 0.0 && k != 1.0 => {
+                                    scale_k = k;
+                                    summary.notes.push(format!("plot-scale-applied {n}:{d}"));
+                                }
+                                _ => {}
+                            }
+                        }
+                        if windowed && scale_k != 1.0 {
+                            b = b.map(|v| v * scale_k);
+                            frame_box = Some(b);
+                        }
                         summary.frame = "paper".into();
                         summary.position = Some("unmeasured".into());
                         summary.sheet_box = Some(b.map(text));
@@ -1084,11 +1126,6 @@ impl<'a> PvecConversion<'a> {
                         // Rotation 1 is the swap of the sides already made; 2 and 3 turn the
                         // sheet's content about the frame's centre once the frame is known.
                         flip = matches!(p.rotation, 2 | 3);
-                        let [n, d] = plot_settings
-                            .scale
-                            .map_or([p.scale_numerator, p.scale_denominator], |s| {
-                                [s.paper, s.drawing]
-                            });
                         if plot_settings.scale.is_some() {
                             summary.notes.push("plot-scale-overridden".into());
                         }
@@ -1120,6 +1157,7 @@ impl<'a> PvecConversion<'a> {
                 drop_widths,
                 place,
                 flip,
+                scale: scale_k,
             });
         }
         let source_name = match *source {
@@ -1572,6 +1610,9 @@ impl<'a> PvecConversion<'a> {
             }
             sh.summary.notes.push("plot-area-extents".into());
             if let Some(e) = ext {
+                // The extents are in drawing units; the paper is placed from them in the sheet's
+                // (#1665). A fit has no scale (it works out its own).
+                let e = e.map(|v| v * sh.scale);
                 let [ml, mb, mr, mt] = pl.margin;
                 let (printable_w, printable_h) = (pl.size[0] - ml - mr, pl.size[1] - mb - mt);
                 let (ew, eh) = (e[2] - e[0], e[3] - e[1]);
@@ -1610,15 +1651,16 @@ impl<'a> PvecConversion<'a> {
             }
         }
         let frame = sheet.as_ref().and_then(|s| s.frame);
-        // Plotting upside-down turns everything 180 degrees about the frame's centre, which
-        // leaves the frame where it is. The windows turn with it, so what is drawn through them
-        // and the rectangle it is cut to stay together.
-        let flip_map = sheet
-            .as_ref()
-            .filter(|s| s.flip)
-            .and_then(|s| s.frame)
-            .map(|b| [-1.0, 0.0, 0.0, -1.0, b[0] + b[2], b[1] + b[3]]);
-        if let Some(m) = flip_map {
+        // The sheet's own map (#1665): the plot scale carries the linework into the sheet unit, and
+        // plotting upside-down then turns everything 180 degrees about the frame's centre, which
+        // leaves the frame where it is. The windows go with it, so what is drawn through them and
+        // the rectangle it is cut to stay together. A 1 : 1 sheet that is not turned has no map.
+        let sheet_map = sheet.as_ref().and_then(|s| match (s.flip, s.frame) {
+            (true, Some(b)) => Some([-s.scale, 0.0, 0.0, -s.scale, b[0] + b[2], b[1] + b[3]]),
+            _ if s.scale != 1.0 => Some([s.scale, 0.0, 0.0, s.scale, 0.0, 0.0]),
+            _ => None,
+        });
+        if let Some(m) = sheet_map {
             for (_, w) in &mut windows {
                 if let Window::Drawn { map, rect, ring } = w {
                     let [p, q, r, s, u, v] = m;
@@ -1631,15 +1673,12 @@ impl<'a> PvecConversion<'a> {
                         p * tx + q * ty + u,
                         r * tx + s * ty + v,
                     ];
-                    *rect = [
-                        m[4] - rect[2],
-                        m[5] - rect[3],
-                        m[4] - rect[0],
-                        m[5] - rect[1],
-                    ];
+                    let (x0, x1) = (p * rect[0] + u, p * rect[2] + u);
+                    let (y0, y1) = (s * rect[1] + v, s * rect[3] + v);
+                    *rect = [x0.min(x1), y0.min(y1), x0.max(x1), y0.max(y1)];
                     if let Some(points) = ring {
                         for pt in points.iter_mut() {
-                            *pt = [m[4] - pt[0], m[5] - pt[1]];
+                            *pt = [p * pt[0] + u, s * pt[1] + v];
                         }
                     }
                 }
@@ -1674,8 +1713,8 @@ impl<'a> PvecConversion<'a> {
                         lifted = Item::Leaf(&lifted_leaf);
                         &lifted
                     }
-                    (None, Item::Leaf(f)) if flip_map.is_some() => {
-                        lifted_leaf = f.through(flip_map.expect("checked in the guard"));
+                    (None, Item::Leaf(f)) if sheet_map.is_some() => {
+                        lifted_leaf = f.through(sheet_map.expect("checked in the guard"));
                         lifted = Item::Leaf(&lifted_leaf);
                         &lifted
                     }
@@ -2955,8 +2994,8 @@ struct Classified {
 }
 
 /// The plot scale as the calibration record (P-9, #1562): `n` paper units to `d` drawing units,
-/// the paper unit being `sheet_unit`. It is never applied to a coordinate. A caller's calibration
-/// wins. The summary says what became of it.
+/// the paper unit being `sheet_unit`. The coordinates have already been scaled into the sheet unit
+/// by it (#1665), so the record is true of them as written. A caller's calibration wins. The summary says what became of it.
 fn plot_scale_record(
     [n, d]: [f64; 2],
     paper_unit: SourceUnit,
@@ -2968,8 +3007,7 @@ fn plot_scale_record(
 ) -> Option<Calibration> {
     let sized = |v: f64| v.is_finite() && v > 0.0;
     let mut written = None;
-    // P-9: the plot scale is the calibration record, never applied to a
-    // coordinate. A caller's calibration wins.
+    // P-9: the plot scale is the calibration record. A caller's calibration wins.
     if caller_calibration {
         summary.notes.push("caller-calibration".into());
     } else if !(sized(n) && sized(d)) {
@@ -3082,6 +3120,8 @@ struct Sheet {
     /// The layout plots upside-down (rotation 2 or 3): the content turns 180 degrees about the
     /// frame's centre (#1632).
     flip: bool,
+    /// Sheet units per paper-space drawing unit, from the plot scale (#1665). 1 when none applies.
+    scale: f64,
 }
 
 /// A paper sheet's placement in the sheet unit: what the frame is worked out from once the
