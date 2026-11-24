@@ -12,9 +12,10 @@ use std::time::{Duration, Instant};
 
 use acadrust::plot_style::PlotStyleTable;
 use lopdf::{Dictionary, Document, Object, Stream, dictionary};
-use pvec_components::{Fill, HatchStream, TextStream};
+use pvec_components::{Band, Fill, HatchStream, TextStream};
 use pvec_facade::Curve;
 use pvec_facade::components::{LineStyleStream, StrokePaintStream, StrokeWidth};
+use pvec_facade::unstable::RasterId;
 use pvec_geometry::{Curve2d, Side};
 
 use super::{PlotSettings, PvecConversion, PvecConvertError};
@@ -361,6 +362,16 @@ struct Page {
     rotate: i64,
     content: String,
     text: bool,
+    /// The rasters the content draws as `/Im<n>`.
+    images: Vec<PageImage>,
+}
+
+/// A raster for the page: RGB bytes, and its alpha when it has any.
+struct PageImage {
+    width: u32,
+    height: u32,
+    rgb: Vec<u8>,
+    alpha: Option<Vec<u8>>,
 }
 
 /// A path segment in page points.
@@ -423,6 +434,77 @@ fn read_page(
         .flat_map(|h| h.records.iter().flat_map(|r| r.boundary.iter().copied()))
         .collect();
     let mut content = String::new();
+
+    // Rasters placed under the vectors, then over them (#1667).
+    let mut images: Vec<PageImage> = Vec::new();
+    let mut overlay = String::new();
+    for (n, placement) in reader
+        .raster_placements()
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+    {
+        let Ok(id) = RasterId::new(n as u32) else {
+            continue;
+        };
+        let top = u32::from(placement.levels).saturating_sub(1);
+        let Ok(Some(bytes)) = reader.raster_tile(id, top, 0, 0) else {
+            continue;
+        };
+        let Ok(decoded) = image::load_from_memory(&bytes) else {
+            continue;
+        };
+        // The tile is padded to the tile edge: the level's own pixels are its top-left corner.
+        let level_side = |n: u32| n.div_ceil(1u32 << top.min(31)).max(1);
+        let rgba = image::imageops::crop_imm(
+            &decoded.to_rgba8(),
+            0,
+            0,
+            level_side(placement.width),
+            level_side(placement.height),
+        )
+        .to_image();
+        let (w, h) = (f64::from(placement.width), f64::from(placement.height));
+        let [a, b, c, d, tx, ty] = placement.pixel_to_source;
+        let [x0, y0, x1, y1] = placement.visible_box.map(f64::from);
+        // The unit square, bottom left at (0, 0): pixel (px, py) is (u * w, (1 - v) * h).
+        let cm = [
+            a * w * k,
+            c * w * k,
+            -b * h * k,
+            -d * h * k,
+            (tx + b * h - lo[0]) * k,
+            (ty + d * h - lo[1]) * k,
+        ];
+        let mut draw = format!(
+            "q\n{:.6} {:.6} {:.6} {:.6} {:.4} {:.4} cm\n",
+            cm[0], cm[1], cm[2], cm[3], cm[4], cm[5]
+        );
+        if placement.visible_box != [0, 0, placement.width, placement.height] {
+            draw.push_str(&format!(
+                "{:.6} {:.6} {:.6} {:.6} re W n\n",
+                x0 / w,
+                1.0 - y1 / h,
+                (x1 - x0) / w,
+                (y1 - y0) / h
+            ));
+        }
+        draw.push_str(&format!("/Im{} Do\nQ\n", images.len()));
+        let opaque = rgba.pixels().all(|p| p.0[3] == 255);
+        images.push(PageImage {
+            width: rgba.width(),
+            height: rgba.height(),
+            rgb: rgba
+                .pixels()
+                .flat_map(|p| [p.0[0], p.0[1], p.0[2]])
+                .collect(),
+            alpha: (!opaque).then(|| rgba.pixels().map(|p| p.0[3]).collect()),
+        });
+        match placement.band {
+            Band::Underlay => content.push_str(&draw),
+            _ => overlay.push_str(&draw),
+        }
+    }
 
     // Fills first, under the strokes.
     for record in hatches.iter().flat_map(|h| &h.records) {
@@ -489,6 +571,7 @@ fn read_page(
         content.push_str("S\n");
     }
 
+    content.push_str(&overlay);
     let mut text = false;
     for t in texts.iter().flat_map(|t| &t.records) {
         let word = paint
@@ -531,6 +614,7 @@ fn read_page(
         rotate,
         content,
         text,
+        images,
     })
 }
 
@@ -600,6 +684,7 @@ fn blank_page(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> Page {
         rotate: 0,
         content: String::new(),
         text: false,
+        images: Vec::new(),
     }
 }
 
@@ -716,11 +801,40 @@ fn write_pdf(dest: &Path, pages: impl Iterator<Item = Page>) -> std::io::Result<
         } else {
             [page.size[1], page.size[0]]
         };
-        let resources = if page.text {
-            dictionary! { "Font" => dictionary! { "F1" => font } }
-        } else {
-            Dictionary::new()
-        };
+        let mut resources = Dictionary::new();
+        if page.text {
+            resources.set("Font", dictionary! { "F1" => font });
+        }
+        if !page.images.is_empty() {
+            let mut xobjects = Dictionary::new();
+            for (n, image) in page.images.iter().enumerate() {
+                let mut dict = dictionary! {
+                    "Type" => "XObject",
+                    "Subtype" => "Image",
+                    "Width" => i64::from(image.width),
+                    "Height" => i64::from(image.height),
+                    "ColorSpace" => "DeviceRGB",
+                    "BitsPerComponent" => 8,
+                };
+                if let Some(alpha) = &image.alpha {
+                    let mask = doc.add_object(Stream::new(
+                        dictionary! {
+                            "Type" => "XObject",
+                            "Subtype" => "Image",
+                            "Width" => i64::from(image.width),
+                            "Height" => i64::from(image.height),
+                            "ColorSpace" => "DeviceGray",
+                            "BitsPerComponent" => 8,
+                        },
+                        alpha.clone(),
+                    ));
+                    dict.set("SMask", mask);
+                }
+                let id = doc.add_object(Stream::new(dict, image.rgb.clone()));
+                xobjects.set(format!("Im{n}"), id);
+            }
+            resources.set("XObject", xobjects);
+        }
         let id = doc.add_object(dictionary! {
             "Type" => "Page",
             "Parent" => pages_id,

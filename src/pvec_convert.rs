@@ -2351,8 +2351,7 @@ impl<'a> PvecConversion<'a> {
                 if annotate
                     && matches!(item, Item::Leaf(_))
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && ((text_class && !*want_texts)
-                        || (fill_class && !*want_fills && window.is_none()))
+                    && ((text_class && !*want_texts) || (fill_class && !*want_fills))
                 {
                     let (class, choice) = (
                         raw.provenance.class_name.as_str(),
@@ -2365,8 +2364,7 @@ impl<'a> PvecConversion<'a> {
                     && !frozen_here
                     && let Item::Leaf(f) = item
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && ((text_class && *want_texts)
-                        || (fill_class && *want_fills && window.is_none()))
+                    && ((text_class && *want_texts) || (fill_class && *want_fills))
                 {
                     let class = raw.provenance.class_name.as_str();
                     let made = raw
