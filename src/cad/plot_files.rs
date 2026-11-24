@@ -83,14 +83,68 @@ impl From<Pc3Error> for PlotFileError {
 
 /// A PC3 of either kind, read from bytes the caller holds. The library never opens a file by a
 /// name stored in a drawing.
+///
+/// The size is checked first: a binary PC3 is kept verbatim, so `Pc3File::parse` alone would copy
+/// a file of any size.
 pub fn load_pc3(bytes: &[u8]) -> Result<Pc3File, PlotFileError> {
+    if bytes.len() > MAX_PLOT_FILE_BYTES {
+        return Err(PlotFileError::TooLarge(bytes.len()));
+    }
     Ok(Pc3File::parse(bytes)?)
 }
 
-/// A CTB or STB read from bytes the caller holds, under the same bounds as a PC3.
+/// A CTB or STB read from bytes the caller holds. The file is held to [`MAX_PLOT_FILE_BYTES`], and
+/// what it inflates to, or says it will, to [`MAX_PLOT_STYLE_INFLATED_BYTES`]. The reader's own
+/// ceiling is 64 MiB, which is a lot of memory for a table of a few hundred lines.
 #[cfg(feature = "dwg-acadrust")]
 pub fn load_plot_style(name: &str, bytes: &[u8]) -> Result<PlotStyleTable, PlotFileError> {
+    if bytes.len() > MAX_PLOT_FILE_BYTES {
+        return Err(PlotFileError::TooLarge(bytes.len()));
+    }
+    if !bytes.starts_with(b"PIAFILEVERSION_2.0") {
+        return Err(PlotFileError::Unrecognised);
+    }
+    inflation_within_bound(bytes)?;
     PlotStyleTable::from_bytes(name, bytes).map_err(|e| PlotFileError::Unreadable(e.to_string()))
+}
+
+/// Refuses a CTB/STB that announces or inflates past [`MAX_PLOT_STYLE_INFLATED_BYTES`], reading at
+/// most one byte past it and keeping none. The reader falls back to raw deflate when a zlib
+/// trailer is wrong, so both are counted.
+#[cfg(feature = "dwg-acadrust")]
+fn inflation_within_bound(bytes: &[u8]) -> Result<(), PlotFileError> {
+    use flate2::read::{DeflateDecoder, ZlibDecoder};
+    use std::io::{Read, copy, sink};
+    const PREFIX: &[u8] = b"PIAFILEVERSION_2.0,CTBVER1,compress\r\npmzlibcodec";
+    let bound = MAX_PLOT_STYLE_INFLATED_BYTES as u64;
+    let past =
+        |r: &mut dyn Read| copy(&mut r.take(bound + 1), &mut sink()).is_ok_and(|n| n > bound);
+    let payload = if bytes.starts_with(PREFIX) {
+        let word = |at: usize| {
+            bytes
+                .get(at..at + 4)
+                .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+        };
+        let (Some(announced), Some(packed)) = (word(52), word(56)) else {
+            return Ok(()); // a cut header: the reader says so
+        };
+        if u64::from(announced) > bound {
+            return Err(PlotFileError::InflatedTooLarge);
+        }
+        let end = 60usize.saturating_add(packed as usize).min(bytes.len());
+        bytes.get(60..end).unwrap_or_default()
+    } else {
+        let start = bytes.iter().position(|&b| b == b'\n').map_or(0, |p| p + 1);
+        &bytes[start..]
+    };
+    let raw_after_header = payload.get(2..).unwrap_or_default();
+    if past(&mut ZlibDecoder::new(payload))
+        || past(&mut DeflateDecoder::new(raw_after_header))
+        || past(&mut DeflateDecoder::new(payload))
+    {
+        return Err(PlotFileError::InflatedTooLarge);
+    }
+    Ok(())
 }
 
 /// What a PC3 says about the device that plots: the paper, the area of it the device prints, and
@@ -116,8 +170,12 @@ impl PlotDevice {
         Ok(PlotDevice {
             paper_mm: media.size_mm,
             printable_mm: media.printable_mm,
-            raster_limit_dpi: None,
-            text_as_text: None,
+            raster_limit_dpi: pc3.custom("Raster_Limit").and_then(|v| v.parse().ok()),
+            text_as_text: match pc3.custom("Font_Capture") {
+                Some("true") => Some(true),
+                Some("false") => Some(false),
+                _ => None,
+            },
         })
     }
 }

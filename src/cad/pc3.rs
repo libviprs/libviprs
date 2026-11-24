@@ -214,6 +214,28 @@ impl Pc3 {
         }
     }
 
+    /// The value of the custom setting called `name` (`Raster_Limit`, `Font_Capture`), as the
+    /// file spells it. The settings sit under numbered keys that are not the same from file to file.
+    pub fn custom(&self, name: &str) -> Option<&str> {
+        let Value::Object(members) = at(&self.root, &["data", "custom"])? else {
+            return None;
+        };
+        members.iter().find_map(|(_, entry)| {
+            let Some(Value::Str(found)) = at(entry, &["name"]) else {
+                return None;
+            };
+            if unescape(found) != name {
+                return None;
+            }
+            match at(entry, &["value"])? {
+                Value::Number(text) | Value::Str(text) => Some(text.as_str()),
+                Value::Bool(true) => Some("true"),
+                Value::Bool(false) => Some("false"),
+                _ => None,
+            }
+        })
+    }
+
     /// The paper half.
     pub fn media(&self) -> Result<Pc3Media, Pc3Error> {
         let real = |path: &[&str]| -> Result<f64, Pc3Error> {
