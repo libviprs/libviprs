@@ -12,7 +12,7 @@ use pvec_geometry::{BSpline, Point2};
 use pvec_numeric::{MAX_CONTROL_POINTS, MAX_DEGREE, MAX_KNOTS, NumericError, Policy};
 
 use super::fidelity::{Classification, ReasonCode};
-use super::provider::{Point3, RawEntity, RawGeometry, SourceFact};
+use super::provider::{Point3, RawEntity, RawGeometry, SourceFact, same_z};
 
 const POLICY: Policy = Policy::V1;
 
@@ -221,7 +221,8 @@ impl SplineError {
 /// Classifies an entity without extracting it.
 ///
 /// A `HELIX` is recognised by the drawing's class name. A spline is planar when every
-/// control point has the same z (`-0.0` and `0.0` count as the same plane), and 3D otherwise.
+/// control point has the same z up to float noise (#1695: [`same_z`] against the control points'
+/// plan extent; `-0.0` and `0.0` count as the same plane), and 3D otherwise.
 #[must_use]
 pub fn classify(entity: &RawEntity) -> SplineClass {
     if entity.provenance.class_name.eq_ignore_ascii_case("HELIX") {
@@ -229,7 +230,18 @@ pub fn classify(entity: &RawEntity) -> SplineClass {
     }
     match &entity.geometry {
         RawGeometry::Spline { control_points, .. } => {
-            let flat = control_points.windows(2).all(|w| w[0][2] == w[1][2]);
+            let extent = |axis: usize| {
+                let (lo, hi) = control_points
+                    .iter()
+                    .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| {
+                        (lo.min(q[axis]), hi.max(q[axis]))
+                    });
+                hi - lo
+            };
+            let span = extent(0).max(extent(1));
+            let flat = control_points
+                .windows(2)
+                .all(|w| same_z(w[0][2], w[1][2], span));
             if flat {
                 SplineClass::Planar
             } else {

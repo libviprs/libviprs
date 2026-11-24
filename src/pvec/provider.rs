@@ -85,6 +85,23 @@ pub(crate) fn z_axis_flip(normal: Point3) -> Option<bool> {
     (z.is_finite() && z != 0.0 && x.abs() <= limit && y.abs() <= limit).then_some(z < 0.0)
 }
 
+/// Whether two z values are one plane up to float noise (#1695).
+///
+/// A drawing computes its end points, so a 2D entity can come back with a z of 1.87e-13 at one end
+/// and -1.75e-13 at the other. They are the same plane when they differ by at most 1e-9 of the
+/// larger of `span` (the entity's plan length or extent), either z and 1.0. The factor is the one
+/// the viewport direction and twist use (#1660), so a float error scales with the coordinates and
+/// not with an absolute epsilon. The floor of 1.0 keeps a tiny or zero length entity from having a
+/// zero tolerance, and still leaves it a billionth of a drawing unit, so a real offset (1.0 of z on
+/// a 300 unit line, or any z on a segment with no plan length) is not noise. Equal values always
+/// match, and a tolerance that is not a finite number matches nothing but equal values.
+#[cfg(any(feature = "pvec-normalized", feature = "pvec-spline"))]
+#[must_use]
+pub(crate) fn same_z(a: f64, b: f64, span: f64) -> bool {
+    let tolerance = 1e-9 * span.max(a.abs()).max(b.abs()).max(1.0);
+    a == b || (tolerance.is_finite() && (a - b).abs() <= tolerance)
+}
+
 /// Why a provider call failed.
 ///
 /// Carries strings, never the reader's own error type, so no foreign type reaches
