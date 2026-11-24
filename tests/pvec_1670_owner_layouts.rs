@@ -139,6 +139,13 @@ fn issue_1670_owner_layouts_match_the_plotted_pdf() {
         .layouts(pages.iter().map(|n| paper[n - 1].name.clone()))
         .texts(true)
         .fills(true)
+        // The plotted PDF has no width between 0 and 5 pt: every line under 0.2 mm is a hairline.
+        .hairline_below(
+            std::env::var("LIBVIPRS_OWNER_PLOT_HAIRLINE_MM")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.2),
+        )
         .observer(observer)
         .convert_with::<AcadrustProvider>()
         .unwrap();

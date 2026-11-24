@@ -222,7 +222,6 @@ impl<'a> PdfPlot<'a> {
         self,
         file_unit: impl FnOnce(&P) -> Option<SourceUnit>,
     ) -> Result<PdfPlotOutput, PvecConvertError> {
-        let _ = self.hairline_below_mm;
         // The deadline counts from here, and rides on this plot's own copy of the cancel token.
         let cancel = match self.deadline.and_then(|d| Instant::now().checked_add(d)) {
             Some(at) => self.cancel.with_deadline(at),
@@ -341,6 +340,7 @@ impl<'a> PdfPlot<'a> {
                             rotation,
                             paper_frame(sheet.as_ref(), unit),
                             &out.hatch_patterns,
+                            self.hairline_below_mm,
                         )
                         .map_err(PvecConvertError::Publish)?
                     };
@@ -427,6 +427,7 @@ fn read_page(
     rotation: i16,
     frame: Option<([f64; 2], [f64; 2])>,
     patterns: &BTreeMap<u32, Vec<PlacedPatternLine>>,
+    hairline_below_mm: f64,
 ) -> Result<Page, crate::pvec::publish::PublishError> {
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
     const DEFAULT_WIDTH_MM: f64 = 0.25;
@@ -645,6 +646,8 @@ fn read_page(
             Some(StrokeWidth::Thinnest) => 0.0,
             None => DEFAULT_WIDTH_MM,
         };
+        // Under the hairline limit a stroke is the thinnest line.
+        let mm = if mm < hairline_below_mm { 0.0 } else { mm };
         let word = paint
             .as_ref()
             .and_then(|p| p.colour_of(*id))
