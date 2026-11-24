@@ -342,6 +342,44 @@ fn issue_1670_with_nothing_to_go_on_there_is_no_directory() {
     }
 }
 
+// ---- the scratch file of a store ----------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_a_stale_scratch_file_does_not_stop_a_store_and_is_left_alone() {
+    let dir = fresh("stale");
+    store(&dir, Ctb, &ctb()).unwrap();
+    let plot = dir.join("plot");
+    let stale = plot.join(format!(".default.ctb.{}.tmp", std::process::id()));
+    fs::write(&stale, b"left by a crashed run").unwrap();
+    store(&dir, Ctb, &ctb()).unwrap();
+    assert_eq!(fs::read(&stale).unwrap(), b"left by a crashed run");
+    assert_eq!(load(&dir, Ctb).unwrap().unwrap(), ctb());
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1670_threads_storing_the_same_default_all_succeed_and_leave_no_scratch() {
+    let dir = fresh("threads");
+    let handles: Vec<_> = (0..8)
+        .map(|_| {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                for _ in 0..25 {
+                    store(&dir, Ctb, &ctb()).unwrap();
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        h.join().unwrap();
+    }
+    assert_eq!(names(&dir.join("plot")), vec!["default.ctb".to_string()]);
+    assert_eq!(load(&dir, Ctb).unwrap().unwrap(), ctb());
+    let _ = fs::remove_dir_all(&dir);
+}
+
 // ---- the plot never reads it ------------------------------------------------------------
 
 #[test]
