@@ -233,6 +233,13 @@ pub enum PvecConvertError {
     /// The wall-clock deadline passed (#1674). Nothing was published.
     #[error("the deadline passed")]
     Deadline,
+    /// A page of a plot is not a PDF page (#1670): a side that is not finite or is over the PDF limit
+    /// of 14400 points. Nothing was written.
+    #[error("a page was refused: {reason}")]
+    PageRefused {
+        /// What is wrong with the page.
+        reason: &'static str,
+    },
 }
 
 /// What a conversion produced.
@@ -4381,6 +4388,7 @@ impl PvecConvertError {
             PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
             PvecConvertError::Deadline => d(DiagnosticCode::Cancelled, "deadline"),
+            PvecConvertError::PageRefused { .. } => d(DiagnosticCode::WriteFailed, "page-refused"),
         }
     }
 
@@ -4414,6 +4422,7 @@ impl PvecConvertError {
             PvecConvertError::Thumbnail(_) => "THUMBNAIL_FAILED",
             PvecConvertError::Cancelled => "CANCELLED",
             PvecConvertError::Deadline => "DEADLINE",
+            PvecConvertError::PageRefused { .. } => "PAGE_REFUSED",
         }
     }
 

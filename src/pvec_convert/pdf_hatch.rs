@@ -1,7 +1,7 @@
 //! The lines of a pattern hatch (#1670): each line family of the pattern, cut to the hatch's boundary
 //! rings (even-odd, so an island is left out) and to its dashes. Everything is in one space, the
 //! page's points. The work is bounded: a pattern whose lines, or whose dashes, would be more than
-//! [`MAX_LINES`] or [`MAX_SEGMENTS`] is refused with [`TooDense`], and the plot fills the hatch
+//! [`MAX_LINES`] or [`MAX_SEGMENTS`] is refused with [`Refused::TooDense`], and the plot fills the hatch
 //! instead, as a plotter does for a hatch it cannot space.
 
 use super::PlacedPatternLine;
@@ -10,18 +10,31 @@ use super::PlacedPatternLine;
 pub(super) const MAX_LINES: f64 = 20_000.0;
 /// Most strokes one hatch may be drawn with.
 pub(super) const MAX_SEGMENTS: usize = 250_000;
+/// Most strokes all the pattern hatches of one page may take together.
+pub(super) const MAX_PAGE_STROKES: usize = 2_000_000;
 /// Most line-against-edge tests one hatch may take.
 const MAX_TESTS: f64 = 60_000_000.0;
 
-/// The pattern is too dense (or too fine) to draw as lines.
+/// Why a pattern was not expanded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct TooDense;
+pub(super) enum Refused {
+    /// The pattern is too dense (or too fine) to draw as lines.
+    TooDense,
+    /// The caller asked to stop (a cancel or a deadline).
+    Stopped,
+}
 
 /// The strokes, as (x0, y0, x1, y1), of `families` over `rings`, which are closed polygons.
+///
+/// `stop` is polled between lines; `budget` is what the page has left of [`MAX_PAGE_STROKES`] and
+/// goes down by the strokes this hatch takes.
 pub(super) fn expand(
     rings: &[Vec<[f64; 2]>],
     families: &[PlacedPatternLine],
-) -> Result<Vec<[f64; 4]>, TooDense> {
+    stop: &dyn Fn() -> bool,
+    budget: &mut usize,
+) -> Result<Vec<[f64; 4]>, Refused> {
+    let limit = MAX_SEGMENTS.min(*budget);
     let edges: f64 = rings.iter().map(|r| r.len() as f64).sum();
     let mut out: Vec<[f64; 4]> = Vec::new();
     for family in families {
@@ -50,15 +63,18 @@ pub(super) fn expand(
         };
         let count = k1 - k0 + 1.0;
         if count > MAX_LINES || count * edges > MAX_TESTS {
-            return Err(TooDense);
+            return Err(Refused::TooDense);
         }
         let period: f64 = family.dashes.iter().map(|d| d.abs()).sum();
         let dashed = !family.dashes.is_empty() && period > 0.0;
         if dashed && !period.is_finite() {
-            return Err(TooDense);
+            return Err(Refused::TooDense);
         }
         let mut k = k0;
         while k <= k1 {
+            if (k - k0) % 64.0 == 0.0 && stop() {
+                return Err(Refused::Stopped);
+            }
             let origin = [
                 family.origin[0] + k * family.step[0],
                 family.origin[1] + k * family.step[1],
@@ -85,9 +101,9 @@ pub(super) fn expand(
                 if t1 <= t0 {
                     continue;
                 }
-                let mut push = |a: f64, b: f64| -> Result<(), TooDense> {
-                    if out.len() >= MAX_SEGMENTS {
-                        return Err(TooDense);
+                let mut push = |a: f64, b: f64| -> Result<(), Refused> {
+                    if out.len() >= limit {
+                        return Err(Refused::TooDense);
                     }
                     out.push([
                         origin[0] + a * dx,
@@ -104,7 +120,7 @@ pub(super) fn expand(
                 // The dashes in this piece: the work is its length over the period, times the
                 // elements of a period.
                 if (t1 - t0) / period * family.dashes.len() as f64 > MAX_SEGMENTS as f64 {
-                    return Err(TooDense);
+                    return Err(Refused::TooDense);
                 }
                 // The cycle starts at t = 0 on the line's origin.
                 let mut at_start = (t0 / period).floor() * period;
@@ -133,5 +149,6 @@ pub(super) fn expand(
             k += 1.0;
         }
     }
+    *budget -= out.len();
     Ok(out)
 }
