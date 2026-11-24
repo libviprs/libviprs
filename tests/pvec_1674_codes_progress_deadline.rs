@@ -174,6 +174,8 @@ fn plot() -> LayoutPlot {
         rotation: 0,
         margins: [0.0; 4],
         origin: [0.0; 2],
+        paper_image_origin: [0.0; 2],
+        limits: [0.0; 4],
         style_sheet: String::new(),
         print_lineweights: true,
         scale_lineweights: false,

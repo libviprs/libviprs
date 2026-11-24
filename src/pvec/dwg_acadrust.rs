@@ -868,6 +868,13 @@ impl AcadrustProvider {
                         l.plot_margin_top,
                     ],
                     origin: [l.plot_origin_x, l.plot_origin_y],
+                    paper_image_origin: [l.paper_image_origin_x, l.paper_image_origin_y],
+                    limits: [
+                        l.min_limits.0,
+                        l.min_limits.1,
+                        l.max_limits.0,
+                        l.max_limits.1,
+                    ],
                     style_sheet: l.plot_style_sheet.clone(),
                     print_lineweights: l.plot_flags.print_lineweights,
                     scale_lineweights: l.plot_flags.scale_lineweights,

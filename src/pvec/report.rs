@@ -330,8 +330,10 @@ pub struct SheetSummary {
     /// `paper-size-zero` or `unit-not-declarable` (the sheet unit is one PVec cannot declare).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_reason: Option<String>,
-    /// Where the paper frame's position came from: `unmeasured`, because the formula from the plot
-    /// origin and the margins has no measured fixture yet (the print profile ADR's open item).
+    /// Where the paper frame's position came from: `measured` for a sheet with no margins and no
+    /// plot origin (its paper image origin included, #1686), `unmeasured` otherwise, because the
+    /// formula from the plot origin and the margins has no measured fixture yet (the print profile
+    /// ADR's open item).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<String>,
     /// The sheet's unit, as `docs/pvec-units.md` names it.
