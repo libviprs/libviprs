@@ -65,11 +65,11 @@ use acr::{DwgReader, DxfReader, EntityType};
 use crate::cad::{CadSource, Fill, ItemHandle, decode_escapes, display_text, gdt_text};
 use crate::pvec::provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
-    EntityScope, EntityStyle, Facet, FacetSource, InstancePath, LayerState, LayerStateMask,
-    LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, Point3, ProvenanceStub,
-    ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact,
-    SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef, ViewportClip,
-    ViewportEntity, XrefAttachment, z_axis_flip,
+    EntityScope, EntityStyle, Facet, FacetSource, ImageFrame, InstancePath, LayerState,
+    LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, Point3,
+    ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex, SourceColour,
+    SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV, TextStyleRef,
+    ViewportClip, ViewportEntity, XrefAttachment, z_axis_flip,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -1242,6 +1242,44 @@ impl DwgProvider for AcadrustProvider {
         )
     }
 
+    fn image_frame(&self, handle: ItemHandle) -> Option<ImageFrame> {
+        let EntityType::RasterImage(img) = self.doc.get_entity(acr::Handle::new(handle.get()))?
+        else {
+            return None;
+        };
+        // The definition holds the path; the entity's own copy is a cache that an entity built
+        // in memory may have and a read drawing fills from the definition.
+        let file_name = img
+            .definition_handle
+            .and_then(|h| self.doc.objects.get(&h))
+            .and_then(|o| match o {
+                ObjectType::ImageDefinition(d) if !d.file_name.is_empty() => {
+                    Some(d.file_name.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| img.file_path.clone());
+        let clip = if img.clipping_enabled {
+            img.clip_boundary
+                .vertices
+                .iter()
+                .map(|v| [v.x, v.y])
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Some(ImageFrame {
+            file_name,
+            insert: p3(img.insertion_point),
+            u: p3(img.u_vector),
+            v: p3(img.v_vector),
+            size: [img.size.x, img.size.y],
+            visible: img.is_visible(),
+            clip,
+            clip_inverted: img.clip_boundary.clip_mode == acr::entities::ClipMode::Inside,
+        })
+    }
+
     fn annotation_lines(&self, handle: ItemHandle) -> Vec<RawGeometry> {
         let mut out = Vec::new();
         match self.doc.get_entity(acr::Handle::new(handle.get())) {
@@ -2089,8 +2127,9 @@ impl AcadrustCursor<'_> {
                     Err(err) => unmapped(format!("an INSERT of {}: {err}", i.block_name)),
                 }
             }
-            // An IMAGE has no pixels any reader here will fetch (it names a path), so it is
-            // reported with its frame and no placement is written (issue #1328, ADR 0018).
+            // An IMAGE has no pixels of its own (it names a path), so it is reported with its frame
+            // and no placement is written (issue #1328, ADR 0018). The conversion places it when
+            // the caller says where the files are (`image_frame`, issue #1667).
             EntityType::RasterImage(img) => {
                 let loaded = img
                     .definition_handle
