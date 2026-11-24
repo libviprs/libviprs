@@ -802,8 +802,7 @@ pub fn decode_fits(bytes: &[u8], limits: DecodeLimits) -> Result<Raster, SourceE
     }
     // vips accepts up to ten axes as long as everything above the third is
     // empty (`fits.c:271-276`).
-    for axis in 3..naxis {
-        let extent = unit.naxes[axis];
+    for (axis, &extent) in unit.naxes.iter().enumerate().take(naxis).skip(3) {
         if extent != 1 {
             return Err(FitsError::HighDimensionNotEmpty {
                 axis: axis + 1,

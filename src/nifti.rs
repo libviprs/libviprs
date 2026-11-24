@@ -824,13 +824,13 @@ impl Header {
             return Err(NiftiError::BadExtent { found: self.dim[1] });
         }
         let mut height: i64 = 1;
-        for axis in 2..=rank {
+        for &dim in self.dim.iter().take(rank + 1).skip(2) {
             // Measured for zero on axis 2: the extent is silently rewritten
             // to 1 and the voxel count drops with it. A negative extent on a
             // higher axis is not in the capture and takes the same branch
             // here, which is libviprs choosing the clamp over a guess rather
             // than a measured answer.
-            let extent = self.dim[axis].max(1);
+            let extent = dim.max(1);
             height = height
                 .checked_mul(extent)
                 .ok_or(NiftiError::DimensionOverflow { rank })?;
