@@ -1190,6 +1190,14 @@ impl DwgProvider for AcadrustProvider {
         Some(self.source_unit()).filter(|u| *u != SourceUnit::Unknown)
     }
 
+    fn global_linetype_scale(&self) -> f64 {
+        self.doc.header.linetype_scale
+    }
+
+    fn paper_space_linetype_scaling(&self) -> bool {
+        self.doc.header.paper_space_linetype_scaling
+    }
+
     fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
         Ok(self
             .doc
