@@ -819,6 +819,11 @@ annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_no_im
 annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_the_callers_unit_does_not_change_the_shift
 annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_the_position_is_reported_measured_for_the_measured_case
 annotated   fs-detected  tests/pvec_1686_paper_image_origin.rs::issue_1686_the_x_of_the_image_origin_moves_the_sheet_the_same_way
+annotated   fs-detected  tests/pvec_1685_header_ltscale.rs::issue_1685_a_layout_at_1_to_1_with_ltscale_1_keeps_its_patterns_as_drawn
+annotated   fs-detected  tests/pvec_1685_header_ltscale.rs::issue_1685_ltscale_applies_to_model_space_patterns_without_a_sheet
+annotated   fs-detected  tests/pvec_1685_header_ltscale.rs::issue_1685_the_sheets_own_dashes_carry_the_header_ltscale
+annotated   fs-detected  tests/pvec_1685_header_ltscale.rs::issue_1685_with_psltscale_0_a_viewports_dashes_are_scaled_by_the_viewport
+annotated   fs-detected  tests/pvec_1685_header_ltscale.rs::issue_1685_with_psltscale_1_a_viewports_dashes_are_paper_millimetres_too
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_override_follows_the_layouts_rotation
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_size_override_replaces_the_paper_and_its_margins
 annotated   fs-detected  tests/pvec_1628_plot_settings.rs::issue_1628_a_paper_that_is_not_a_size_is_refused_not_framed

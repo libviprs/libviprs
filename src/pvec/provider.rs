@@ -1386,6 +1386,21 @@ pub trait DwgProvider {
         None
     }
 
+    /// The header's global linetype scale (`LTSCALE`), which multiplies every pattern's lengths.
+    /// The default is 1, so a provider that does not read it leaves the patterns as they are
+    /// (#1685). The entity's own scale already holds `CELTSCALE` as it was when the entity was
+    /// made, so that one is not applied again.
+    fn global_linetype_scale(&self) -> f64 {
+        1.0
+    }
+
+    /// The header's `PSLTSCALE`: with it set, the patterns of model space seen through a viewport
+    /// are paper units like the sheet's own, and with it clear they are model units that the
+    /// viewport scales (#1685). The default is AutoCAD's own, set.
+    fn paper_space_linetype_scaling(&self) -> bool {
+        true
+    }
+
     /// The drawing's external-reference block records, in the block table's order.
     ///
     /// The default says the provider cannot report them.

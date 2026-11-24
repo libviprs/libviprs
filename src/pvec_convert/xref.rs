@@ -253,6 +253,14 @@ impl<P: DwgProvider> DwgProvider for XrefProvider<P> {
         self.host.declared_unit()
     }
 
+    fn global_linetype_scale(&self) -> f64 {
+        self.host.global_linetype_scale()
+    }
+
+    fn paper_space_linetype_scaling(&self) -> bool {
+        self.host.paper_space_linetype_scaling()
+    }
+
     fn layouts(&self) -> Result<Vec<LayoutState>, ProviderError> {
         self.host.layouts()
     }
