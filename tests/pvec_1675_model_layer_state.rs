@@ -160,15 +160,19 @@ fn issue_1675_a_named_state_applies_only_what_its_mask_restores() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn issue_1675_a_state_name_matches_without_regard_to_case() {
+    let fallback = drawn("fallback", r#"{"schema":1,"mode":"model"}"#);
+    let exact = drawn(
+        "exact",
+        r#"{"schema":1,"mode":"model","layerState":"Review"}"#,
+    );
+    // The state changes the answer, so a match that fell back to the table would differ from it.
+    assert_ne!(exact, fallback);
     assert_eq!(
         drawn(
             "case",
             r#"{"schema":1,"mode":"model","layerState":"rEVIEW"}"#
         ),
-        drawn(
-            "exact",
-            r#"{"schema":1,"mode":"model","layerState":"Review"}"#
-        )
+        exact
     );
 }
 
