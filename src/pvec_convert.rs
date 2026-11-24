@@ -219,6 +219,9 @@ pub enum PvecConvertError {
     /// The cancel token fired. Nothing was published.
     #[error("cancelled")]
     Cancelled,
+    /// The wall-clock deadline passed (#1674). Nothing was published.
+    #[error("the deadline passed")]
+    Deadline,
 }
 
 /// What a conversion produced.
@@ -260,6 +263,8 @@ pub struct PvecConversion<'a> {
     element_rules: Option<ElementRules>,
     plot_style: Option<acadrust::plot_style::PlotStyleTable>,
     plot_settings: PlotSettings,
+    /// The wall-clock bound set with [`deadline`](Self::deadline), until the run starts its clock.
+    deadline: Option<std::time::Duration>,
     /// A paper sheet with nothing to stroke is a success with `written == 0` and no artifact,
     /// for a caller (the PDF plot, #1636) that still wants the empty page.
     empty_sheet_ok: bool,
@@ -374,6 +379,7 @@ impl<'a> PvecConversion<'a> {
             element_rules: None,
             plot_style: None,
             plot_settings: PlotSettings::default(),
+            deadline: None,
             empty_sheet_ok: false,
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail_width: None,
@@ -530,6 +536,29 @@ impl<'a> PvecConversion<'a> {
         self
     }
 
+    /// A wall-clock bound on the conversion (#1674), counted from the moment `convert` or
+    /// `convert_with` is called. It is polled where the cancel token is: before the source is read
+    /// further, and every batch of entities while they are classified. Past it the conversion fails
+    /// with [`PvecConvertError::Deadline`] and publishes nothing, and the cancel token you gave stays
+    /// as it was. A cancel from the caller wins when both happened.
+    #[must_use]
+    pub fn deadline(mut self, within: std::time::Duration) -> Self {
+        self.deadline = Some(within);
+        self
+    }
+
+    /// Starts the deadline's clock, once: the cancel token this conversion polls is a copy that also
+    /// reads as cancelled when the time is up.
+    fn arm(&mut self) {
+        if let Some(at) = self
+            .deadline
+            .take()
+            .and_then(|d| std::time::Instant::now().checked_add(d))
+        {
+            self.cancel = self.cancel.with_deadline(at);
+        }
+    }
+
     /// Receives each diagnostic as it is made (`EngineEvent::ConversionDiagnostic`), and the one
     /// the run fails with. Without one, a drawing that converts cleanly makes no diagnostic at all.
     #[must_use]
@@ -636,7 +665,8 @@ impl<'a> PvecConversion<'a> {
     /// # Errors
     ///
     /// [`PvecConvertError`]. After any error the destination and its report are as they were.
-    pub fn convert(self) -> Result<PvecConversionOutput, PvecConvertError> {
+    pub fn convert(mut self) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
         let observer = self.observer.clone();
         #[cfg(feature = "pvec-raster-thumbnail")]
         if self.thumbnail_width == Some(0) {
@@ -648,7 +678,7 @@ impl<'a> PvecConversion<'a> {
             );
         }
         let result = if self.cancel.is_cancelled() {
-            Err(PvecConvertError::Cancelled)
+            Err(PvecConvertError::Cancelled.settled(&self.cancel))
         } else {
             AcadrustProvider::open(self.source)
                 .map_err(PvecConvertError::Open)
@@ -665,10 +695,13 @@ impl<'a> PvecConversion<'a> {
     /// # Errors
     ///
     /// [`PvecConvertError::UnitRequired`] without a unit, otherwise as [`convert`](Self::convert).
-    pub fn convert_with<P: DwgProvider>(self) -> Result<PvecConversionOutput, PvecConvertError> {
+    pub fn convert_with<P: DwgProvider>(
+        mut self,
+    ) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
         let observer = self.observer.clone();
         let result = if self.cancel.is_cancelled() {
-            Err(PvecConvertError::Cancelled)
+            Err(PvecConvertError::Cancelled.settled(&self.cancel))
         } else {
             self.unit
                 .ok_or(PvecConvertError::UnitRequired)
@@ -2631,7 +2664,20 @@ impl<'a> PvecConversion<'a> {
         })
     }
 
+    /// Everything after the source is open. A cancel that was really the deadline is told as
+    /// [`PvecConvertError::Deadline`], whichever step noticed it.
     fn run<P: DwgProvider>(
+        mut self,
+        provider: &P,
+        unit: SourceUnit,
+    ) -> Result<PvecConversionOutput, PvecConvertError> {
+        self.arm();
+        let cancel = self.cancel.clone();
+        self.run_armed(provider, unit)
+            .map_err(|e| e.settled(&cancel))
+    }
+
+    fn run_armed<P: DwgProvider>(
         self,
         provider: &P,
         unit: SourceUnit,
@@ -3838,6 +3884,48 @@ impl PvecConvertError {
             #[cfg(feature = "pvec-raster-thumbnail")]
             PvecConvertError::Thumbnail(_) => d(DiagnosticCode::WriteFailed, "thumbnail"),
             PvecConvertError::Cancelled => d(DiagnosticCode::Cancelled, "cancelled"),
+            PvecConvertError::Deadline => d(DiagnosticCode::Cancelled, "deadline"),
+        }
+    }
+
+    /// A stable, upper snake code for this failure (#1674), for a caller that has to tell one from
+    /// another without reading the message. The message may change, the code does not.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            PvecConvertError::Open(_) => "OPEN_FAILED",
+            PvecConvertError::View(e) => match e {
+                ViewProfileError::LayoutNotFound { .. } => "LAYOUT_NOT_FOUND",
+                ViewProfileError::NoModelSpace { .. } => "NO_MODEL_SPACE",
+                ViewProfileError::Limit(e) => e.code(),
+                _ => "VIEW_FAILED",
+            },
+            PvecConvertError::Flatten(e) => match e {
+                FlattenError::Limit { limit, .. } => limit.code(),
+                FlattenError::BlockRecursionLimit { .. } => "BLOCK_CYCLE",
+                _ => "FLATTEN_FAILED",
+            },
+            PvecConvertError::UnitRequired => "UNIT_REQUIRED",
+            PvecConvertError::Write(_) => "WRITE_FAILED",
+            PvecConvertError::NothingStorable { .. } => "NOTHING_STORABLE",
+            PvecConvertError::Tally(_) => "TALLY_FAILED",
+            PvecConvertError::Components(_) => "COMPONENTS_FAILED",
+            PvecConvertError::Report(_) => "REPORT_FAILED",
+            PvecConvertError::Publish(_) => "PUBLISH_FAILED",
+            PvecConvertError::CapabilityNotAllowed { .. } => "CAPABILITY_NOT_ALLOWED",
+            #[cfg(feature = "pvec-raster-thumbnail")]
+            PvecConvertError::Thumbnail(_) => "THUMBNAIL_FAILED",
+            PvecConvertError::Cancelled => "CANCELLED",
+            PvecConvertError::Deadline => "DEADLINE",
+        }
+    }
+
+    /// `Cancelled` is `Deadline` when `cancel` fired because its time was up and nobody called
+    /// `cancel()`; every other error is as it was.
+    fn settled(self, cancel: &CancelToken) -> Self {
+        match self {
+            PvecConvertError::Cancelled if cancel.deadline_passed() => PvecConvertError::Deadline,
+            other => other,
         }
     }
 }

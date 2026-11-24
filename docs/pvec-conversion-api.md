@@ -62,10 +62,21 @@ depth. `PvecConvertError` keeps every lower error as `source()`: open, view, fla
 (a deprecated control point that is not finite), capability not allowed, cancelled. After any error the destination and its report are as they
 were.
 
+Every error type here has a `code()`, a stable upper snake string a caller can match on without reading the message: `PvecConvertError`,
+`LayoutSetError`, `SheetSkip`, `LimitError` and `Pc3Error` (#1674). A limit is named by its own code (`LIMIT_ENTITIES`, `LIMIT_BLOCK_DEPTH`...),
+a missing layout is `LAYOUT_NOT_FOUND`, and `CANCELLED` and `DEADLINE` are different on purpose.
+
 ## Progress, cancellation, backpressure
 
 The classifier and its consumer meet in a bounded queue (default 64, `queue_capacity`), the observer hears the stages as `EngineEvent`s, and the
 cancel token is polled once per batch of 256 entities and during the write. A cancel that fires during a spool flush stops the write there (#1463).
+
+`PvecLayoutSet` and `PdfPlot` also send `ConversionSheetStarted { index, total, layout }` and `ConversionSheetFinished { index, total, layout, status, code }`
+for each sheet (`index` counts from 1 over the sheets asked for; `status` is `written`, `empty`, `empty-after-view`, `failed`, `cancelled` or `deadline`).
+`PdfPlot` takes `cancel` and `observer` like a conversion does. `deadline(Duration)` on `PvecConversion`, `PvecLayoutSet` and `PdfPlot` bounds the
+wall-clock time from the call to `convert`, polled where the cancel token is. Past it the run fails with `Deadline` and publishes nothing, and the caller's
+token is untouched; a cancel by the caller wins when both happened. On a set it bounds the whole set (sheets already published stay, no index); set in a
+sheet's own options it fails that sheet only (#1674).
 
 ## What it writes
 
