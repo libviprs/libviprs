@@ -121,6 +121,19 @@ point by that times its distance from the target, which on a 1e5 unit sheet is a
 units. The reader hands the stored values over untouched; the tolerance is in `viewport_class`, the
 one place the conversion and the manifest both ask.
 
+Planarity gets the same treatment (#1695). A drawing computes its end points, so a 2D LINE can come
+back with a z of 1.87e-13 at one end and -1.75e-13 at the other, and an exact compare refused it as
+`geometry-3d` (a spline's control points as `spline-3d`). Two z values are one plane when they differ
+by at most 1e-9 of the largest of the entity's plan length (a line's chord, an ellipse's major axis in
+plan, a spline's control point extent), either z value and 1.0. The factor is #1660's, the length scales
+the tolerance with the entity and the z term scales it with the coordinates, so a drawing far from the
+origin or in other units needs no new constant. The floor of 1.0 keeps a tiny or zero length entity
+at a billionth of a unit, and the same floor is why a segment with no plan length and a real rise (or
+1.0 of z on a 300 unit line) stays `geometry-3d`: the class exists to name a genuinely 3D entity, and
+this does not flatten one. LINE, ELLIPSE and SPLINE carry the test. CIRCLE, ARC and the 2D polylines
+hold one elevation (an ARC and CIRCLE one centre z, a polyline one elevation), so there is nothing to
+compare, and a 3D POLYLINE is drawn from above as before.
+
 Amendment to P-3 (#1577). As first written, P-3 also dropped a viewport on a no-plot layer. That is
 not what a print does: AutoCAD prints the content of such a viewport and leaves out only its border,
 and sheets often put their viewports on Defpoints for exactly that reason, so the old rule turned
