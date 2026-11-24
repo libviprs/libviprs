@@ -332,6 +332,10 @@ pub struct ViewOutcome {
     pub included: Vec<ViewedEntity>,
     /// Excluded.
     pub excluded: Vec<ExcludedEntity>,
+    /// Entities of a class other than INSERT that the provider reported as an INSERT and the pass
+    /// expanded (a DIMENSION is one, #1658), by class, one per expansion. They have no row of their
+    /// own, so this is where a report can count them.
+    pub expanded_classes: BTreeMap<String, u64>,
     /// Report.
     pub report: ViewReport,
 }
@@ -718,6 +722,7 @@ impl ViewProfile {
             excluded: Vec::new(),
             guard: SourceGuard::new(self.limits),
             expanded: 0,
+            expanded_classes: BTreeMap::new(),
             layer_colours,
             hidden: BTreeSet::new(),
         };
@@ -750,6 +755,7 @@ impl ViewProfile {
         Ok(ViewOutcome {
             included: walk.included,
             excluded: walk.excluded,
+            expanded_classes: walk.expanded_classes,
             report,
         })
     }
@@ -769,6 +775,8 @@ struct Walk<'a, P: ?Sized> {
     guard: SourceGuard,
     /// Instances of blocks placed so far, the product of the grids down to each INSERT, summed.
     expanded: u64,
+    /// See [`ViewOutcome::expanded_classes`].
+    expanded_classes: BTreeMap<String, u64>,
     /// The colour each layer is drawn in, for BYLAYER (#1638).
     layer_colours: Vec<(String, Option<SourceColour>)>,
     /// Handles of the entities whose own invisible flag is set (#1633). An entity hidden this way
@@ -930,6 +938,12 @@ impl<P: DwgProvider + ?Sized> Walk<'_, P> {
                 limits.max_expanded_instances,
             )
             .into());
+        }
+        if entity.provenance.class_name != "INSERT" {
+            *self
+                .expanded_classes
+                .entry(entity.provenance.class_name.clone())
+                .or_default() += 1;
         }
         for c in children {
             self.visit(c, depth + 1, Some(&effective), Some(paint), child_instances)?;
