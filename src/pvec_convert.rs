@@ -2055,6 +2055,9 @@ impl<'a> PvecConversion<'a> {
                 // own box decides wholly outside, and wholly inside a rectangle.
                 let mut more: Vec<Done> = Vec::new();
                 let mut whole = window.is_none();
+                // Whether the entity went through the clip untouched, so a side of it still has its
+                // own length (#1694).
+                let mut uncut = true;
                 if let (Some(b), Some(bounds), Some(curve), false) = (
                     clip_box,
                     done.geometry.source_bounds(),
@@ -2296,6 +2299,7 @@ impl<'a> PvecConversion<'a> {
                         None => {}
                         Some(Err((d, counter))) => {
                             whole = false;
+                            uncut = false;
                             if let Some(k) = counter {
                                 clipped[k] += 1;
                             }
@@ -2303,6 +2307,7 @@ impl<'a> PvecConversion<'a> {
                         }
                         Some(Ok((records, note))) => {
                             whole = false;
+                            uncut = false;
                             clipped[2] += 1;
                             clipped[3] += records.len() as u64;
                             let mut gated_pieces = Vec::with_capacity(records.len());
@@ -2334,6 +2339,7 @@ impl<'a> PvecConversion<'a> {
                 // at an edge is. Only a polyline that has a pattern is split. A solid one, or one
                 // with PLINEGEN on, stays whole, and the flag is the entity's own: the header's
                 // PLINEGEN only seeds the polylines drawn after it.
+                let mut fit_sides = false;
                 if components.line_style
                     && !frozen_here
                     && matches!(raw.geometry, RawGeometry::Polyline { .. })
@@ -2350,6 +2356,9 @@ impl<'a> PvecConversion<'a> {
                         .handle
                         .is_some_and(|h| !provider.polyline_linetype_generation(h))
                 {
+                    // Each side of an uncut polyline is also fitted: its pattern is stretched so the side
+                    // ends on a dash (#1694), where the style is built below.
+                    fit_sides = uncut;
                     let mut restarted: Vec<Done> = Vec::new();
                     for d in std::iter::once(done).chain(std::mem::take(&mut more)) {
                         let sides: Vec<Curve> = match d.geometry.geometry() {
@@ -2704,6 +2713,39 @@ impl<'a> PvecConversion<'a> {
                                     input.linetype_scale = 1.0;
                                     input.linetype_name = None;
                                     input.linetype_elements = Some(p).filter(|p| !p.is_empty());
+                                }
+                            }
+                            // #1694: a restarted side starts on a dash and is stretched, every element by
+                            // the same factor, so it ends on one too. With the first dash d and the
+                            // period p, a side of length L holds n = floor((L - d) / p) periods and the
+                            // pattern grows by L / (n p + d). A side that is already d plus whole
+                            // periods, or shorter than d, or a pattern that does not start on a dash and
+                            // close on a gap, is left as it is.
+                            if fit_sides
+                                && let Some(Curve::Polyline(p)) = done.geometry.geometry()
+                                && let [a, b] = p.vertices()
+                                && let Some(elements) = &input.linetype_elements
+                            {
+                                let mut pattern: Vec<f64> = Vec::with_capacity(elements.len());
+                                for e in elements {
+                                    let pen_down = *e >= 0.0 || e.is_nan();
+                                    if pen_down != pattern.len().is_multiple_of(2) {
+                                        pattern.push(0.0);
+                                    }
+                                    pattern.push(e.abs() * input.linetype_scale);
+                                }
+                                let side = (b.x - a.x).hypot(b.y - a.y);
+                                let period: f64 = pattern.iter().sum();
+                                let dash = pattern[0];
+                                if pattern.len().is_multiple_of(2)
+                                    && dash > 0.0
+                                    && period.is_finite()
+                                    && period > 0.0
+                                    && side.is_finite()
+                                    && side > dash
+                                {
+                                    let n = ((side - dash) / period + 1e-9).floor();
+                                    input.linetype_scale *= side / (n * period + dash);
                                 }
                             }
                             // P-8: a layout that does not print lineweights has none on its sheet.
