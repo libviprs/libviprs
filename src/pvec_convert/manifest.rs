@@ -715,10 +715,24 @@ impl LayerStateNotFound {
 ///
 /// [`LayerStateNotFound`] with the names there are.
 pub fn check_layer_state(
-    _manifest: &CadManifest,
-    _choices: &CadChoices,
+    manifest: &CadManifest,
+    choices: &CadChoices,
 ) -> Result<(), LayerStateNotFound> {
-    Ok(())
+    let Some(name) = choices.layer_state.as_deref() else {
+        return Ok(());
+    };
+    if manifest.layer_states.iter().any(|s| same(&s.name, name)) {
+        return Ok(());
+    }
+    Err(LayerStateNotFound {
+        name: name.to_owned(),
+        available: manifest
+            .layer_states
+            .iter()
+            .filter(|s| !s.hidden)
+            .map(|s| s.name.clone())
+            .collect(),
+    })
 }
 
 /// One resolved answer per manifest layer: file flags, then the chosen state under its mask, then
@@ -909,9 +923,12 @@ pub fn apply_choices(
             }
         }
     }
+    // Per-viewport overrides belong to a sheet. A model space plot has no viewports to edit, so
+    // it carries none (#1675).
     profile.layers.viewport_overrides = choices
         .viewports
         .iter()
+        .filter(|_| choices.mode == CadMode::Layouts)
         .flat_map(|(key, layers)| {
             layers
                 .iter()
