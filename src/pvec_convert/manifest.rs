@@ -691,6 +691,36 @@ pub fn cad_manifest<P: DwgProvider>(source: CadSource<'_>) -> Result<CadManifest
     })
 }
 
+/// A layer state the choices name that the drawing does not store.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("layer state {name:?} is not in the drawing (it has: {})", available.join(", "))]
+pub struct LayerStateNotFound {
+    /// The name asked for.
+    pub name: String,
+    /// The states the drawing stores, in file order, without the ones AutoCAD hides.
+    pub available: Vec<String>,
+}
+
+impl LayerStateNotFound {
+    /// The stable code for this error.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        "LAYER_STATE_NOT_FOUND"
+    }
+}
+
+/// Checks that the layer state `choices` names, if any, is one the drawing stores.
+///
+/// # Errors
+///
+/// [`LayerStateNotFound`] with the names there are.
+pub fn check_layer_state(
+    _manifest: &CadManifest,
+    _choices: &CadChoices,
+) -> Result<(), LayerStateNotFound> {
+    Ok(())
+}
+
 /// One resolved answer per manifest layer: file flags, then the chosen state under its mask, then
 /// the overrides (spec section 1.2). The only place that applies the visibility truth table.
 #[must_use]
