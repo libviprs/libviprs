@@ -33,7 +33,7 @@ writes. `convert_with::<P>` and `probe_with::<P>` take any `DwgProvider`; the tr
 | `print_lineweights` | Lineweights print. `Some(false)` drops widths. `None` is the layout's own. |
 | `paperspace_last` | Paper space draws after what the viewports show. `None` is the layout's own. |
 
-The sheet's linework, its viewport windows, its extents and a plot window are drawn at the plot scale, so the box and the unit are paper whatever the scale (#1665); a sheet at 1:1 is unchanged. The report's `sheet.notes` carry `plot-scale-applied`, `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-centre-not-applicable`, `plot-paper-overridden`, `plot-orientation`, `plot-scale-overridden`, `plot-lineweights-overridden`, `plot-fit-to-paper`, `plot-fit-ratio 1:N`, `plot-fit-no-change` and `plot-fit-skipped`.
+The sheet's linework (dash patterns included, #1683), its viewport windows, its extents and a plot window are drawn at the plot scale, so the box and the unit are paper whatever the scale (#1665); a sheet at 1:1 is unchanged. The report's `sheet.notes` carry `plot-scale-applied`, `plot-area-extents`, `plot-offset`, `plot-centered`, `plot-centre-not-applicable`, `plot-paper-overridden`, `plot-orientation`, `plot-scale-overridden`, `plot-lineweights-overridden`, `plot-fit-to-paper`, `plot-fit-ratio 1:N`, `plot-fit-no-change` and `plot-fit-skipped`.
 
 ## Thumbnail
 
