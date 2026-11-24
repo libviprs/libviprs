@@ -310,17 +310,6 @@ fn terminal_filter(raw: &RawImage) -> String {
         .unwrap_or_else(|| "none".to_string())
 }
 
-/// The `/DecodeParms` entry for filter number `index`. An array is matched to the
-/// filters by position, and a `null` or a missing entry is no parameters; a lone dictionary
-/// belongs to the first filter.
-fn parms_for(dict: &Dictionary, index: usize) -> Option<&Dictionary> {
-    match dict.get(b"DecodeParms") {
-        Ok(Object::Dictionary(d)) if index == 0 => Some(d),
-        Ok(Object::Array(a)) => a.get(index).and_then(|o| o.as_dict().ok()),
-        _ => None,
-    }
-}
-
 fn unfilter(
     raw: &RawImage,
     filters: &[String],
@@ -350,7 +339,10 @@ fn unfilter(
         };
         let mut inflated = crate::pdf::flate_decompress(&data, cap).map_err(PdfImageError::Pdf)?;
         if codec.is_none() {
-            inflated = unpredict(parms_for(&raw.dict, 0), inflated)?;
+            inflated = {
+                let max_row = inflated.len();
+                unpredict(parms_for(&raw.dict, 0), inflated, max_row).map_err(bad)?
+            };
         }
         data = std::borrow::Cow::Owned(inflated);
     }
@@ -405,8 +397,25 @@ fn row_bytes(width: u32, ncomp: usize, bpc: u32) -> usize {
     (width as usize * ncomp * bpc as usize).div_ceil(8)
 }
 
+// ---- /DecodeParms and /Predictor (issue #1668: also read for content streams) ----
+
+/// The `/DecodeParms` entry for filter number `index`. An array is matched to the
+/// filters by position, and a `null` or a missing entry is no parameters; a lone dictionary
+/// belongs to the first filter.
+pub(super) fn parms_for(dict: &Dictionary, index: usize) -> Option<&Dictionary> {
+    match dict.get(b"DecodeParms") {
+        Ok(Object::Dictionary(d)) if index == 0 => Some(d),
+        Ok(Object::Array(a)) => a.get(index).and_then(|o| o.as_dict().ok()),
+        _ => None,
+    }
+}
+
 /// Undo `/Predictor` 2 (TIFF, 8 bits) and 10 to 15 (PNG) from `/DecodeParms`.
-fn unpredict(parms: Option<&Dictionary>, data: Vec<u8>) -> Result<Vec<u8>, PdfImageError> {
+pub(super) fn unpredict(
+    parms: Option<&Dictionary>,
+    data: Vec<u8>,
+    max_row: usize,
+) -> Result<Vec<u8>, String> {
     let get = |key: &[u8], default: i64| {
         parms
             .and_then(|d| d.get(key).ok())
@@ -420,14 +429,22 @@ fn unpredict(parms: Option<&Dictionary>, data: Vec<u8>) -> Result<Vec<u8>, PdfIm
     let colors = usize::try_from(get(b"Colors", 1)).unwrap_or(1).max(1);
     let pbpc = u32::try_from(get(b"BitsPerComponent", 8)).unwrap_or(8);
     let columns = usize::try_from(get(b"Columns", 1)).unwrap_or(1).max(1);
-    let row = (columns * colors * pbpc as usize).div_ceil(8);
-    let bpp = (colors * pbpc as usize).div_ceil(8).max(1);
+    let row = columns
+        .saturating_mul(colors)
+        .saturating_mul(pbpc as usize)
+        .div_ceil(8);
+    let bpp = colors.saturating_mul(pbpc as usize).div_ceil(8).max(1);
+    if row > max_row {
+        return Err(format!(
+            "a predictor row of {row} bytes is longer than the data"
+        ));
+    }
     if row == 0 {
-        return Err(bad("a predictor row of no bytes"));
+        return Err("a predictor row of no bytes".into());
     }
     if predictor == 2 {
         if pbpc != 8 {
-            return Err(bad("a TIFF predictor is read at 8 bits per component only"));
+            return Err("a TIFF predictor is read at 8 bits per component only".into());
         }
         let mut out = data;
         for line in out.chunks_mut(row) {
@@ -438,14 +455,12 @@ fn unpredict(parms: Option<&Dictionary>, data: Vec<u8>) -> Result<Vec<u8>, PdfIm
         return Ok(out);
     }
     if !(10..=15).contains(&predictor) {
-        return Err(bad(format!("unknown /Predictor {predictor}")));
+        return Err(format!("unknown /Predictor {predictor}"));
     }
     let mut out = Vec::with_capacity(data.len());
     let mut prev = vec![0u8; row];
     for line in data.chunks(row + 1) {
-        let (tag, body) = line
-            .split_first()
-            .ok_or_else(|| bad("empty predictor row"))?;
+        let (tag, body) = line.split_first().ok_or("empty predictor row")?;
         let mut cur = body.to_vec();
         cur.resize(row, 0);
         for i in 0..row {
@@ -458,7 +473,7 @@ fn unpredict(parms: Option<&Dictionary>, data: Vec<u8>) -> Result<Vec<u8>, PdfIm
                 2 => b,
                 3 => ((u16::from(a) + u16::from(b)) / 2) as u8,
                 4 => paeth(a, b, c),
-                t => return Err(bad(format!("unknown PNG row filter {t}"))),
+                t => return Err(format!("unknown PNG row filter {t}")),
             };
             cur[i] = cur[i].wrapping_add(add);
         }

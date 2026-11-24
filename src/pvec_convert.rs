@@ -60,6 +60,7 @@ use std::sync::{Arc, Mutex};
 
 mod calibration;
 mod capability;
+mod dwg_image;
 mod georef;
 mod layouts;
 mod manifest;
@@ -212,6 +213,9 @@ pub enum PvecConvertError {
         /// The INSERT chain the entity was reached through, spelled `block@HANDLE/...`.
         block_path: String,
     },
+    /// A placed DWG IMAGE's raster could not be written (#1667).
+    #[error("a placed image could not be written")]
+    Rasters(#[source] crate::raster_pvec::container::RasterWriteError),
     /// The thumbnail could not be drawn (#1629). The artifact was published.
     #[cfg(feature = "pvec-raster-thumbnail")]
     #[error("the thumbnail could not be drawn")]
@@ -272,6 +276,8 @@ pub struct PvecConversion<'a> {
     thumbnail_width: Option<u32>,
     xrefs: Vec<(String, CadSource<'a>)>,
     xref_note: Arc<Mutex<xref::XrefNote>>,
+    /// The directory a DWG IMAGE's file is read from (#1667); `None` places no image.
+    images: Option<PathBuf>,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -388,7 +394,22 @@ impl<'a> PvecConversion<'a> {
             thumbnail_width: None,
             xrefs: Vec::new(),
             xref_note: Arc::default(),
+            images: None,
         }
+    }
+
+    /// Place a DWG IMAGE as a raster (#1667). The file its definition names is looked up by file
+    /// name in `dir` (the directory part of the path the drawing carries is never followed, so a
+    /// drawing cannot point at a file outside `dir`), decoded, and written at the IMAGE's
+    /// insertion point, scale and rotation, cut to its clip, in the frame of the linework around
+    /// it. An IMAGE whose file is not in `dir`, or does not decode, or is switched off, is not
+    /// placed and its row says why. A file that resolves outside `dir` (a symlink), is not a regular file,
+    /// declares more than 64 Mpixel, or would take the conversion past 256 images or 256 Mpixel in
+    /// all, is refused the same way. Off by default, and then an IMAGE is only counted (#1328).
+    #[must_use]
+    pub fn images(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.images = Some(dir.into());
+        self
     }
 
     /// Carry TEXT, MTEXT, ATTDEF, MULTILEADER and TOLERANCE text, HATCH and SOLID in PVec's text and
@@ -410,8 +431,9 @@ impl<'a> PvecConversion<'a> {
     /// stay unmapped, each with a warning saying fills are off, until [`fills`](Self::fills) is on.
     /// Off by default, and it needs the line style stream like [`annotations`](Self::annotations).
     ///
-    /// A MULTILEADER's text and a TOLERANCE's frame text are carried the same way, each row saying
-    /// its leader lines or its frame are not drawn (#1658). A DIMENSION needs neither option: the
+    /// A MULTILEADER's text and a TOLERANCE's frame text are carried the same way (#1658). Their
+    /// lines (a MULTILEADER's and a LEADER's lines with arrowheads, a TOLERANCE's frame) are
+    /// geometry and come through whatever this choice is (#1671). A DIMENSION needs neither option: the
     /// provider reports it as an INSERT of its anonymous block, so its lines are geometry and its
     /// printed value is an MTEXT in that block. Only a dimension whose block is missing comes here,
     /// with its text rebuilt from the measurement and its style (decimal units only).
@@ -759,6 +781,7 @@ impl<'a> PvecConversion<'a> {
             calibration: caller_calibration,
             plot_style,
             plot_settings,
+            images,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -1238,6 +1261,7 @@ impl<'a> PvecConversion<'a> {
                 &mut LineageStore::new(),
             )
             .map_err(PvecConvertError::Flatten)?;
+        let (flat_lines, leader_lines) = line_leaves(provider, &flat.entities);
 
         // The leaves the profile kept. The view pass decides visibility and the flatten pass owns
         // the composed maps, so a flattened leaf is drawn when the view pass kept the same one.
@@ -1270,13 +1294,18 @@ impl<'a> PvecConversion<'a> {
             .collect();
 
         let mut items: Vec<Item<'_>> = Vec::new();
-        for f in &flat.entities {
+        for f in flat.entities.iter().chain(&flat_lines) {
             let p = &f.entity.provenance;
-            if kept.contains_key(&(
-                p.handle.map(|h| h.get()),
-                p.block_path.to_string(),
-                p.class_name.clone(),
-            )) {
+            // A LEADER whose line is drawn is that line and not an unmapped entity as well (#1671).
+            let replaced = matches!(f.entity.geometry, RawGeometry::Unmapped { .. })
+                && leader_lines.contains(&flat_key(f));
+            if !replaced
+                && kept.contains_key(&(
+                    p.handle.map(|h| h.get()),
+                    p.block_path.to_string(),
+                    p.class_name.clone(),
+                ))
+            {
                 items.push(Item::Leaf(f));
             }
         }
@@ -1322,6 +1351,8 @@ impl<'a> PvecConversion<'a> {
             .collect();
         let mut model_view = None;
         let mut model_flat = None;
+        let mut model_lines: Vec<FlatEntity> = Vec::new();
+        let mut model_leader_lines = BTreeSet::new();
         // The own layer of every INSERT a model leaf is reached through, so a freeze on an INSERT's
         // layer takes its whole block with it inside that viewport, as the view pass does for a
         // frozen layer (P-3).
@@ -1371,6 +1402,9 @@ impl<'a> PvecConversion<'a> {
                     )
                     .map_err(PvecConvertError::Flatten)?,
             );
+            if let Some(mf) = &model_flat {
+                (model_lines, model_leader_lines) = line_leaves(provider, &mf.entities);
+            }
             if drawn
                 .iter()
                 .any(|&k| !windows[k].0.frozen_layers.is_empty())
@@ -1461,7 +1495,12 @@ impl<'a> PvecConversion<'a> {
                 for f in mf
                     .entities
                     .iter()
+                    .chain(&model_lines)
                     .filter(|f| model_layers.contains_key(&flat_key(f)))
+                    .filter(|f| {
+                        !(matches!(f.entity.geometry, RawGeometry::Unmapped { .. })
+                            && model_leader_lines.contains(&flat_key(f)))
+                    })
                 {
                     items.push(Item::Leaf(f));
                     via.push((u32::try_from(k).unwrap_or(u32::MAX - 2) + 1, Some(k)));
@@ -1551,6 +1590,9 @@ impl<'a> PvecConversion<'a> {
         if dimensions_expanded > 0 {
             annotation_counts.insert("DIMENSION.expanded".into(), dimensions_expanded);
         }
+        // The IMAGEs placed as rasters (#1667), in the order they were met.
+        let mut rasters: Vec<crate::raster_pvec::pyramid::RasterPyramid> = Vec::new();
+        let mut placed_pixels = 0u64;
         let (tx, rx) = bounded::<Outcome>(*queue_capacity);
         let sent = AtomicU64::new(0);
         /// The pieces of a line or straight polyline inside the sheet `b`, `[min x, min y, max x,
@@ -1766,6 +1808,9 @@ impl<'a> PvecConversion<'a> {
             }
         }
         let drop_widths = sheet.as_ref().is_some_and(|s| s.drop_widths);
+        // A pattern's lengths are drawing units like the coordinates, so the sheet's own strokes
+        // get the plot scale on them too (#1683); a leaf drawn through a window keeps its own.
+        let dash_k = sheet.as_ref().map_or(1.0, |s| s.per_unit);
         // The plot style table a CTB gives, applied per ACI (#1630); an STB applies nothing.
         let table = plot_style.as_ref().filter(|t| !t.is_stb);
         // What the sheet clip did: outside, crossing, cut and the pieces the cut ones became.
@@ -2359,8 +2404,6 @@ impl<'a> PvecConversion<'a> {
                         Ok(Some((mut pieces, body))) => {
                             // What the stream does not carry of the entity (#1658).
                             let left_out = match class {
-                                "MULTILEADER" => Some("its leader lines are not drawn"),
-                                "TOLERANCE" => Some("its frame is not drawn"),
                                 _ if dimension => Some(
                                     "its block is missing, so its text is rebuilt from the measurement and nothing else is drawn",
                                 ),
@@ -2394,6 +2437,48 @@ impl<'a> PvecConversion<'a> {
                                 .entry(format!("{class}.unmapped"))
                                 .or_default() += 1;
                         }
+                    }
+                }
+                // An IMAGE is placed as a raster when the caller said where its file is (#1667).
+                // Its row stays the unmapped one it always was, and says what became of the pixels.
+                if let (Some(dir), Item::Leaf(f), false) = (images.as_deref(), item, frozen_here)
+                    && raw.provenance.class_name == "IMAGE"
+                    && matches!(raw.geometry, RawGeometry::Unmapped { .. })
+                    && let Some(frame) = raw.provenance.handle.and_then(|h| provider.image_frame(h))
+                {
+                    let named = frame
+                        .file_name
+                        .rsplit(['\\', '/'])
+                        .next()
+                        .unwrap_or_default();
+                    // What the conversion has left: a count and a total of pixels, so a drawing
+                    // of many pictures cannot take the memory (#1667).
+                    let left = dwg_image::MAX_TOTAL_PIXELS.saturating_sub(placed_pixels);
+                    let placed = if rasters.len() >= dwg_image::MAX_IMAGES {
+                        Err(format!(
+                            "the conversion already placed {} images",
+                            dwg_image::MAX_IMAGES
+                        ))
+                    } else {
+                        dwg_image::place(
+                            &frame,
+                            |p| f.map_point(p),
+                            dir,
+                            clip_box,
+                            ring.map(Vec::as_slice),
+                            left,
+                        )
+                    };
+                    match placed {
+                        Ok(pyramid) => {
+                            placed_pixels += u64::from(pyramid.width) * u64::from(pyramid.height);
+                            rasters.push(pyramid);
+                            done.warnings
+                                .push(format!("IMAGE: placed as a raster from {named}"));
+                        }
+                        Err(why) => done
+                            .warnings
+                            .push(format!("IMAGE: not drawn, {why} ({named})")),
                     }
                 }
                 let mut carried_ids: Vec<EntityId> = Vec::new();
@@ -2465,6 +2550,9 @@ impl<'a> PvecConversion<'a> {
                             (c, bad, false)
                         } else if components.line_style {
                             let mut input = dwg_style_input(&raw.style, true);
+                            if window.is_none() {
+                                input.linetype_scale *= dash_k;
+                            }
                             // The table's lineweight and linetype for the stroke's ACI beat the
                             // object's; an entry that says "object" leaves them (#1630).
                             if let (Some(t), Some(aci)) = (table, effective_aci) {
@@ -2693,6 +2781,7 @@ impl<'a> PvecConversion<'a> {
             texts,
             fills,
             annotation_counts,
+            rasters,
             sheet,
         })
     }
@@ -2732,6 +2821,7 @@ impl<'a> PvecConversion<'a> {
             texts,
             fills,
             annotation_counts,
+            rasters,
             sheet,
         } = self.classify(provider, Some(unit))?;
         #[cfg(feature = "pvec-raster-thumbnail")]
@@ -2815,6 +2905,24 @@ impl<'a> PvecConversion<'a> {
             Ok((report, fidelity))
         };
         let config = WriteConfig { unit, leaves };
+        // The manifest box takes in every placed raster too, so a logo past the linework is inside it.
+        let open_area = rasters.iter().fold(area, |acc, r| {
+            let [x0, y0, x1, y1] = r.visible_box.map(f64::from);
+            let [a, b, c, d, tx, ty] = r.pixel_to_source;
+            [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                .iter()
+                .map(|p| [a * p[0] + b * p[1] + tx, c * p[0] + d * p[1] + ty])
+                .fold(acc, |acc, q| {
+                    Some(acc.map_or([q[0], q[1], q[0], q[1]], |b| {
+                        [
+                            b[0].min(q[0]),
+                            b[1].min(q[1]),
+                            b[2].max(q[0]),
+                            b[3].max(q[1]),
+                        ]
+                    }))
+                })
+        });
         let mut chunk = 0u64;
         let mut on_chunk = |entities: u64, bytes: u64| {
             chunk += 1;
@@ -2844,7 +2952,7 @@ impl<'a> PvecConversion<'a> {
                 &config,
                 geometries.iter().map(|(id, g)| (*id, g)),
                 Vec::new(),
-                area,
+                open_area,
                 spill,
                 &cancel,
                 on_chunk,
@@ -2854,6 +2962,9 @@ impl<'a> PvecConversion<'a> {
             // PVec sorts the calibration block after every other kind, so it can go in first.
             if let Some(c) = &calibration {
                 open.calibration(c).map_err(write_error)?;
+            }
+            if !rasters.is_empty() {
+                open.rasters(&rasters).map_err(PvecConvertError::Rasters)?;
             }
             if select == StreamSelection::NONE && regions.is_none() {
                 return Ok((open, None, None));
@@ -3106,6 +3217,8 @@ struct Classified {
     texts: Vec<(EntityId, TextBody)>,
     fills: Vec<(Vec<EntityId>, FillBody)>,
     annotation_counts: BTreeMap<String, u64>,
+    /// The IMAGEs placed as rasters, written after the geometry (#1667).
+    rasters: Vec<crate::raster_pvec::pyramid::RasterPyramid>,
     /// The paper sheet, for a paper layout under the print profile.
     sheet: Option<Sheet>,
 }
@@ -3503,8 +3616,54 @@ struct Done {
     warnings: Vec<String>,
 }
 
+/// The lines a LEADER, MULTILEADER or TOLERANCE leaf draws (#1671), each as a leaf of its own with
+/// the entity's provenance, style and placement, so the layer rules, the view pass and any viewport
+/// it is seen through treat them as they do the entity. A MULTILEADER's or TOLERANCE's own leaf
+/// stays for its text; a LEADER has nothing else to say, so the keys of the LEADER leaves whose
+/// lines are drawn come back too, and those leaves are left out.
+fn line_leaves<P: DwgProvider>(
+    provider: &P,
+    leaves: &[FlatEntity],
+) -> (Vec<FlatEntity>, BTreeSet<LeafKey>) {
+    let (mut lines, mut replaced) = (Vec::new(), BTreeSet::new());
+    for f in leaves {
+        let class = f.entity.provenance.class_name.as_str();
+        if !matches!(f.entity.geometry, RawGeometry::Unmapped { .. })
+            || !matches!(class, "LEADER" | "MULTILEADER" | "TOLERANCE")
+        {
+            continue;
+        }
+        let Some(handle) = f.entity.provenance.handle else {
+            continue;
+        };
+        let drawn = provider.annotation_lines(handle);
+        if class == "LEADER" && !drawn.is_empty() {
+            replaced.insert(flat_key(f));
+        }
+        // No entity draws more than this many lines: a frame of rows and cells or a leader's
+        // lines and arrowheads are a few dozen at most.
+        const MAX_LINES_PER_ENTITY: usize = 4096;
+        lines.extend(
+            drawn
+                .into_iter()
+                .take(MAX_LINES_PER_ENTITY)
+                .map(|geometry| {
+                    f.carrying(RawEntity {
+                        geometry,
+                        provenance: f.entity.provenance.clone(),
+                        style: f.entity.style.clone(),
+                    })
+                }),
+        );
+    }
+    (lines, replaced)
+}
+
+/// A leaf's handle, block path and class, which says which view pass decision is its own.
+type LeafKey = (Option<u64>, String, String);
+
 /// [`leaf_key`] of a flattened leaf, so the view pass and the flatten pass meet on the same key.
-fn flat_key(f: &FlatEntity) -> (Option<u64>, String, String) {
+fn flat_key(f: &FlatEntity) -> LeafKey {
     leaf_key_of(&f.entity.provenance)
 }
 
@@ -3893,6 +4052,7 @@ impl PvecConvertError {
             PvecConvertError::Write(_) | PvecConvertError::Components(_) => {
                 d(DiagnosticCode::WriteFailed, "write")
             }
+            PvecConvertError::Rasters(_) => d(DiagnosticCode::WriteFailed, "rasters"),
             PvecConvertError::NothingStorable { .. } => {
                 d(DiagnosticCode::WriteFailed, "nothing-storable")
             }
@@ -3943,6 +4103,7 @@ impl PvecConvertError {
             PvecConvertError::NothingStorable { .. } => "NOTHING_STORABLE",
             PvecConvertError::Tally(_) => "TALLY_FAILED",
             PvecConvertError::Components(_) => "COMPONENTS_FAILED",
+            PvecConvertError::Rasters(_) => "RASTERS_FAILED",
             PvecConvertError::Report(_) => "REPORT_FAILED",
             PvecConvertError::Publish(_) => "PUBLISH_FAILED",
             PvecConvertError::CapabilityNotAllowed { .. } => "CAPABILITY_NOT_ALLOWED",

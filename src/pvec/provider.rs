@@ -761,6 +761,32 @@ pub enum RawGeometry {
     },
 }
 
+/// What an `IMAGE` entity says of its frame (#1667): the file its definition names and where the
+/// picture sits, in the coordinates of the block the entity is in. Pixels come from the file, so
+/// nothing here is a pixel.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ImageFrame {
+    /// The path the definition carries, as the drawing spells it (a Windows path as often as not).
+    pub file_name: String,
+    /// The lower-left corner of the picture.
+    pub insert: Point3,
+    /// One pixel across, along the picture's bottom edge.
+    pub u: Point3,
+    /// One pixel up, along its left edge.
+    pub v: Point3,
+    /// The picture's size in pixels, as the entity records it.
+    pub size: [f64; 2],
+    /// Whether the entity is switched on for display.
+    pub visible: bool,
+    /// The clip boundary in pixel units (the stored vertices, so an edge is a vertex plus one
+    /// half), top-left origin, y down. Empty when there is no clip, two vertices for a rectangle
+    /// (opposite corners) and three or more for a polygon.
+    pub clip: Vec<[f64; 2]>,
+    /// Whether the clip keeps what is outside the boundary.
+    pub clip_inverted: bool,
+}
+
 /// What a text-like or fill-like entity draws, in the coordinates of the block it sits in, for the
 /// text and hatch component streams (#1609). A provider that cannot report one says nothing.
 ///
@@ -1399,12 +1425,30 @@ pub trait DwgProvider {
         None
     }
 
+    /// The lines the `LEADER`, `MULTILEADER` or `TOLERANCE` with this handle draws, as open and
+    /// closed polylines in the coordinates of the block it sits in (#1671): a leader's line and
+    /// arrowhead, and the cell frame of a tolerance. They are geometry, so they do not depend on
+    /// the texts choice; the text of a `MULTILEADER` and a `TOLERANCE` is
+    /// [`annotation`](Self::annotation). The default has none.
+    fn annotation_lines(&self, handle: ItemHandle) -> Vec<RawGeometry> {
+        let _ = handle;
+        Vec::new()
+    }
+
     /// What the `ATTDEF` with this handle draws when it is reached through the `INSERT` with that
     /// handle, or `None` when it draws nothing there (#1609). AutoCAD draws a constant definition's
     /// value and the INSERT's own `ATTRIB` value for any other, never the definition's tag. The
     /// default draws nothing.
     fn inserted_attribute(&self, attdef: ItemHandle, insert: ItemHandle) -> Option<Annotation> {
         let _ = (attdef, insert);
+        None
+    }
+
+    /// The frame of the `IMAGE` entity with this handle, in the coordinates of the block it sits
+    /// in, or `None` for any other entity (#1667). The conversion places the image from it when
+    /// the caller said where the image files are. The default has none.
+    fn image_frame(&self, handle: ItemHandle) -> Option<ImageFrame> {
+        let _ = handle;
         None
     }
 
