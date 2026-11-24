@@ -79,7 +79,8 @@ pub(super) fn expand(
                 }
             }
             crossings.sort_by(f64::total_cmp);
-            for pair in crossings.chunks_exact(2) {
+            let (pairs, _) = crossings.as_chunks::<2>();
+            for pair in pairs {
                 let (t0, t1) = (pair[0], pair[1]);
                 if t1 <= t0 {
                     continue;

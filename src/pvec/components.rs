@@ -408,6 +408,10 @@ pub(crate) struct FillBody {
 }
 
 #[cfg(feature = "pvec-convert")]
+/// The line families of each pattern hatch, keyed by the artifact index of its first boundary entity.
+pub type PatternMap = BTreeMap<u32, Vec<PlacedPatternLine>>;
+
+#[cfg(feature = "pvec-convert")]
 /// One line family of a hatch pattern, placed in the artifact's space: the lines run along
 /// `direction` (a unit vector) through `origin`, the next one `step` from it, and `dashes` are
 /// lengths in the artifact's unit, positive for a dash, negative for a gap, zero for a dot (empty
@@ -438,14 +442,7 @@ pub(crate) fn annotation_streams(
     texts: &[(EntityId, TextBody)],
     fills: &[(Vec<EntityId>, FillBody)],
     source_ids: &[EntityId],
-) -> Result<
-    (
-        Vec<Stream>,
-        Vec<DroppedRow>,
-        BTreeMap<u32, Vec<PlacedPatternLine>>,
-    ),
-    ComponentsError,
-> {
+) -> Result<(Vec<Stream>, Vec<DroppedRow>, PatternMap), ComponentsError> {
     // PVec's bounds, as for `build_streams`.
     const MAX_NAME: usize = 255;
     const MAX_TEXT: usize = 4_096;
