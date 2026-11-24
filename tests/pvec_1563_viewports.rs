@@ -1160,6 +1160,11 @@ fn issue_1660_a_nan_in_the_view_stays_refused() {
             ([0.0, f64::NAN, 1.0], 0.0),
             ([0.0, 0.0, f64::NAN], 0.0),
             ([0.0, 0.0, 1.0], f64::NAN),
+            // An infinite x or y next to an infinite z has no lean at all, so it is not a plan
+            // view either, while an infinite z alone still is.
+            ([f64::INFINITY, 0.0, f64::INFINITY], 0.0),
+            ([0.0, f64::INFINITY, f64::INFINITY], 0.0),
+            ([0.0, 0.0, f64::INFINITY], 0.0),
         ],
     );
     let refused = |r: &str| ("refused".to_owned(), Some(r.to_owned()));
@@ -1169,7 +1174,10 @@ fn issue_1660_a_nan_in_the_view_stays_refused() {
             refused("non-plan"),
             refused("non-plan"),
             refused("non-plan"),
-            refused("twist")
+            refused("twist"),
+            refused("non-plan"),
+            refused("non-plan"),
+            drawn(),
         ]
     );
     let _ = fs::remove_dir_all(dir);
