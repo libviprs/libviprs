@@ -930,7 +930,15 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1692 adds 6: the `tests/pvec_1692_ctb_lineweight.rs` cells that write a drawing and convert it into a temp dir. It said 1435 before this line moved.
 /// #1676 adds 14: the `tests/pvec_1676_pmtiles_plot.rs` cells that plot a mock drawing into a temp dir and read the archives back. It said 1441 before this line moved.
 /// #1670 adds 41: the `tests/pvec_1670_plot_pdf.rs` cells that plot a drawing written in memory into a temp dir and read the PDF back, and the owner-only `tests/pvec_1670_owner_layouts.rs`. It said 1455 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1496;
+/// #1670 adds 6: the `tests/pvec_1670_plot_defaults.rs` cells that plot a drawing written in memory, with no table, into a temp dir and read the PDF back. It said 1496 before this line moved.
+/// #1670 adds 1: the transparent fill cell of `tests/pvec_1670_plot_defaults.rs`, which plots a drawing written in memory into a temp dir. It said 1502 before this line moved.
+/// #1670 adds 1: the generated-ctb plot cell of `tests/plot_files_1670_defaults.rs`, which plots a drawing written in memory into a temp dir. It said 1503 before this line moved.
+/// #1670 adds 17: the `tests/plot_defaults_1670.rs` cells that store, load and clear the two default files in a temp dir. It said 1504 before this line moved.
+/// #1670 adds 2: the two scratch-file cells of `tests/plot_defaults_1670.rs` (a stale scratch name, threads storing at once). It said 1521 before this line moved.
+/// #1704 adds 11: the `tests/pvec_1704_*.rs` cells that plot a synthetic drawing or a layout set into a temp dir and look at what is on disk. It said 1523 before this line moved.
+/// #1715 adds 8: the `tests/pvec_1715_qpdf_check.rs` cells that write a PDF or a stand-in qpdf into a temp dir. It said 1534 before this line moved.
+/// #1705 adds 11: the `tests/pvec_1705_ole2frame.rs` cells that convert or plot a drawing with an OLE2FRAME in a temp dir, and the owner-only `tests/pvec_1705_owner_ole.rs`. It said 1542 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1553;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

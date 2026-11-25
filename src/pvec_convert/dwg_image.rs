@@ -171,7 +171,7 @@ pub(super) fn place_picture(
         (PixelFormat::Rgb8, picture.into_rgb8().into_raw())
     };
     if cut && !boxed {
-        for (k, px) in mask.iter().zip(data.chunks_exact_mut(4)) {
+        for (k, px) in mask.iter().zip(data.as_chunks_mut::<4>().0) {
             if !k {
                 px[3] = 0;
             }
