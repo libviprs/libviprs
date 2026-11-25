@@ -258,7 +258,7 @@ fn issue_1713_a_stroke_past_the_window_is_kept_at_any_model_scale() {
     // window grown by 30 mm of paper; the pages must be the same at a small and at a large scale.
     for scale in [1, 100] {
         let run = |name: &str, only: bool| {
-            let bytes = support::drawing_with(1, 20_000, SMALL * scale, only, 0, true, scale);
+            let bytes = support::drawing_with(SHEETS, 20_000, SMALL * scale, only, 0, true, scale);
             let dest = dir.join(name);
             plot(&bytes, &dest, None)
                 .convert_with::<support::Synthetic>()
