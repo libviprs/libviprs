@@ -16,8 +16,9 @@ mod plan;
 
 use std::fs;
 
-use acadrust::entities::{Line, LwPolyline, LwVertex, Polyline2D, Vertex2D};
+use acadrust::entities::{Insert, Line, LwPolyline, LwVertex, Polyline2D, Vertex2D, Viewport};
 use acadrust::objects::ObjectType;
+use acadrust::tables::BlockRecord;
 use acadrust::types::{Vector2, Vector3};
 use acadrust::{CadDocument, DwgWriter, EntityType};
 use libviprs::cad::CadSource;
@@ -36,7 +37,7 @@ type Record = (Option<f64>, Option<Vec<[f64; 2]>>, f64);
 
 /// A sheet whose plot scale is `paper` paper millimetres to `drawing` drawing units, holding just
 /// `entity` and a plain line far from it, so the drawing is never empty.
-fn sheet(entity: EntityType, paper: f64, drawing: f64, print_lineweights: bool) -> Vec<u8> {
+fn layout(paper: f64, drawing: f64, print_lineweights: bool) -> CadDocument {
     let mut doc = CadDocument::new();
     let layout = doc.add_layout("Sheet").unwrap();
     let Some(ObjectType::Layout(l)) = doc.objects.get_mut(&layout) else {
@@ -55,6 +56,11 @@ fn sheet(entity: EntityType, paper: f64, drawing: f64, print_lineweights: bool) 
     l.plot_origin_x = 0.0;
     l.plot_origin_y = 0.0;
     l.plot_flags.print_lineweights = print_lineweights;
+    doc
+}
+
+fn sheet(entity: EntityType, paper: f64, drawing: f64, print_lineweights: bool) -> Vec<u8> {
+    let mut doc = layout(paper, drawing, print_lineweights);
     doc.add_entity_to_layout(entity, "Sheet").unwrap();
     doc.add_entity_to_layout(
         EntityType::Line(Line::from_coords(100.0, 100.0, 0.0, 110.0, 100.0, 0.0)),
@@ -66,10 +72,19 @@ fn sheet(entity: EntityType, paper: f64, drawing: f64, print_lineweights: bool) 
 
 /// The records of `entity` on a sheet at `paper` mm to `drawing` units, the plain line left out.
 fn plot(tag: &str, entity: EntityType, paper: f64, drawing: f64, lineweights: bool) -> Vec<Record> {
-    let bytes = sheet(entity, paper, drawing, lineweights);
+    records(
+        tag,
+        &sheet(entity, paper, drawing, lineweights),
+        paper / drawing,
+    )
+}
+
+/// The records of a converted sheet, the plain line 100 units up left out, at `per_unit` paper
+/// millimetres to a sheet unit.
+fn records(tag: &str, bytes: &[u8], per_unit: f64) -> Vec<Record> {
     let dir = scratch(tag);
     let dest = dir.join("o.pvec");
-    PvecConversion::new(CadSource::Bytes(&bytes), &dest)
+    PvecConversion::new(CadSource::Bytes(bytes), &dest)
         .unit(SourceUnit::Millimeters)
         .view_profile(ViewProfile::print_profile("Sheet"))
         .components(StreamSelection::ALL)
@@ -97,7 +112,6 @@ fn plot(tag: &str, entity: EntityType, paper: f64, drawing: f64, lineweights: bo
             (id.index(), w)
         })
         .collect();
-    let per_unit = paper / drawing;
     let out = reader
         .entities()
         .unwrap()
@@ -274,7 +288,7 @@ fn issue_1718_the_width_prints_when_the_layout_does_not_print_lineweights() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-#[ignore = "a polyline with a bulge is dropped from a plot until #1717 (arc sides) lands, so this has nothing to measure; take the ignore off when it is on main"]
+#[ignore = "a polyline with a bulge is dropped from a plot until #1719 (arc sides, #1717) lands, so this has nothing to measure; take the ignore off when #1719 is on main"]
 fn issue_1718_a_constant_width_on_a_bulged_side_keeps_the_arc_and_the_width() {
     let r = plot(
         "bulged-constant",
@@ -459,4 +473,90 @@ fn issue_1718_a_2d_polyline_takes_its_vertex_widths_and_its_default_width() {
         1e-6,
         "default width in mm",
     );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1718_the_width_takes_the_scale_of_the_block_it_is_drawn_through() {
+    let mut doc = layout(1.0, 1.0, true);
+    let mut block = BlockRecord::new("WIDE");
+    block.handle = doc.allocate_handle();
+    let owner = block.handle;
+    doc.block_records.add(block).unwrap();
+    let mut inner = lw(&RUN, &[], &[], 0.2, false);
+    inner.common_mut().owner_handle = owner;
+    doc.add_entity(inner).unwrap();
+    // The block is drawn twice as big, so its 0.2 wide polyline is 0.4 wide.
+    let insert = Insert::new("WIDE", Vector3::new(0.0, 0.0, 0.0)).with_uniform_scale(2.0);
+    doc.add_entity_to_layout(EntityType::Insert(insert), "Sheet")
+        .unwrap();
+    let r = records("block-scale", &DwgWriter::write_to_vec(&doc).unwrap(), 1.0);
+    assert_near(
+        only(&r).0.expect("a stroke width"),
+        0.4,
+        1e-6,
+        "width in mm",
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1718_the_width_takes_the_scale_of_the_viewport_it_is_seen_through() {
+    let mut doc = layout(1.0, 1.0, true);
+    // The window is 10 sheet units high and shows 20 model units, a viewport scale of 1:2, so a
+    // model polyline 0.8 wide is 0.4 on the sheet.
+    let mut window = Viewport::with_size(Vector3::new(5.0, 8.0, 0.0), 8.0, 10.0);
+    window.id = 2;
+    window.view_height = 20.0;
+    window.view_center = Vector3::new(0.0, 0.0, 0.0);
+    doc.add_entity_to_layout(EntityType::Viewport(Box::new(window)), "Sheet")
+        .unwrap();
+    let mut model = lw(&[[-2.0, 0.0], [2.0, 0.0], [2.0, 2.0]], &[], &[], 0.8, false);
+    // lw() draws 0.5 right and 8 up for the sheet, which is not wanted in model space
+    if let EntityType::LwPolyline(p) = &mut model {
+        for v in &mut p.vertices {
+            v.location = Vector2::new(v.location.x - 0.5, v.location.y - 8.0);
+        }
+    }
+    doc.add_entity(model).unwrap();
+    let r = records(
+        "viewport-scale",
+        &DwgWriter::write_to_vec(&doc).unwrap(),
+        1.0,
+    );
+    assert_near(
+        only(&r).0.expect("a stroke width"),
+        0.4,
+        1e-6,
+        "width in mm",
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1718_a_hostile_polyline_finishes_fast_and_stays_under_the_point_cap() {
+    // 12 000 sides, each a near full circle that a taper would flatten to dozens of points a side
+    // and edge: well over a million points if nothing bounded it.
+    let points: Vec<[f64; 2]> = (0..12_000).map(|i| [f64::from(i) * 0.0008, 0.0]).collect();
+    let bulges = vec![20.0; points.len()];
+    let widths = vec![[0.2, 0.6]; points.len()];
+    let started = std::time::Instant::now();
+    let r = plot(
+        "hostile",
+        lw(&points, &bulges, &widths, 0.0, false),
+        1.0,
+        1.0,
+        true,
+    );
+    assert!(
+        started.elapsed().as_secs() < 120,
+        "took {:?}",
+        started.elapsed()
+    );
+    for (_, v, _) in &r {
+        assert!(
+            v.as_ref().is_none_or(|v| v.len() <= 1_000_000),
+            "a record is over the cap"
+        );
+    }
 }

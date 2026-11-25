@@ -9,6 +9,10 @@
 
 use super::provider::RawVertex;
 
+/// The most points one outline ring may have. A polyline that would need more is stroked at its
+/// widest width instead, so a hostile drawing cannot ask for a ring of hundreds of millions.
+const MAX_RING_POINTS: usize = 1_000_000;
+
 /// What a polyline's widths plot as.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Widths {
@@ -83,8 +87,18 @@ pub(crate) fn plan(vertices: &[RawVertex], closed: bool, widths: &[[f64; 2]]) ->
     if first[0] > 0.0 && (0..sides).all(|i| at(i) == [first[0], first[0]]) {
         return Some(Widths::Stroke(first[0]));
     }
+    // What the polyline falls back to when its outline is too big or not a number: its widest
+    // width as a stroke.
+    let widest = (0..sides)
+        .map(|i| at(i)[0].max(at(i)[1]))
+        .fold(0.0, f64::max);
+    let stroke = (widest > 0.0).then_some(Widths::Stroke(widest));
     let (mut left, mut right): (Vec<[f64; 2]>, Vec<[f64; 2]>) = (Vec::new(), Vec::new());
     for i in 0..sides {
+        // Each point is on the ring twice, once on each edge, so the ring is twice what is held.
+        if left.len() > MAX_RING_POINTS / 2 {
+            return stroke;
+        }
         let (a, b) = (&vertices[i], &vertices[(i + 1) % vertices.len()]);
         let [start, end] = at(i);
         for (p, n, w) in side([a.x, a.y], [b.x, b.y], a.bulge, start, end) {
@@ -99,6 +113,10 @@ pub(crate) fn plan(vertices: &[RawVertex], closed: bool, widths: &[[f64; 2]]) ->
             ring.push(p);
         }
     }
+    if ring.len() > MAX_RING_POINTS || ring.iter().any(|p| !(p[0].is_finite() && p[1].is_finite()))
+    {
+        return stroke;
+    }
     while ring.len() > 1 && ring.first().zip(ring.last()).is_some_and(|(f, l)| f == l) {
         ring.pop();
     }
@@ -109,4 +127,55 @@ pub(crate) fn plan(vertices: &[RawVertex], closed: bool, widths: &[[f64; 2]]) ->
                 .collect(),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(x: f64, bulge: f64) -> RawVertex {
+        RawVertex { x, y: 0.0, bulge }
+    }
+
+    #[test]
+    fn a_polyline_that_would_need_over_the_cap_falls_back_to_its_widest_stroke() {
+        let vertices: Vec<RawVertex> = (0..12_000).map(|i| v(f64::from(i), 20.0)).collect();
+        let widths = vec![[0.2, 0.6]; vertices.len()];
+        assert_eq!(plan(&vertices, false, &widths), Some(Widths::Stroke(0.6)));
+    }
+
+    #[test]
+    fn a_polyline_under_the_cap_is_an_outline_of_at_most_the_cap() {
+        let vertices: Vec<RawVertex> = (0..1_000).map(|i| v(f64::from(i), 1.0)).collect();
+        let widths = vec![[0.2, 0.6]; vertices.len()];
+        let Some(Widths::Outline(ring)) = plan(&vertices, false, &widths) else {
+            panic!("an outline");
+        };
+        assert!(ring.len() > 1_000 && ring.len() <= MAX_RING_POINTS);
+    }
+
+    #[test]
+    fn a_bulge_or_width_that_overflows_never_gives_a_non_finite_outline() {
+        for bulge in [1e200, -1e200, 1e-300, 1e-15, f64::MAX] {
+            let vertices = [v(0.0, bulge), v(10.0, 0.0)];
+            match plan(&vertices, false, &[[1.0, 2.0], [0.0, 0.0]]) {
+                Some(Widths::Outline(r)) => {
+                    assert!(
+                        r.iter().all(|p| p.x.is_finite() && p.y.is_finite()),
+                        "{bulge}"
+                    );
+                }
+                Some(Widths::Stroke(w)) => assert!(w.is_finite()),
+                None => panic!("a width is not dropped for a bulge of {bulge}"),
+            }
+        }
+        let vertices = [v(0.0, 0.0), v(10.0, 0.0)];
+        match plan(&vertices, false, &[[f64::MAX, f64::MAX / 2.0], [0.0, 0.0]]) {
+            Some(Widths::Outline(r)) => {
+                assert!(r.iter().all(|p| p.x.is_finite() && p.y.is_finite()))
+            }
+            Some(Widths::Stroke(w)) => assert!(w.is_finite()),
+            None => panic!("a huge width is not dropped"),
+        }
+    }
 }
