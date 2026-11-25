@@ -307,7 +307,6 @@ fn issue_1718_a_constant_width_on_a_bulged_side_keeps_the_arc_and_the_width() {
     );
     let dest = dir.join("o.pdf");
     libviprs::pvec_convert::PdfPlot::new(CadSource::Bytes(&bytes), &dest)
-        .plot_style_table(acadrust::plot_style::PlotStyleTable::identity("t"))
         .unit(SourceUnit::Millimeters)
         .view_profile(ViewProfile::print_profile("Sheet"))
         .layouts(["Sheet"])
@@ -326,8 +325,7 @@ fn issue_1718_a_constant_width_on_a_bulged_side_keeps_the_arc_and_the_width() {
         .map(|o| f64::from(o.operands[0].as_float().unwrap()))
         .collect();
     let want = 0.4 * 72.0 / 25.4;
-    // the arc and the straight side, with the identity table so the default monochrome one does
-    // not overrule the polyline's own width
+    // the arc and the straight side, with no table: the default monochrome one leaves a width alone (#1723)
     let wide = widths.iter().filter(|w| (*w - want).abs() < 1e-3).count();
     assert_eq!(
         wide, 2,

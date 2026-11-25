@@ -355,6 +355,7 @@ impl<'a> PdfPlot<'a> {
             conversion.arc_sides = true;
             // Nothing reads the per entity report of a plot sheet, so none is built or kept.
             conversion.plot_mode = true;
+            conversion.monochrome = self.table.is_none();
             conversion.model_cache = Some(model_cache.clone());
             if let Some(dir) = &self.images {
                 conversion = conversion.images(dir.clone());
@@ -869,7 +870,6 @@ fn read_page(
             }
             // Stroke widths are in millimetres, as a lineweight is.
             let mm = match def.and_then(|d| d.width) {
-                _ if monochrome => DEFAULT_WIDTH_MM,
                 Some(StrokeWidth::Width(w)) => w,
                 Some(StrokeWidth::Thinnest) => 0.0,
                 None => DEFAULT_WIDTH_MM,
