@@ -202,6 +202,8 @@ and let the consumer rotate); write the single viewport's scale as the file's re
 exists for an application that wants it); keep lineweights when `print_lineweights` is false (a
 print without lineweights has none, and the report says the flag did it).
 
+Amendment to P-1 (#1706, 2026-11-24). A plot skips a side with no length. A polyline with a repeated vertex (two consecutive points that PVec treats as one) used to be refused whole, `coincident-vertices`, which is right for stored geometry and wrong for a page: a plotter draws the polyline through its points and a zero length side adds nothing. When the conversion is asked for the plan (`project_plan`, which `PdfPlot` sets), one linear pass drops each vertex that repeats the one before it (PVec's own rule says which points are one point), so the side that starts at the survivor keeps its bulge, and the extraction runs once more, with a warning that counts the repeats. Retrying after each single removal is quadratic and was rejected (#1720). The closing side of a closed polyline whose last point is its first goes the same way. A conversion that does not ask for the plan is unchanged and still refuses the polyline. A polyline left with fewer than two distinct points is still refused and the plot goes on. Not done: a repeat in a polyline with arc sides, which is a composite curve that the writer does not take yet (see #1691), and a bulge that PVec refuses.
+
 ## Fixtures
 
 Known truth that exists, vendored under `tests/fixtures/pvec-gold/` from

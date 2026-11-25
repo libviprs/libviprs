@@ -1746,6 +1746,11 @@ annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_an_open_poly
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_every_side_draws_what_the_rule_says
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_the_pattern_is_never_stretched
 annotated   fs-detected  tests/pvec_1694_pattern_fit.rs::issue_1699_the_plots_side_starts_on_a_dash_of_3_875_and_keeps_the_period
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_polyline_without_a_repeat_is_drawn
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_an_open_lwpolyline_with_a_repeated_vertex_is_drawn
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_closed_lwpolyline_that_repeats_its_first_point_is_drawn
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_2d_polyline_with_a_repeated_vertex_is_drawn
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_polyline_that_is_one_point_repeated_draws_nothing_and_does_not_fail
 annotated   fs-detected  tests/pvec_1704_layout_set_rows.rs::issue_1704_a_set_keeps_its_rows_by_default
 annotated   fs-detected  tests/pvec_1704_layout_set_rows.rs::issue_1704_a_set_that_drops_rows_keeps_them_in_the_report_file_only
 annotated   fs-detected  tests/pvec_1704_plot_memory.rs::issue_1704_the_peak_does_not_move_when_the_sheet_count_grows_fivefold
@@ -1801,6 +1806,8 @@ annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stored_file_o
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_the_directory_is_private_and_so_are_the_files
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stale_scratch_file_does_not_stop_a_store_and_is_left_alone
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_threads_storing_the_same_default_all_succeed_and_leave_no_scratch
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_two_hundred_thousand_repeats_are_skipped_in_one_pass
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_polyline_of_identical_points_is_refused_without_a_panic_or_a_wait
 annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_closed_triangle_with_one_bulged_side_plots_the_arc_and_both_straight_sides
 annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_bulge_of_zero_stays_a_straight_polyline
 annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_an_open_polyline_with_a_half_circle_side_keeps_its_straight_side
