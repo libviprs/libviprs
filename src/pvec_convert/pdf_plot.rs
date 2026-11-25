@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::PlacedPatternLine;
@@ -22,7 +22,7 @@ use pvec_geometry::{Curve2d, Side};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use super::{PlotSettings, PvecConversion, PvecConvertError};
+use super::{MODEL_LEAF_BYTES, ModelPass, PlotSettings, PvecConversion, PvecConvertError};
 use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
@@ -319,6 +319,12 @@ impl<'a> PdfPlot<'a> {
             }
         };
         let mut out = PdfOut::new(&temp.pdf, self.embedded_font).map_err(io)?;
+        // The model walked once for the plot, and kept for the sheets that read it the same way.
+        let model_cache: Arc<Mutex<Option<Arc<ModelPass>>>> = Arc::new(Mutex::new(None));
+        let ceiling = self
+            .limits
+            .unwrap_or(self.profile.limits)
+            .max_allocation_bytes;
         let mut kids: Vec<u32> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         for (n, name) in wanted.iter().enumerate() {
@@ -346,8 +352,10 @@ impl<'a> PdfPlot<'a> {
                 conversion = conversion.observer(o.clone());
             }
             conversion.empty_sheet_ok = true;
+            conversion.arc_sides = true;
             // Nothing reads the per entity report of a plot sheet, so none is built or kept.
             conversion.plot_mode = true;
+            conversion.model_cache = Some(model_cache.clone());
             if let Some(dir) = &self.images {
                 conversion = conversion.images(dir.clone());
             }
@@ -378,7 +386,22 @@ impl<'a> PdfPlot<'a> {
                         notes: Vec::new(),
                     }
                 } else {
+                    let budget = Budget {
+                        ceiling,
+                        carried: model_cache
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .as_ref()
+                            .map_or(0, |p| p.leaves.saturating_mul(MODEL_LEAF_BYTES)),
+                        layout: name,
+                    };
+                    budget.check(
+                        "artifact read",
+                        // The curve, its lookups and its style: about 256 bytes an entity while the page is read.
+                        done.written.saturating_mul(256),
+                    )?;
                     read_page(
+                        &budget,
                         &file,
                         rotation,
                         paper_frame(sheet.as_ref(), unit),
@@ -470,6 +493,29 @@ impl Drop for Temp {
     }
 }
 
+/// What a plot may hold at a stage: the ceiling, what the plot already carries between sheets and
+/// the layout being read, so a refusal names where it was.
+struct Budget<'a> {
+    ceiling: u64,
+    carried: u64,
+    layout: &'a str,
+}
+
+impl Budget<'_> {
+    fn check(&self, stage: &'static str, bytes: u64) -> Result<(), PvecConvertError> {
+        let observed = self.carried.saturating_add(bytes);
+        if observed > self.ceiling {
+            return Err(PvecConvertError::AllocationBudget {
+                stage,
+                layout: self.layout.to_owned(),
+                observed,
+                ceiling: self.ceiling,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// One page written to the file: its box in points, the objects it draws with, and what it could
 /// not draw as asked.
 struct PageRef {
@@ -524,7 +570,9 @@ fn publish_io(e: io::Error) -> PvecConvertError {
 /// Reads a scratch artifact into a page written to `pdf`: the frame is the paper, the curves are
 /// the strokes. The content goes through Flate into the file as it is made, and each raster is
 /// written and dropped before the next is decoded, so the page never exists in memory as a whole.
+#[allow(clippy::too_many_arguments)]
 fn read_page(
+    budget: &Budget<'_>,
     artifact: &Path,
     rotation: i16,
     frame: Option<([f64; 2], [f64; 2])>,
@@ -601,6 +649,13 @@ fn read_page(
         let Ok(id) = RasterId::new(n as u32) else {
             continue;
         };
+        // The picture is decoded and converted to RGBA, so it is charged before it is read.
+        budget.check(
+            "image",
+            u64::from(placement.width)
+                .saturating_mul(u64::from(placement.height))
+                .saturating_mul(4),
+        )?;
         let top = u32::from(placement.levels).saturating_sub(1);
         let Ok(Some(bytes)) = reader.raster_tile(id, top, 0, 0) else {
             continue;

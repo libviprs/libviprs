@@ -13,7 +13,7 @@ use crate::observe::EngineObserver;
 use crate::pdf::PageSizing;
 use crate::planner::{Layout, PlannerError, PyramidPlan, PyramidPlanner};
 use crate::pvec::view_profile::{SpaceSelection, ViewProfileError};
-use crate::pvec::{DwgProvider, LayoutKind, SourceUnit, ViewProfile};
+use crate::pvec::{DwgProvider, LayoutKind, SourceLimits, SourceUnit, ViewProfile};
 use crate::sink::SinkError;
 use crate::sink_pmtiles::PmTilesSink;
 use crate::{CancelToken, EngineBuilder, EngineError, PdfError};
@@ -188,6 +188,7 @@ pub struct PmTilesPlot<'a> {
     layouts: Option<Vec<String>>,
     dpi: u32,
     limits: RasterLimits,
+    source_limits: Option<SourceLimits>,
     cancel: CancelToken,
     observer: Option<Arc<dyn EngineObserver>>,
     deadline: Option<Duration>,
@@ -207,6 +208,7 @@ impl<'a> PmTilesPlot<'a> {
             layouts: None,
             dpi: 300,
             limits: RasterLimits::default(),
+            source_limits: None,
             cancel: CancelToken::new(),
             observer: None,
             deadline: None,
@@ -266,6 +268,14 @@ impl<'a> PmTilesPlot<'a> {
     #[must_use]
     pub fn limits(mut self, limits: RasterLimits) -> Self {
         self.limits = limits;
+        self
+    }
+
+    /// The reader's limits, as [`PdfPlot::limits`]. Its `max_allocation_bytes` is also the budget the
+    /// raster of each page is charged against before it is rendered (#1713).
+    #[must_use]
+    pub fn source_limits(mut self, limits: SourceLimits) -> Self {
+        self.source_limits = Some(limits);
         self
     }
 
@@ -396,6 +406,9 @@ impl<'a> PmTilesPlot<'a> {
         if let Some(table) = &self.table {
             plot = plot.plot_style_table(table.clone());
         }
+        if let Some(limits) = self.source_limits {
+            plot = plot.limits(limits);
+        }
         if let Some(observer) = &self.observer {
             plot = plot.observer(observer.clone());
         }
@@ -466,6 +479,20 @@ impl<'a> PmTilesPlot<'a> {
             });
         }
         let (w, h) = PageSizing::Exact.pixel_dims(w_pts, h_pts, self.dpi);
+        // The raster is RGBA, so it is charged before pdfium renders it (#1713).
+        let ceiling = self
+            .source_limits
+            .unwrap_or(self.profile.limits)
+            .max_allocation_bytes;
+        let observed = u64::from(w).saturating_mul(u64::from(h)).saturating_mul(4);
+        if observed > ceiling {
+            return Err(PmTilesPlotError::Plot(PvecConvertError::AllocationBudget {
+                stage: "raster",
+                layout: layout.to_owned(),
+                observed,
+                ceiling,
+            }));
+        }
         self.plan_pixels(layout, w, h).map(|_| ())
     }
 
