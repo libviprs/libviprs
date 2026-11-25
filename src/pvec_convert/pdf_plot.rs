@@ -112,7 +112,10 @@ impl<'a> PdfPlot<'a> {
     }
 
     /// The plot style table: stroke colour (screening included) and width per AutoCAD colour
-    /// index, as a PVec conversion applies it (#1630). An STB is reported in the notes as
+    /// index, as a PVec conversion applies it (#1630). Without one the plot is monochrome: every
+    /// stroke, text and solid fill is black and every stroke is 0.25 mm wide, a true colour object
+    /// included, and the notes say `plot-style-default-monochrome`. [`PlotStyleTable::identity`]
+    /// is the way back to the objects' own colours and widths. An STB is reported in the notes as
     /// `plot-style-stb-unsupported` and applies nothing. Dash patterns are not drawn yet.
     #[must_use]
     pub fn plot_style_table(mut self, table: PlotStyleTable) -> Self {
@@ -348,6 +351,7 @@ impl<'a> PdfPlot<'a> {
                 if let Some(table) = &self.table {
                     conversion = conversion.plot_style_table(table.clone());
                 }
+                let mono = self.table.is_none();
                 let page = conversion.run(&provider, unit).and_then(|out| {
                     let sheet = out.report.sheet;
                     let rotation = sheet
@@ -365,11 +369,15 @@ impl<'a> PdfPlot<'a> {
                             &out.hatch_patterns,
                             self.hairline_below_mm,
                             &cancel,
+                            mono,
                         )?
                     };
                     check_page(&page)?;
                     let mut notes = sheet.map(|s| s.notes).unwrap_or_default();
                     notes.extend(page.notes.iter().cloned());
+                    if mono {
+                        notes.push("plot-style-default-monochrome".into());
+                    }
                     Ok((page, notes))
                 });
                 let status = match &page {
@@ -455,6 +463,7 @@ fn read_page(
     patterns: &BTreeMap<u32, Vec<PlacedPatternLine>>,
     hairline_below_mm: f64,
     cancel: &CancelToken,
+    monochrome: bool,
 ) -> Result<Page, PvecConvertError> {
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
     const DEFAULT_WIDTH_MM: f64 = 0.25;
@@ -489,6 +498,12 @@ fn read_page(
     let hatches =
         payload(HatchStream::CAPABILITY).and_then(|s| HatchStream::decode(&s.payload).ok());
     let width_pt = |mm: f64| mm / 1000.0 * POINTS_PER_METRE;
+    // A pattern's lines and a solid fill's edge are the thinnest line, or 0.25 mm in a monochrome plot.
+    let edge = if monochrome {
+        format!("{:.4}", width_pt(DEFAULT_WIDTH_MM))
+    } else {
+        "0".to_owned()
+    };
     let rgb = |word: u32| {
         let [r, g, b, _] = word.to_be_bytes();
         format!(
@@ -606,6 +621,7 @@ fn read_page(
         // The hatch's own colour, not its boundary's stroke colour, thinned toward the white paper
         // by its transparency.
         let [r, g, b, a] = rgba.to_be_bytes();
+        let [r, g, b] = if monochrome { [0; 3] } else { [r, g, b] };
         let thin = |c: u8| (255.0 - (255.0 - f64::from(c)) * f64::from(a) / 255.0).round() as u8;
         let word = u32::from_be_bytes([thin(r), thin(g), thin(b), 255]);
         let mut solid = solid_fill;
@@ -638,7 +654,7 @@ fn read_page(
                 &mut stroke_budget,
             ) {
                 Ok(strokes) => {
-                    content.push_str(&format!("0 w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
+                    content.push_str(&format!("{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
                     for s in strokes {
                         content.push_str(&format!(
                             "{:.4} {:.4} m\n{:.4} {:.4} l\nS\n",
@@ -661,7 +677,7 @@ fn read_page(
             content.push_str("f*\n");
             // A solid fill is filled and stroked: its edge, in its own colour, at the thinnest line.
             if solid_fill {
-                content.push_str(&format!("0 w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
+                content.push_str(&format!("{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
                 push_path(&mut content, &runs, true);
                 content.push_str("S\n");
             }
@@ -685,6 +701,7 @@ fn read_page(
         }
         // Stroke widths are in millimetres, as a lineweight is.
         let mm = match def.and_then(|d| d.width) {
+            _ if monochrome => DEFAULT_WIDTH_MM,
             Some(StrokeWidth::Width(w)) => w,
             Some(StrokeWidth::Thinnest) => 0.0,
             None => DEFAULT_WIDTH_MM,
@@ -694,6 +711,7 @@ fn read_page(
         let word = paint
             .as_ref()
             .and_then(|p| p.colour_of(*id))
+            .filter(|_| !monochrome)
             .unwrap_or(0x0000_00ff);
         content.push_str(&format!(
             "{:.4} w\n{} RG\n1 J 1 j\n",
@@ -723,6 +741,7 @@ fn read_page(
         let word = paint
             .as_ref()
             .and_then(|p| p.colour_of(t.entity))
+            .filter(|_| !monochrome)
             .unwrap_or(0x0000_00ff);
         let (x, y) = to_pt(t.x, t.y);
         let (s, c) = t.rotation.sin_cos();
