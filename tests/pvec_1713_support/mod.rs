@@ -17,27 +17,51 @@ pub struct Synthetic {
     view_h: f64,
     only: bool,
     extra: u32,
+    heavy: bool,
+    scale: f64,
 }
 
 /// The bytes that open as the drawing described in the module docs.
 pub fn drawing(sheets: u32, model: u32, view_h: u32, only: bool, extra: u32) -> Vec<u8> {
+    drawing_with(sheets, model, view_h, only, extra, false, 1)
+}
+
+/// As [`drawing`], with every stroke 2.11 mm wide when `heavy` and the model `scale` times as large
+/// in every coordinate (give `view_h` the same factor to show the same picture). With `only` the
+/// model keeps what touches the window grown by 30 mm of paper, which is all that can draw.
+pub fn drawing_with(
+    sheets: u32,
+    model: u32,
+    view_h: u32,
+    only: bool,
+    extra: u32,
+    heavy: bool,
+    scale: u32,
+) -> Vec<u8> {
     format!(
-        "MOCK-1713-{sheets}-{model}-{view_h}-{}-{extra}",
-        u8::from(only)
+        "MOCK-1713-{sheets}-{model}-{view_h}-{}-{extra}-{}-{scale}",
+        u8::from(only),
+        u8::from(heavy)
     )
     .into_bytes()
 }
 
 /// Every seventh line is long, so some cross the window's edge.
-fn ends(i: u32) -> ([f64; 2], [f64; 2]) {
-    let (x, y) = (f64::from(i % 1000), f64::from(i / 1000));
-    let len = if i % 7 == 0 { 60.5 } else { 0.5 };
-    ([x, y], [x + len, y + 0.25])
+fn ends(i: u32, k: f64) -> ([f64; 2], [f64; 2]) {
+    let (x, y) = (f64::from(i % 1000) * k, f64::from(i / 1000) * k);
+    let len = if i.is_multiple_of(7) { 60.5 } else { 0.5 } * k;
+    ([x, y], [x + len, y + 0.25 * k])
 }
 
 impl Synthetic {
     fn window(&self) -> [f64; 4] {
         [0.0, 0.0, self.view_h * 400.0 / 280.0, self.view_h]
+    }
+
+    /// The window grown by 30 mm of paper, in model units.
+    fn padded(&self) -> [f64; 4] {
+        let (w, pad) = (self.window(), 30.0 * self.view_h / 280.0);
+        [w[0] - pad, w[1] - pad, w[2] + pad, w[3] + pad]
     }
 
     fn viewport(&self, sheet: u32, k: u32) -> ViewportEntity {
@@ -95,13 +119,22 @@ struct Model {
     next: u32,
     end: u32,
     only: Option<[f64; 4]>,
+    scale: f64,
+    heavy: bool,
 }
 
-fn leaf(i: u32, handle: u64, class: &str, layer: &str, geometry: RawGeometry) -> RawEntity {
+fn leaf(
+    i: u32,
+    handle: u64,
+    class: &str,
+    layer: &str,
+    hundredths: u16,
+    geometry: RawGeometry,
+) -> RawEntity {
     RawEntity {
         style: EntityStyle {
             colour: SourceFact::Present(SourceColour::Aci(7)),
-            lineweight: SourceFact::Present(SourceLineweight::Hundredths(25)),
+            lineweight: SourceFact::Present(SourceLineweight::Hundredths(hundredths)),
             ..EntityStyle::absent()
         },
         geometry,
@@ -119,7 +152,7 @@ impl EntityCursor for Model {
         while self.next < self.end {
             let i = self.next;
             self.next += 1;
-            let (a, b) = ends(i);
+            let (a, b) = ends(i, self.scale);
             if let Some(w) = self.only
                 && !(a[0].min(b[0]) <= w[2]
                     && a[0].max(b[0]) >= w[0]
@@ -133,6 +166,7 @@ impl EntityCursor for Model {
                 1,
                 "LINE",
                 "0",
+                if self.heavy { 211 } else { 25 },
                 RawGeometry::Line {
                     start: [a[0], a[1], 0.0],
                     end: [b[0], b[1], 0.0],
@@ -171,12 +205,16 @@ impl DwgProvider for Synthetic {
                 detail: "not a synthetic drawing".into(),
             });
         };
+        let heavy = number() == Some(1);
+        let scale = number().unwrap_or(1);
         Ok(Self {
             sheets,
             model,
             view_h: f64::from(view_h),
             only: only == 1,
             extra,
+            heavy,
+            scale: f64::from(scale),
         })
     }
     fn name(&self) -> &'static str {
@@ -256,7 +294,9 @@ impl DwgProvider for Synthetic {
             EntityScope::Layout(LayoutId(0)) => Ok(Box::new(Model {
                 next: 0,
                 end: self.model,
-                only: self.only.then(|| self.window()),
+                only: self.only.then(|| self.padded()),
+                scale: self.scale,
+                heavy: self.heavy,
             })),
             EntityScope::Layout(LayoutId(n)) if *n <= self.sheets => {
                 let vps: Vec<RawEntity> = (0..=self.per_sheet(*n))
@@ -266,6 +306,7 @@ impl DwgProvider for Synthetic {
                             0x10_0000_0000 + u64::from(*n) * 64 + u64::from(k),
                             "VIEWPORT",
                             "VP",
+                            25,
                             RawGeometry::Unmapped {
                                 reason: "a viewport is not geometry".into(),
                             },

@@ -113,7 +113,10 @@ impl<'a> PdfPlot<'a> {
     }
 
     /// The plot style table: stroke colour (screening included) and width per AutoCAD colour
-    /// index, as a PVec conversion applies it (#1630). An STB is reported in the notes as
+    /// index, as a PVec conversion applies it (#1630). Without one the plot is monochrome: every
+    /// stroke, text and solid fill is black and every stroke is 0.25 mm wide, a true colour object
+    /// included, and the notes say `plot-style-default-monochrome`. [`PlotStyleTable::identity`]
+    /// is the way back to the objects' own colours and widths. An STB is reported in the notes as
     /// `plot-style-stb-unsupported` and applies nothing. Dash patterns are not drawn yet.
     #[must_use]
     pub fn plot_style_table(mut self, table: PlotStyleTable) -> Self {
@@ -361,6 +364,7 @@ impl<'a> PdfPlot<'a> {
             if let Some(table) = &self.table {
                 conversion = conversion.plot_style_table(table.clone());
             }
+            let mono = self.table.is_none();
             let page = conversion.run(&provider, unit).and_then(|done| {
                 let sheet = done.report.sheet;
                 let rotation = sheet
@@ -392,7 +396,8 @@ impl<'a> PdfPlot<'a> {
                     };
                     budget.check(
                         "artifact read",
-                        done.written.saturating_mul(ARTIFACT_ENTITY_BYTES),
+                        // The curve, its lookups and its style: about 256 bytes an entity while the page is read.
+                        done.written.saturating_mul(256),
                     )?;
                     read_page(
                         &budget,
@@ -402,12 +407,16 @@ impl<'a> PdfPlot<'a> {
                         &done.hatch_patterns,
                         self.hairline_below_mm,
                         &cancel,
+                        mono,
                         &mut out,
                     )?
                 };
                 kids.push(out.page(&page).map_err(io)?);
                 let mut sheet_notes = sheet.map(|s| s.notes).unwrap_or_default();
                 sheet_notes.extend(page.notes);
+                if mono {
+                    sheet_notes.push("plot-style-default-monochrome".into());
+                }
                 for note in sheet_notes {
                     if !notes.contains(&note) {
                         notes.push(note);
@@ -492,10 +501,6 @@ struct Budget<'a> {
     layout: &'a str,
 }
 
-/// What the page's artifact is estimated to hold per entity while it is read: the curve, its
-/// lookups and its style.
-const ARTIFACT_ENTITY_BYTES: u64 = 256;
-
 impl Budget<'_> {
     fn check(&self, stage: &'static str, bytes: u64) -> Result<(), PvecConvertError> {
         let observed = self.carried.saturating_add(bytes);
@@ -574,6 +579,7 @@ fn read_page(
     patterns: &BTreeMap<u32, Vec<PlacedPatternLine>>,
     hairline_below_mm: f64,
     cancel: &CancelToken,
+    monochrome: bool,
     pdf: &mut PdfOut,
 ) -> Result<PageRef, PvecConvertError> {
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
@@ -606,6 +612,12 @@ fn read_page(
     let hatches =
         payload(HatchStream::CAPABILITY).and_then(|s| HatchStream::decode(&s.payload).ok());
     let width_pt = |mm: f64| mm / 1000.0 * POINTS_PER_METRE;
+    // A pattern's lines and a solid fill's edge are the thinnest line, or 0.25 mm in a monochrome plot.
+    let edge = if monochrome {
+        format!("{:.4}", width_pt(DEFAULT_WIDTH_MM))
+    } else {
+        "0".to_owned()
+    };
     let rgb = |word: u32| {
         let [r, g, b, _] = word.to_be_bytes();
         format!(
@@ -769,6 +781,7 @@ fn read_page(
             // The hatch's own colour, not its boundary's stroke colour, thinned toward the white paper
             // by its transparency.
             let [r, g, b, a] = rgba.to_be_bytes();
+            let [r, g, b] = if monochrome { [0; 3] } else { [r, g, b] };
             let thin =
                 |c: u8| (255.0 - (255.0 - f64::from(c)) * f64::from(a) / 255.0).round() as u8;
             let word = u32::from_be_bytes([thin(r), thin(g), thin(b), 255]);
@@ -802,7 +815,10 @@ fn read_page(
                     &mut stroke_budget,
                 ) {
                     Ok(strokes) => {
-                        content.push_str(&format!("0 w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
+                        content.push_str(&format!(
+                            "{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n",
+                            rgb(word)
+                        ));
                         for s in strokes {
                             content.push_str(&format!(
                                 "{:.4} {:.4} m\n{:.4} {:.4} l\nS\n",
@@ -825,7 +841,7 @@ fn read_page(
                 content.push_str("f*\n");
                 // A solid fill is filled and stroked: its edge, in its own colour, at the thinnest line.
                 if solid_fill {
-                    content.push_str(&format!("0 w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
+                    content.push_str(&format!("{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
                     push_path(&mut content, &runs, true);
                     content.push_str("S\n");
                 }
@@ -852,6 +868,7 @@ fn read_page(
             }
             // Stroke widths are in millimetres, as a lineweight is.
             let mm = match def.and_then(|d| d.width) {
+                _ if monochrome => DEFAULT_WIDTH_MM,
                 Some(StrokeWidth::Width(w)) => w,
                 Some(StrokeWidth::Thinnest) => 0.0,
                 None => DEFAULT_WIDTH_MM,
@@ -861,6 +878,7 @@ fn read_page(
             let word = paint
                 .as_ref()
                 .and_then(|p| p.colour_of(*id))
+                .filter(|_| !monochrome)
                 .unwrap_or(0x0000_00ff);
             content.push_str(&format!(
                 "{:.4} w\n{} RG\n1 J 1 j\n",
@@ -889,6 +907,7 @@ fn read_page(
             let word = paint
                 .as_ref()
                 .and_then(|p| p.colour_of(t.entity))
+                .filter(|_| !monochrome)
                 .unwrap_or(0x0000_00ff);
             let (x, y) = to_pt(t.x, t.y);
             let (s, c) = t.rotation.sin_cos();
@@ -1155,25 +1174,6 @@ fn spans_line(ends: [Option<(f64, f64)>; 2]) -> Runs {
     }
 }
 
-/// A subset of Liberation Sans Regular (SIL OFL 1.1, renamed, see `fonts/LIBERATION-OFL.txt`):
-/// Latin glyphs, with Arial's advance widths.
-const FACE: &[u8] = include_bytes!("../../fonts/LibviprsLatin-Regular.ttf");
-/// The face's advance widths in 1/1000 em for the WinAnsi codes 32 to 255 (0 where it has no glyph).
-const WIDTHS: [i64; 224] = [
-    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556, 556,
-    556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722, 722, 667,
-    611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667,
-    667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222, 500,
-    222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500, 500, 334, 260, 334, 584,
-    0, 556, 0, 0, 0, 0, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 222, 222, 333, 333, 350, 556, 1000,
-    0, 1000, 0, 0, 0, 0, 0, 0, 278, 333, 556, 556, 556, 556, 260, 556, 333, 737, 370, 556, 584,
-    333, 737, 552, 400, 549, 333, 333, 333, 576, 537, 333, 333, 333, 365, 556, 834, 834, 834, 611,
-    667, 667, 667, 667, 667, 667, 1000, 722, 667, 667, 667, 667, 278, 278, 278, 278, 722, 722, 778,
-    778, 778, 778, 778, 584, 778, 722, 722, 722, 722, 667, 667, 611, 556, 556, 556, 556, 556, 556,
-    889, 500, 556, 556, 556, 556, 278, 278, 278, 278, 556, 556, 556, 556, 556, 556, 556, 549, 611,
-    556, 556, 556, 556, 500, 556, 500,
-];
-
 /// A PDF written as it is made: objects go to the file the moment they are complete, their offsets
 /// are kept (eight bytes each), and the page tree, catalog and cross reference table come last. The
 /// output is a function of what was written and in what order: object numbers follow the order of
@@ -1192,6 +1192,25 @@ const PAGES: u32 = 1;
 impl PdfOut {
     /// Creates `path` and writes the header and the font.
     fn new(path: &Path, embedded: bool) -> io::Result<Self> {
+        /// A subset of Liberation Sans Regular (SIL OFL 1.1, renamed, see `fonts/LIBERATION-OFL.txt`):
+        /// Latin glyphs, with Arial's advance widths.
+        const FACE: &[u8] = include_bytes!("../../fonts/LibviprsLatin-Regular.ttf");
+        /// The face's advance widths in 1/1000 em for the WinAnsi codes 32 to 255 (0 where it has no glyph).
+        const WIDTHS: [i64; 224] = [
+            278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556,
+            556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667,
+            667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722,
+            667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500,
+            556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278,
+            556, 500, 722, 500, 500, 500, 334, 260, 334, 584, 0, 556, 0, 0, 0, 0, 1000, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 222, 222, 333, 333, 350, 556, 1000, 0, 1000, 0, 0, 0, 0, 0, 0,
+            278, 333, 556, 556, 556, 556, 260, 556, 333, 737, 370, 556, 584, 333, 737, 552, 400,
+            549, 333, 333, 333, 576, 537, 333, 333, 333, 365, 556, 834, 834, 834, 611, 667, 667,
+            667, 667, 667, 667, 1000, 722, 667, 667, 667, 667, 278, 278, 278, 278, 722, 722, 778,
+            778, 778, 778, 778, 584, 778, 722, 722, 722, 722, 667, 667, 611, 556, 556, 556, 556,
+            556, 556, 889, 500, 556, 556, 556, 556, 278, 278, 278, 278, 556, 556, 556, 556, 556,
+            556, 556, 549, 611, 556, 556, 556, 556, 500, 556, 500,
+        ];
         let mut out = Self {
             file: io::BufWriter::new(fs::File::create(path)?),
             pos: 0,
@@ -1331,7 +1350,7 @@ impl PdfOut {
         let size = self.offsets.len() + 1;
         let mut table = format!("xref\n0 {size}\n0000000000 65535 f \n");
         for at in &self.offsets {
-            table.push_str(&format!("{at:010} 00000 n \n"));
+            table.push_str(&xref_entry(*at)?);
         }
         table.push_str(&format!(
             "trailer\n<< /Size {size} /Root {catalog} 0 R /Info {info} 0 R >>\nstartxref\n{start}\n%%EOF\n"
@@ -1341,6 +1360,18 @@ impl PdfOut {
             .into_inner()
             .map_err(io::IntoInnerError::into_error)
     }
+}
+
+/// One in-use entry of a classic cross reference table: ten digits of offset, so a file whose
+/// objects start at 10 GB or more cannot be addressed and is refused rather than written wrong.
+fn xref_entry(offset: u64) -> io::Result<String> {
+    if offset >= 10_000_000_000 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "an object starts at 10 GB or more, past what a classic xref table can address",
+        ));
+    }
+    Ok(format!("{offset:010} 00000 n \n"))
 }
 
 /// Counts what goes through to the file, so a stream's compressed length is known without holding it.
@@ -1358,5 +1389,18 @@ impl Write for Counted<'_> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.out.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::xref_entry;
+
+    #[test]
+    fn an_xref_entry_is_twenty_bytes_and_refuses_what_ten_digits_cannot_hold() {
+        assert_eq!(xref_entry(9_999_999_999).unwrap().len(), 20);
+        assert_eq!(xref_entry(17).unwrap(), "0000000017 00000 n \n");
+        let e = xref_entry(10_000_000_000).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
     }
 }

@@ -147,6 +147,26 @@ fn inflation_within_bound(bytes: &[u8]) -> Result<(), PlotFileError> {
     Ok(())
 }
 
+/// The built-in monochrome plot style table: all 255 colours plot black at 100 percent screening and
+/// lineweight 9 (0.25 mm), the table a plot with no table of its own is drawn with (issue #1670).
+#[cfg(feature = "dwg-acadrust")]
+#[must_use]
+pub fn default_plot_style() -> PlotStyleTable {
+    let mut table = PlotStyleTable::identity("libviprs-monochrome.ctb");
+    for entry in table.aci_entries.iter_mut().skip(1) {
+        entry.color = Some([0, 0, 0]);
+        entry.lineweight = 9;
+    }
+    table
+}
+
+/// The built-in PDF PC3, the JSON kind: the PDF device, text kept as text, a raster limit of 400 dpi
+/// and a full bleed ISO A3 page, which only fills a layout that has no paper of its own (issue #1670).
+#[must_use]
+pub fn default_pc3() -> Pc3 {
+    Pc3::parse(include_bytes!("default-pdf.pc3")).expect("the built-in PC3 is a JSON PC3")
+}
+
 /// What a PC3 says about the device that plots: the paper, the area of it the device prints, and
 /// two settings of its PDF driver. A conversion takes them as gap-fillers under the layout's own
 /// page setup (issue #1673).

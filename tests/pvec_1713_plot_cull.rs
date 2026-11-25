@@ -8,12 +8,14 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
 use libviprs::CancelToken;
 use libviprs::cad::CadSource;
+use libviprs::observe::{EngineEvent, EngineObserver};
 use libviprs::pvec::{SourceLimits, SourceUnit, ViewProfile};
 use libviprs::pvec_convert::{PdfPlot, PvecLayoutSet};
 
@@ -244,5 +246,71 @@ fn issue_1713_a_layout_set_records_the_refused_sheet_and_goes_on() {
         failed[0].outcome.as_ref().unwrap_err().code(),
         "LIMIT_ALLOCATION_BYTES"
     );
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1713_a_stroke_past_the_window_is_kept_at_any_model_scale() {
+    let _g = measuring();
+    let dir = dir_for("scale");
+    // Every stroke is 2.11 mm wide. The one model is plotted whole, and as only what can touch the
+    // window grown by 30 mm of paper; the pages must be the same at a small and at a large scale.
+    for scale in [1, 100] {
+        let run = |name: &str, only: bool| {
+            let bytes = support::drawing_with(1, 20_000, SMALL * scale, only, 0, true, scale);
+            let dest = dir.join(name);
+            plot(&bytes, &dest, None)
+                .convert_with::<support::Synthetic>()
+                .unwrap();
+            std::fs::read(dest).unwrap()
+        };
+        assert_eq!(
+            run(&format!("whole{scale}.pdf"), false),
+            run(&format!("window{scale}.pdf"), true),
+            "scale {scale}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Raises the cancel when sheet `at` starts.
+struct CancelAt {
+    at: u32,
+    token: CancelToken,
+}
+
+impl EngineObserver for CancelAt {
+    fn on_event(&self, event: EngineEvent) {
+        if let EngineEvent::ConversionSheetStarted { index, .. } = event
+            && index == self.at
+        {
+            self.token.cancel();
+        }
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1713_a_cancel_raised_mid_plot_wins_over_a_refusal() {
+    let _g = measuring();
+    let dir = dir_for("midcancel");
+    let dest = dir.join("plot.pdf");
+    std::fs::write(&dest, b"existing").unwrap();
+    let bytes = support::drawing(SHEETS, MODEL, SMALL, false, 0);
+    // The first run has the room it needs and is cancelled as sheet 2 starts; the second would be
+    // refused at its model pass and is cancelled as sheet 1 starts.
+    for (at, budget) in [(2, 1 << 30), (1, 32 << 20)] {
+        let token = CancelToken::new();
+        let e = plot(&bytes, &dest, Some(limits(budget)))
+            .cancel(token.clone())
+            .observer(Arc::new(CancelAt { at, token }))
+            .convert_with::<support::Synthetic>()
+            .unwrap_err();
+        assert_eq!(e.code(), "CANCELLED", "sheet {at}: {e}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"existing");
+        let left: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
+        assert_eq!(left.len(), 1, "nothing is left behind: {left:?}");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }

@@ -91,7 +91,8 @@ pub enum Pc3File {
     Binary(Pc3Binary),
 }
 
-/// A binary PC3 (`PC3VER1` or `PIAFILEVERSION_1.0`), held verbatim.
+/// A binary PC3 (`PC3VER1`, `PIAFILEVERSION_1.0` or the classic compressed
+/// `PIAFILEVERSION_2.0,PC3VER1`), held verbatim.
 #[derive(Debug, Clone)]
 pub struct Pc3Binary {
     /// The format's name.
@@ -153,7 +154,12 @@ pub struct Pc3Device {
 impl Pc3File {
     /// Read a PC3 of either kind.
     pub fn parse(bytes: &[u8]) -> Result<Self, Pc3Error> {
-        for format in ["PC3VER1", "PIAFILEVERSION_1.0"] {
+        // The classic compressed kind AutoCAD wrote before the JSON one is kept as it is too.
+        for format in [
+            "PC3VER1",
+            "PIAFILEVERSION_1.0",
+            "PIAFILEVERSION_2.0,PC3VER1",
+        ] {
             if bytes.starts_with(format.as_bytes()) {
                 return Ok(Pc3File::Binary(Pc3Binary {
                     format,

@@ -1613,9 +1613,10 @@ impl<'a> PvecConversion<'a> {
             }
             over(
                 "viewport leaves",
-                p.leaves
-                    .saturating_mul(MODEL_LEAF_BYTES)
-                    .saturating_add(count(listed).saturating_mul(VISIBLE_LEAF_BYTES)),
+                p.leaves.saturating_mul(MODEL_LEAF_BYTES).saturating_add(
+                    // A leaf a viewport takes costs about 64 bytes while it is listed and classified.
+                    count(listed).saturating_mul(64),
+                ),
             )?;
             for (n, &k) in drawn.iter().enumerate() {
                 for &i in &chosen[n] {
@@ -4048,8 +4049,6 @@ pub(crate) struct ModelPass {
 /// What the model pass is estimated to hold per leaf, in bytes: the flattened leaf, the layer and
 /// colour maps and its box. Measured at 0.8 to 1 KiB on a large drawing.
 const MODEL_LEAF_BYTES: u64 = 1024;
-/// What a leaf a viewport takes is estimated to cost while it is listed and classified.
-const VISIBLE_LEAF_BYTES: u64 = 64;
 
 impl ModelPass {
     fn build<P: DwgProvider>(
@@ -4217,8 +4216,12 @@ fn leaf_box(f: &FlatEntity) -> Option<[f64; 4]> {
     b.iter().all(|v| v.is_finite()).then_some(b)
 }
 
-/// A viewport's rectangle on the sheet grown by what a stroke can reach past a leaf's box: its
-/// width (up to a few millimetres) and a margin of a twentieth of the window.
+/// A viewport's rectangle on the sheet grown by what a stroke can reach past a leaf's box. Both the
+/// rectangle and the box are on the sheet (the box has been taken through the viewport's map), so
+/// the model's scale is already out of the comparison and the margin is paper units alone: a
+/// twentieth of the window plus 25. A stroke is at most a few millimetres wide and a layout's paper
+/// unit is a millimetre, an inch or a pixel, so 25 of any of them is several times the widest stroke
+/// (`issue_1713_a_stroke_past_the_window_is_kept_at_any_model_scale` plots at two scales).
 fn grown(rect: [f64; 4]) -> [f64; 4] {
     let m = 0.05 * (rect[2] - rect[0]).max(rect[3] - rect[1]) + 25.0;
     [rect[0] - m, rect[1] - m, rect[2] + m, rect[3] + m]

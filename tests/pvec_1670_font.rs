@@ -115,10 +115,7 @@ fn issue_1670_the_advance_widths_are_arials() {
             .map(f64::from)
             .unwrap_or_else(|_| w.as_i64().unwrap() as f64)
     };
-    assert_eq!(
-        [b'P', b'l', b'a', b'n'].map(width),
-        [667.0, 222.0, 556.0, 556.0]
-    );
+    assert_eq!((*b"Plan").map(width), [667.0, 222.0, 556.0, 556.0]);
 }
 
 #[test]
