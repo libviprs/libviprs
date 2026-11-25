@@ -417,9 +417,8 @@ impl<'a> PdfPlot<'a> {
                         rotation,
                         paper_frame(sheet.as_ref(), unit),
                         &done.hatch_patterns,
-                        self.hairline_below_mm,
+                        &self,
                         &cancel,
-                        mono,
                         &mut out,
                     )?
                 };
@@ -589,11 +588,13 @@ fn read_page(
     rotation: i16,
     frame: Option<([f64; 2], [f64; 2])>,
     patterns: &BTreeMap<u32, Vec<PlacedPatternLine>>,
-    hairline_below_mm: f64,
+    plot: &PdfPlot<'_>,
     cancel: &CancelToken,
-    monochrome: bool,
     pdf: &mut PdfOut,
 ) -> Result<PageRef, PvecConvertError> {
+    let hairline_below_mm = plot.hairline_below_mm;
+    // Without a plot style table the plot is monochrome.
+    let monochrome = plot.table.is_none();
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
     const DEFAULT_WIDTH_MM: f64 = 0.25;
     let other = |e: &dyn std::fmt::Display| publish_io(io::Error::other(e.to_string()));
