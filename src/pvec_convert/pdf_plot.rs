@@ -13,13 +13,14 @@ use std::time::{Duration, Instant};
 use super::PlacedPatternLine;
 use super::pdf_hatch;
 use acadrust::plot_style::PlotStyleTable;
-use lopdf::{Dictionary, Document, Object, Stream, dictionary};
+use flate2::{Compression, write::ZlibEncoder};
 use pvec_components::{Band, Fill, HatchStream, TextStream};
 use pvec_facade::Curve;
 use pvec_facade::components::{LineStyleStream, StrokePaintStream, StrokeWidth};
 use pvec_facade::unstable::RasterId;
 use pvec_geometry::{Curve2d, Side};
 use std::collections::BTreeMap;
+use std::io::{self, Write};
 
 use super::{PlotSettings, PvecConversion, PvecConvertError};
 use crate::CancelToken;
@@ -27,7 +28,7 @@ use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
 use crate::pvec::SourceLimits;
 use crate::pvec::components::StreamSelection;
-use crate::pvec::publish::open_published;
+use crate::pvec::publish::{open_published, report_path};
 use crate::pvec::report::SheetSummary;
 use crate::pvec::view_profile::{SpaceSelection, ViewProfileError};
 use crate::pvec::writer::metres_per_unit;
@@ -308,113 +309,129 @@ impl<'a> PdfPlot<'a> {
                 }
             }
         };
+        // The file is made now and written as each sheet finishes. It goes away on every way out but
+        // the rename, and so does the scratch directory.
+        let temp = Temp::new(work, tmp);
         let total = wanted.len() as u32;
         let tell = |event: EngineEvent| {
             if let Some(o) = &self.observer {
                 o.on_event(event);
             }
         };
-        let pages = wanted
-            .iter()
-            .enumerate()
-            .map(|(n, name)| {
-                if cancel.is_cancelled() {
-                    return Err(stopped());
-                }
-                let index = n as u32 + 1;
-                tell(EngineEvent::ConversionSheetStarted {
-                    index,
-                    total,
-                    layout: (*name).clone(),
-                });
-                let mut profile = self.profile.clone();
-                profile.space = SpaceSelection::PaperLayout((*name).clone());
-                let file = work.join(format!("{n}.pvec"));
-                let mut conversion = PvecConversion::new(self.source, &file)
-                    .view_profile(profile)
-                    .plot_settings(self.settings.clone())
-                    .project_plan(true)
-                    .texts(self.texts)
-                    .fills(self.fills)
-                    .components(StreamSelection::ALL)
-                    .cancel(cancel.clone());
-                if let Some(o) = &self.observer {
-                    conversion = conversion.observer(o.clone());
-                }
-                conversion.empty_sheet_ok = true;
-                if let Some(dir) = &self.images {
-                    conversion = conversion.images(dir.clone());
-                }
-                if let Some(limits) = self.limits {
-                    conversion = conversion.limits(limits);
-                }
-                if let Some(table) = &self.table {
-                    conversion = conversion.plot_style_table(table.clone());
-                }
-                let mono = self.table.is_none();
-                let page = conversion.run(&provider, unit).and_then(|out| {
-                    let sheet = out.report.sheet;
-                    let rotation = sheet
-                        .as_ref()
-                        .filter(|s| s.frame == "paper")
-                        .and_then(|s| s.plot.as_ref())
-                        .map_or(0, |p| p.rotation);
-                    let page = if out.written == 0 {
-                        blank_page(sheet.as_ref(), unit)
-                    } else {
-                        read_page(
-                            &file,
-                            rotation,
-                            paper_frame(sheet.as_ref(), unit),
-                            &out.hatch_patterns,
-                            self.hairline_below_mm,
-                            &cancel,
-                            mono,
-                        )?
-                    };
-                    check_page(&page)?;
-                    let mut notes = sheet.map(|s| s.notes).unwrap_or_default();
-                    notes.extend(page.notes.iter().cloned());
-                    if mono {
-                        notes.push("plot-style-default-monochrome".into());
-                    }
-                    Ok((page, notes))
-                });
-                let status = match &page {
-                    Ok(_) => ("written", None),
-                    Err(PvecConvertError::Cancelled) => ("cancelled", Some("CANCELLED")),
-                    Err(PvecConvertError::Deadline) => ("deadline", Some("DEADLINE")),
-                    Err(e) => ("failed", Some(e.code())),
-                };
-                tell(EngineEvent::ConversionSheetFinished {
-                    index,
-                    total,
-                    layout: (*name).clone(),
-                    status: status.0.to_owned(),
-                    code: status.1.map(str::to_owned),
-                });
-                page
-            })
-            .collect::<Result<Vec<_>, PvecConvertError>>();
-        // The scratch artifacts are this call's own, so they go whether or not it worked.
-        let _ = fs::remove_dir_all(&work);
-        let pages = pages.map_err(|e| e.settled(&cancel))?;
-
+        let mut out = PdfOut::new(&temp.pdf, self.embedded_font).map_err(io)?;
+        let mut kids: Vec<u32> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
-        for n in pages.iter().flat_map(|(_, notes)| notes) {
-            if !notes.contains(n) {
-                notes.push(n.clone());
+        for (n, name) in wanted.iter().enumerate() {
+            if cancel.is_cancelled() {
+                return Err(stopped());
             }
+            let index = n as u32 + 1;
+            tell(EngineEvent::ConversionSheetStarted {
+                index,
+                total,
+                layout: (*name).clone(),
+            });
+            let mut profile = self.profile.clone();
+            profile.space = SpaceSelection::PaperLayout((*name).clone());
+            let file = temp.work.join(format!("{n}.pvec"));
+            let mut conversion = PvecConversion::new(self.source, &file)
+                .view_profile(profile)
+                .plot_settings(self.settings.clone())
+                .project_plan(true)
+                .texts(self.texts)
+                .fills(self.fills)
+                .components(StreamSelection::ALL)
+                .cancel(cancel.clone());
+            if let Some(o) = &self.observer {
+                conversion = conversion.observer(o.clone());
+            }
+            conversion.empty_sheet_ok = true;
+            // Nothing reads the per entity report of a plot sheet, so none is built or kept.
+            conversion.plot_mode = true;
+            if let Some(dir) = &self.images {
+                conversion = conversion.images(dir.clone());
+            }
+            if let Some(limits) = self.limits {
+                conversion = conversion.limits(limits);
+            }
+            if let Some(table) = &self.table {
+                conversion = conversion.plot_style_table(table.clone());
+            }
+            let mono = self.table.is_none();
+            let page = conversion.run(&provider, unit).and_then(|done| {
+                let sheet = done.report.sheet;
+                let rotation = sheet
+                    .as_ref()
+                    .filter(|s| s.frame == "paper")
+                    .and_then(|s| s.plot.as_ref())
+                    .map_or(0, |p| p.rotation);
+                let page = if done.written == 0 {
+                    let size = blank_size(sheet.as_ref(), unit);
+                    check_size(size)?;
+                    let content = out.stream("", |_| Ok(()))?;
+                    PageRef {
+                        size,
+                        rotate: 0,
+                        content,
+                        text: false,
+                        images: Vec::new(),
+                        notes: Vec::new(),
+                    }
+                } else {
+                    read_page(
+                        &file,
+                        rotation,
+                        paper_frame(sheet.as_ref(), unit),
+                        &done.hatch_patterns,
+                        self.hairline_below_mm,
+                        &cancel,
+                        mono,
+                        &mut out,
+                    )?
+                };
+                kids.push(out.page(&page).map_err(io)?);
+                let mut sheet_notes = sheet.map(|s| s.notes).unwrap_or_default();
+                sheet_notes.extend(page.notes);
+                if mono {
+                    sheet_notes.push("plot-style-default-monochrome".into());
+                }
+                for note in sheet_notes {
+                    if !notes.contains(&note) {
+                        notes.push(note);
+                    }
+                }
+                Ok(())
+            });
+            // The sheet's scratch artifact and report have been read, so they go before the next
+            // sheet starts: the scratch never holds more than one.
+            let _ = fs::remove_file(&file);
+            let _ = fs::remove_file(report_path(&file));
+            let status = match &page {
+                Ok(()) => ("written", None),
+                Err(PvecConvertError::Cancelled) => ("cancelled", Some("CANCELLED")),
+                Err(PvecConvertError::Deadline) => ("deadline", Some("DEADLINE")),
+                Err(e) => ("failed", Some(e.code())),
+            };
+            tell(EngineEvent::ConversionSheetFinished {
+                index,
+                total,
+                layout: (*name).clone(),
+                status: status.0.to_owned(),
+                code: status.1.map(str::to_owned),
+            });
+            page.map_err(|e| e.settled(&cancel))?;
         }
-        let count = pages.len() as u32;
+        if cancel.is_cancelled() {
+            return Err(stopped());
+        }
+        let count = kids.len() as u32;
         // The PDF goes to a name of the plot's own and is renamed over the destination only once it is
-        // whole, so a failed plot leaves what was there alone.
-        if let Err(e) = write_pdf(&tmp, pages.into_iter().map(|(p, _)| p), self.embedded_font)
-            .and_then(|()| fs::rename(&tmp, self.dest))
-        {
-            let _ = fs::remove_file(&tmp);
-            return Err(io(e));
-        }
+        // whole and on disk, so a failed plot leaves what was there alone.
+        out.finish(&kids)
+            .and_then(|file| file.sync_all())
+            .and_then(|()| fs::rename(&temp.pdf, self.dest))
+            .map_err(io)?;
+        temp.disarm();
         Ok(PdfPlotOutput {
             file: self.dest.to_path_buf(),
             pages: count,
@@ -423,26 +440,51 @@ impl<'a> PdfPlot<'a> {
     }
 }
 
-/// One page: its box in points, the content stream that draws it, and the fonts it uses.
-struct Page {
+/// The plot's own scratch names: the directory the sheets are converted in and the file the PDF is
+/// written to. They are removed when this goes, unless the PDF was renamed into place.
+struct Temp {
+    work: PathBuf,
+    pdf: PathBuf,
+    armed: bool,
+}
+
+impl Temp {
+    fn new(work: PathBuf, pdf: PathBuf) -> Self {
+        Self {
+            work,
+            pdf,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for Temp {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.work);
+        if self.armed {
+            let _ = fs::remove_file(&self.pdf);
+        }
+    }
+}
+
+/// One page written to the file: its box in points, the objects it draws with, and what it could
+/// not draw as asked.
+struct PageRef {
     /// The size the page is displayed at, in points: the sheet's frame.
     size: [f64; 2],
     /// `/Rotate`: 0, 90 or 270. A layout rotated a quarter turn is displayed turned.
     rotate: i64,
-    content: String,
+    /// The object number of the content stream.
+    content: u32,
     text: bool,
-    /// The rasters the content draws as `/Im<n>`.
-    images: Vec<PageImage>,
+    /// The object numbers of the rasters the content draws as `/Im<n>`.
+    images: Vec<u32>,
     /// What the page could not draw as asked, in the vocabulary of the sheet report's notes.
     notes: Vec<String>,
-}
-
-/// A raster for the page: RGB bytes, and its alpha when it has any.
-struct PageImage {
-    width: u32,
-    height: u32,
-    rgb: Vec<u8>,
-    alpha: Option<Vec<u8>>,
 }
 
 /// A path segment in page points.
@@ -455,7 +497,34 @@ enum Seg {
 /// A stroke or a fill's outline as segments, each run starting with a [`Seg::Move`].
 type Runs = Vec<Seg>;
 
-/// Reads a scratch artifact into a page: the frame is the paper, the curves are the strokes.
+/// Content operators on their way into a stream. A write that fails is kept and ends the page at
+/// `finish`, so the drawing code reads as it did when it built a string.
+struct Content<'a> {
+    out: &'a mut dyn Write,
+    failed: Option<io::Error>,
+}
+
+impl Content<'_> {
+    fn push_str(&mut self, s: &str) {
+        if self.failed.is_none()
+            && let Err(e) = self.out.write_all(s.as_bytes())
+        {
+            self.failed = Some(e);
+        }
+    }
+
+    fn finish(self) -> Result<(), PvecConvertError> {
+        self.failed.map_or(Ok(()), |e| Err(publish_io(e)))
+    }
+}
+
+fn publish_io(e: io::Error) -> PvecConvertError {
+    PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(e))
+}
+
+/// Reads a scratch artifact into a page written to `pdf`: the frame is the paper, the curves are
+/// the strokes. The content goes through Flate into the file as it is made, and each raster is
+/// written and dropped before the next is decoded, so the page never exists in memory as a whole.
 fn read_page(
     artifact: &Path,
     rotation: i16,
@@ -464,14 +533,11 @@ fn read_page(
     hairline_below_mm: f64,
     cancel: &CancelToken,
     monochrome: bool,
-) -> Result<Page, PvecConvertError> {
+    pdf: &mut PdfOut,
+) -> Result<PageRef, PvecConvertError> {
     // A stroke is 0.25 mm wide, AutoCAD's default plot lineweight.
     const DEFAULT_WIDTH_MM: f64 = 0.25;
-    let other = |e: &dyn std::fmt::Display| {
-        PvecConvertError::Publish(crate::pvec::publish::PublishError::Io(
-            std::io::Error::other(e.to_string()),
-        ))
-    };
+    let other = |e: &dyn std::fmt::Display| publish_io(io::Error::other(e.to_string()));
     // Strokes drawn by every pattern hatch of the page together.
     let mut stroke_budget = pdf_hatch::MAX_PAGE_STROKES;
     let reader = open_published(artifact).map_err(|e| other(&e))?;
@@ -487,6 +553,7 @@ fn read_page(
     };
     let k = manifest.metres_per_unit * POINTS_PER_METRE;
     let size = [(hi[0] - lo[0]) * k, (hi[1] - lo[1]) * k];
+    check_size(size)?;
     let to_pt = |x: f64, y: f64| ((x - lo[0]) * k, (y - lo[1]) * k);
     let (streams, _) = reader.streams().map_err(|e| other(&e))?;
     let payload = |capability| streams.iter().find(|s| s.capability == capability);
@@ -518,10 +585,11 @@ fn read_page(
         .iter()
         .flat_map(|h| h.records.iter().flat_map(|r| r.boundary.iter().copied()))
         .collect();
-    let mut content = String::new();
 
-    // Rasters placed under the vectors, then over them (#1667).
-    let mut images: Vec<PageImage> = Vec::new();
+    // Rasters placed under the vectors, then over them (#1667). Each is written as an object of
+    // its own and only its draw operators stay.
+    let mut images: Vec<u32> = Vec::new();
+    let mut underlay = String::new();
     let mut overlay = String::new();
     for (n, placement) in reader
         .raster_placements()
@@ -549,6 +617,7 @@ fn read_page(
             level_side(placement.height),
         )
         .to_image();
+        drop(decoded);
         let (w, h) = (f64::from(placement.width), f64::from(placement.height));
         let [a, b, c, d, tx, ty] = placement.pixel_to_source;
         let [x0, y0, x1, y1] = placement.visible_box.map(f64::from);
@@ -576,17 +645,27 @@ fn read_page(
         }
         draw.push_str(&format!("/Im{} Do\nQ\n", images.len()));
         let opaque = rgba.pixels().all(|p| p.0[3] == 255);
-        images.push(PageImage {
-            width: rgba.width(),
-            height: rgba.height(),
-            rgb: rgba
-                .pixels()
-                .flat_map(|p| [p.0[0], p.0[1], p.0[2]])
-                .collect(),
-            alpha: (!opaque).then(|| rgba.pixels().map(|p| p.0[3]).collect()),
-        });
+        let dims = format!(
+            "/Type /XObject /Subtype /Image /Width {} /Height {} /BitsPerComponent 8",
+            rgba.width(),
+            rgba.height()
+        );
+        let mask = if opaque {
+            None
+        } else {
+            Some(
+                pdf.stream(&format!("{dims} /ColorSpace /DeviceGray"), |out| {
+                    write_pixels(out, &rgba, |p, v| v.push(p.0[3]))
+                })?,
+            )
+        };
+        let smask = mask.map_or(String::new(), |m| format!(" /SMask {m} 0 R"));
+        let object = pdf.stream(&format!("{dims} /ColorSpace /DeviceRGB{smask}"), |out| {
+            write_pixels(out, &rgba, |p, v| v.extend_from_slice(&p.0[..3]))
+        })?;
+        images.push(object);
         match placement.band {
-            Band::Underlay => content.push_str(&draw),
+            Band::Underlay => underlay.push_str(&draw),
             _ => overlay.push_str(&draw),
         }
     }
@@ -602,160 +681,6 @@ fn read_page(
         .flat_map(|s| s.assignments.iter().map(|(e, n)| (*e, *n)))
         .collect();
 
-    // Fills first, under the strokes.
-    let mut notes: Vec<String> = Vec::new();
-    for record in hatches.iter().flat_map(|h| &h.records) {
-        if cancel.is_cancelled() {
-            return Err(PvecConvertError::Cancelled);
-        }
-        let (rgba, solid_fill) = match &record.fill {
-            Fill::Solid { rgba } => (rgba, true),
-            Fill::Pattern { rgba, .. } => (rgba, false),
-        };
-        let mut runs: Runs = Vec::new();
-        for id in &record.boundary {
-            if let Some(n) = curve_at.get(id) {
-                runs.extend(segments(&entities[*n].1, &to_pt));
-            }
-        }
-        // The hatch's own colour, not its boundary's stroke colour, thinned toward the white paper
-        // by its transparency.
-        let [r, g, b, a] = rgba.to_be_bytes();
-        let [r, g, b] = if monochrome { [0; 3] } else { [r, g, b] };
-        let thin = |c: u8| (255.0 - (255.0 - f64::from(c)) * f64::from(a) / 255.0).round() as u8;
-        let word = u32::from_be_bytes([thin(r), thin(g), thin(b), 255]);
-        let mut solid = solid_fill;
-        if !solid_fill {
-            // A pattern is the lines of its line families, cut to the boundary; a hatch whose
-            // pattern is too fine to space is filled, and the plot says so.
-            let Some(families) = record
-                .boundary
-                .first()
-                .and_then(|id| patterns.get(&id.index()))
-            else {
-                continue;
-            };
-            let placed: Vec<PlacedPatternLine> = families
-                .iter()
-                .map(|f| PlacedPatternLine {
-                    origin: {
-                        let (x, y) = to_pt(f.origin[0], f.origin[1]);
-                        [x, y]
-                    },
-                    direction: f.direction,
-                    step: [f.step[0] * k, f.step[1] * k],
-                    dashes: f.dashes.iter().map(|d| d * k).collect(),
-                })
-                .collect();
-            match pdf_hatch::expand(
-                &rings_of(&runs),
-                &placed,
-                &|| cancel.is_cancelled(),
-                &mut stroke_budget,
-            ) {
-                Ok(strokes) => {
-                    content.push_str(&format!("{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
-                    for s in strokes {
-                        content.push_str(&format!(
-                            "{:.4} {:.4} m\n{:.4} {:.4} l\nS\n",
-                            s[0], s[1], s[2], s[3]
-                        ));
-                    }
-                }
-                Err(pdf_hatch::Refused::Stopped) => return Err(PvecConvertError::Cancelled),
-                Err(pdf_hatch::Refused::TooDense) => {
-                    if !notes.iter().any(|n| n == "hatch-too-dense") {
-                        notes.push("hatch-too-dense".into());
-                    }
-                    solid = true;
-                }
-            }
-        }
-        if solid {
-            content.push_str(&format!("{} rg\n", rgb(word)));
-            push_path(&mut content, &runs, true);
-            content.push_str("f*\n");
-            // A solid fill is filled and stroked: its edge, in its own colour, at the thinnest line.
-            if solid_fill {
-                content.push_str(&format!("{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
-                push_path(&mut content, &runs, true);
-                content.push_str("S\n");
-            }
-        }
-    }
-
-    for (n, (id, curve)) in entities.iter().enumerate() {
-        if n % 4096 == 0 && cancel.is_cancelled() {
-            return Err(PvecConvertError::Cancelled);
-        }
-        if boundary.contains(id) {
-            continue;
-        }
-        let def = style.as_ref().and_then(|s| {
-            let at = *style_at.get(id)?;
-            s.styles.get(at as usize)
-        });
-        // A style that is not visible is a text's or fill's carrier: the record draws, not the curve.
-        if def.is_some_and(|d| !d.visible) {
-            continue;
-        }
-        // Stroke widths are in millimetres, as a lineweight is.
-        let mm = match def.and_then(|d| d.width) {
-            _ if monochrome => DEFAULT_WIDTH_MM,
-            Some(StrokeWidth::Width(w)) => w,
-            Some(StrokeWidth::Thinnest) => 0.0,
-            None => DEFAULT_WIDTH_MM,
-        };
-        // Under the hairline limit a stroke is the thinnest line.
-        let mm = if mm < hairline_below_mm { 0.0 } else { mm };
-        let word = paint
-            .as_ref()
-            .and_then(|p| p.colour_of(*id))
-            .filter(|_| !monochrome)
-            .unwrap_or(0x0000_00ff);
-        content.push_str(&format!(
-            "{:.4} w\n{} RG\n1 J 1 j\n",
-            width_pt(mm),
-            rgb(word)
-        ));
-        // Dashes are in the sheet's unit, as the coordinates are.
-        let dashes = def.map(|d| d.dashes.as_slice()).unwrap_or_default();
-        if dashes.is_empty() {
-            content.push_str("[] 0 d\n");
-        } else {
-            let list: Vec<String> = dashes.iter().map(|d| format!("{:.4}", d * k)).collect();
-            content.push_str(&format!(
-                "[{}] {:.4} d\n",
-                list.join(" "),
-                def.map_or(0.0, |d| d.phase) * k
-            ));
-        }
-        let runs = segments(curve, &to_pt);
-        push_path(&mut content, &runs, false);
-        content.push_str("S\n");
-    }
-
-    content.push_str(&overlay);
-    let mut text = false;
-    for t in texts.iter().flat_map(|t| &t.records) {
-        let word = paint
-            .as_ref()
-            .and_then(|p| p.colour_of(t.entity))
-            .filter(|_| !monochrome)
-            .unwrap_or(0x0000_00ff);
-        let (x, y) = to_pt(t.x, t.y);
-        let (s, c) = t.rotation.sin_cos();
-        content.push_str(&format!(
-            "BT\n/F1 {:.4} Tf\n{} rg\n{c:.6} {s:.6} {:.6} {c:.6} {x:.4} {y:.4} Tm\n({}) Tj\nET\n",
-            // A text's height is the height of a capital, and Helvetica's stand 0.716 em high.
-            t.height * k / 0.716,
-            rgb(word),
-            -s,
-            pdf_string(&t.text)
-        ));
-        text = true;
-    }
-
     // A layout rotated a quarter turn is the paper turned: the box is the paper as it feeds (the
     // frame with its sides swapped) and `/Rotate` shows it the way the layout reads, as a
     // plotter's own PDF does. A portrait Tabloid layout at rotation 1 is a portrait box rotated
@@ -766,16 +691,185 @@ fn read_page(
         3 => 90,
         _ => 0,
     };
-    if rotate != 0 {
-        let (displayed_w, displayed_h) = (size[0], size[1]);
-        let cm = if rotate == 270 {
-            format!("0 -1 1 0 0 {displayed_w:.4} cm\n")
-        } else {
-            format!("0 1 -1 0 {displayed_h:.4} 0 cm\n")
+    let mut notes: Vec<String> = Vec::new();
+    let mut text = false;
+    let content = pdf.stream("", |sink| {
+        let mut content = Content {
+            out: sink,
+            failed: None,
         };
-        content.insert_str(0, &cm);
-    }
-    Ok(Page {
+        if rotate != 0 {
+            let (displayed_w, displayed_h) = (size[0], size[1]);
+            let cm = if rotate == 270 {
+                format!("0 -1 1 0 0 {displayed_w:.4} cm\n")
+            } else {
+                format!("0 1 -1 0 {displayed_h:.4} 0 cm\n")
+            };
+            content.push_str(&cm);
+        }
+        content.push_str(&underlay);
+
+        // Fills first, under the strokes.
+        for record in hatches.iter().flat_map(|h| &h.records) {
+            if cancel.is_cancelled() {
+                return Err(PvecConvertError::Cancelled);
+            }
+            let (rgba, solid_fill) = match &record.fill {
+                Fill::Solid { rgba } => (rgba, true),
+                Fill::Pattern { rgba, .. } => (rgba, false),
+            };
+            let mut runs: Runs = Vec::new();
+            for id in &record.boundary {
+                if let Some(n) = curve_at.get(id) {
+                    runs.extend(segments(&entities[*n].1, &to_pt));
+                }
+            }
+            // The hatch's own colour, not its boundary's stroke colour, thinned toward the white paper
+            // by its transparency.
+            let [r, g, b, a] = rgba.to_be_bytes();
+            let [r, g, b] = if monochrome { [0; 3] } else { [r, g, b] };
+            let thin =
+                |c: u8| (255.0 - (255.0 - f64::from(c)) * f64::from(a) / 255.0).round() as u8;
+            let word = u32::from_be_bytes([thin(r), thin(g), thin(b), 255]);
+            let mut solid = solid_fill;
+            if !solid_fill {
+                // A pattern is the lines of its line families, cut to the boundary; a hatch whose
+                // pattern is too fine to space is filled, and the plot says so.
+                let Some(families) = record
+                    .boundary
+                    .first()
+                    .and_then(|id| patterns.get(&id.index()))
+                else {
+                    continue;
+                };
+                let placed: Vec<PlacedPatternLine> = families
+                    .iter()
+                    .map(|f| PlacedPatternLine {
+                        origin: {
+                            let (x, y) = to_pt(f.origin[0], f.origin[1]);
+                            [x, y]
+                        },
+                        direction: f.direction,
+                        step: [f.step[0] * k, f.step[1] * k],
+                        dashes: f.dashes.iter().map(|d| d * k).collect(),
+                    })
+                    .collect();
+                match pdf_hatch::expand(
+                    &rings_of(&runs),
+                    &placed,
+                    &|| cancel.is_cancelled(),
+                    &mut stroke_budget,
+                ) {
+                    Ok(strokes) => {
+                        content.push_str(&format!(
+                            "{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n",
+                            rgb(word)
+                        ));
+                        for s in strokes {
+                            content.push_str(&format!(
+                                "{:.4} {:.4} m\n{:.4} {:.4} l\nS\n",
+                                s[0], s[1], s[2], s[3]
+                            ));
+                        }
+                    }
+                    Err(pdf_hatch::Refused::Stopped) => return Err(PvecConvertError::Cancelled),
+                    Err(pdf_hatch::Refused::TooDense) => {
+                        if !notes.iter().any(|n| n == "hatch-too-dense") {
+                            notes.push("hatch-too-dense".into());
+                        }
+                        solid = true;
+                    }
+                }
+            }
+            if solid {
+                content.push_str(&format!("{} rg\n", rgb(word)));
+                push_path(&mut content, &runs, true);
+                content.push_str("f*\n");
+                // A solid fill is filled and stroked: its edge, in its own colour, at the thinnest line.
+                if solid_fill {
+                    content.push_str(&format!("{edge} w\n{} RG\n[] 0 d\n1 J 1 j\n", rgb(word)));
+                    push_path(&mut content, &runs, true);
+                    content.push_str("S\n");
+                }
+            }
+        }
+
+        for (n, (id, curve)) in entities.iter().enumerate() {
+            if n % 4096 == 0 && cancel.is_cancelled() {
+                return Err(PvecConvertError::Cancelled);
+            }
+            if content.failed.is_some() {
+                break;
+            }
+            if boundary.contains(id) {
+                continue;
+            }
+            let def = style.as_ref().and_then(|s| {
+                let at = *style_at.get(id)?;
+                s.styles.get(at as usize)
+            });
+            // A style that is not visible is a text's or fill's carrier: the record draws, not the curve.
+            if def.is_some_and(|d| !d.visible) {
+                continue;
+            }
+            // Stroke widths are in millimetres, as a lineweight is.
+            let mm = match def.and_then(|d| d.width) {
+                _ if monochrome => DEFAULT_WIDTH_MM,
+                Some(StrokeWidth::Width(w)) => w,
+                Some(StrokeWidth::Thinnest) => 0.0,
+                None => DEFAULT_WIDTH_MM,
+            };
+            // Under the hairline limit a stroke is the thinnest line.
+            let mm = if mm < hairline_below_mm { 0.0 } else { mm };
+            let word = paint
+                .as_ref()
+                .and_then(|p| p.colour_of(*id))
+                .filter(|_| !monochrome)
+                .unwrap_or(0x0000_00ff);
+            content.push_str(&format!(
+                "{:.4} w\n{} RG\n1 J 1 j\n",
+                width_pt(mm),
+                rgb(word)
+            ));
+            // Dashes are in the sheet's unit, as the coordinates are.
+            let dashes = def.map(|d| d.dashes.as_slice()).unwrap_or_default();
+            if dashes.is_empty() {
+                content.push_str("[] 0 d\n");
+            } else {
+                let list: Vec<String> = dashes.iter().map(|d| format!("{:.4}", d * k)).collect();
+                content.push_str(&format!(
+                    "[{}] {:.4} d\n",
+                    list.join(" "),
+                    def.map_or(0.0, |d| d.phase) * k
+                ));
+            }
+            let runs = segments(curve, &to_pt);
+            push_path(&mut content, &runs, false);
+            content.push_str("S\n");
+        }
+
+        content.push_str(&overlay);
+        for t in texts.iter().flat_map(|t| &t.records) {
+            let word = paint
+                .as_ref()
+                .and_then(|p| p.colour_of(t.entity))
+                .filter(|_| !monochrome)
+                .unwrap_or(0x0000_00ff);
+            let (x, y) = to_pt(t.x, t.y);
+            let (s, c) = t.rotation.sin_cos();
+            content.push_str(&format!(
+                "BT\n/F1 {:.4} Tf\n{} rg\n{c:.6} {s:.6} {:.6} {c:.6} {x:.4} {y:.4} Tm\n({}) Tj\nET\n",
+                // A text's height is the height of a capital, and Helvetica's stand 0.716 em high.
+                t.height * k / 0.716,
+                rgb(word),
+                -s,
+                pdf_string(&t.text)
+            ));
+            text = true;
+        }
+        content.finish()
+    })?;
+    Ok(PageRef {
         size,
         rotate,
         content,
@@ -783,6 +877,23 @@ fn read_page(
         images,
         notes,
     })
+}
+
+/// Writes the pixels of `image` as `bytes` gives them, a few thousand at a time.
+fn write_pixels(
+    out: &mut dyn Write,
+    image: &image::RgbaImage,
+    push: impl Fn(&image::Rgba<u8>, &mut Vec<u8>),
+) -> Result<(), PvecConvertError> {
+    let mut chunk: Vec<u8> = Vec::with_capacity(1 << 16);
+    for p in image.pixels() {
+        push(p, &mut chunk);
+        if chunk.len() >= 1 << 16 {
+            out.write_all(&chunk).map_err(publish_io)?;
+            chunk.clear();
+        }
+    }
+    out.write_all(&chunk).map_err(publish_io)
 }
 
 /// The closed rings of a path's runs, each run one ring, curves sampled.
@@ -846,8 +957,7 @@ const MAX_PAGE_POINTS: f64 = 14_400.0;
 
 /// Refuses a page that is not a PDF page: a side that is not finite, is negative, or is over the
 /// 14400 point limit.
-fn check_page(page: &Page) -> Result<(), PvecConvertError> {
-    let [w, h] = page.size;
+fn check_size([w, h]: [f64; 2]) -> Result<(), PvecConvertError> {
     let bad = |v: f64| !v.is_finite() || !(0.0..=MAX_PAGE_POINTS).contains(&v);
     if bad(w) || bad(h) {
         return Err(PvecConvertError::PageRefused {
@@ -857,7 +967,7 @@ fn check_page(page: &Page) -> Result<(), PvecConvertError> {
     Ok(())
 }
 
-fn push_path(content: &mut String, runs: &Runs, close: bool) {
+fn push_path(content: &mut Content<'_>, runs: &Runs, close: bool) {
     let mut open = false;
     for seg in runs {
         // A coordinate that is not finite is left out, as a number a PDF cannot hold.
@@ -900,10 +1010,10 @@ fn paper_frame(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> Option<([f6
     Some(([v(0)?, v(1)?], [v(2)?, v(3)?]))
 }
 
-/// A paper with nothing on it: the sheet's box in its unit, which is inches, millimetres or the
-/// drawing's own.
-fn blank_page(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> Page {
-    let side = sheet
+/// The size of a paper with nothing on it: the sheet's box in its unit, which is inches,
+/// millimetres or the drawing's own.
+fn blank_size(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> [f64; 2] {
+    sheet
         .and_then(|s| {
             let b = s.sheet_box.as_ref()?;
             let unit = [SourceUnit::Inches, SourceUnit::Millimeters, drawing]
@@ -913,15 +1023,7 @@ fn blank_page(sheet: Option<&SheetSummary>, drawing: SourceUnit) -> Page {
             let v = |i: usize| b[i].parse::<f64>().ok();
             Some([(v(2)? - v(0)?) * k, (v(3)? - v(1)?) * k])
         })
-        .unwrap_or([0.0; 2]);
-    Page {
-        size: side,
-        rotate: 0,
-        content: String::new(),
-        text: false,
-        images: Vec::new(),
-        notes: Vec::new(),
-    }
+        .unwrap_or([0.0; 2])
 }
 
 /// A curve as segments in page points. A bare line has no ends (a trimmed one does), so it has
@@ -1018,136 +1120,233 @@ fn spans_line(ends: [Option<(f64, f64)>; 2]) -> Runs {
     }
 }
 
-/// Writes the pages as one PDF. The Producer names libviprs.
-fn write_pdf(
-    dest: &Path,
-    pages: impl Iterator<Item = Page>,
-    embedded: bool,
-) -> std::io::Result<()> {
-    /// A subset of Liberation Sans Regular (SIL OFL 1.1, renamed, see `fonts/LIBERATION-OFL.txt`):
-    /// Latin glyphs, with Arial's advance widths.
-    const FACE: &[u8] = include_bytes!("../../fonts/LibviprsLatin-Regular.ttf");
-    /// The face's advance widths in 1/1000 em for the WinAnsi codes 32 to 255 (0 where it has no glyph).
-    const WIDTHS: [i64; 224] = [
-        278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556, 556,
-        556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667, 667, 722,
-        722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722, 667, 611, 722,
-        667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556,
-        556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
-        500, 334, 260, 334, 584, 0, 556, 0, 0, 0, 0, 1000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 222,
-        222, 333, 333, 350, 556, 1000, 0, 1000, 0, 0, 0, 0, 0, 0, 278, 333, 556, 556, 556, 556,
-        260, 556, 333, 737, 370, 556, 584, 333, 737, 552, 400, 549, 333, 333, 333, 576, 537, 333,
-        333, 333, 365, 556, 834, 834, 834, 611, 667, 667, 667, 667, 667, 667, 1000, 722, 667, 667,
-        667, 667, 278, 278, 278, 278, 722, 722, 778, 778, 778, 778, 778, 584, 778, 722, 722, 722,
-        722, 667, 667, 611, 556, 556, 556, 556, 556, 556, 889, 500, 556, 556, 556, 556, 278, 278,
-        278, 278, 556, 556, 556, 556, 556, 556, 556, 549, 611, 556, 556, 556, 556, 500, 556, 500,
-    ];
-    let mut doc = Document::with_version("1.7");
-    let pages_id = doc.new_object_id();
-    let font = if embedded {
-        let program = doc.add_object(Stream::new(
-            dictionary! { "Length1" => FACE.len() as i64 },
-            FACE.to_vec(),
-        ));
-        let descriptor = doc.add_object(dictionary! {
-            "Type" => "FontDescriptor",
-            "FontName" => "AAAAAA+LibviprsLatin-Regular",
-            "Flags" => 32,
-            "FontBBox" => vec![(-544).into(), (-303).into(), 1302.into(), 980.into()],
-            "ItalicAngle" => 0,
-            "Ascent" => 905,
-            "Descent" => -212,
-            "CapHeight" => 688,
-            "StemV" => 80,
-            "FontFile2" => program,
-        });
-        doc.add_object(dictionary! {
-            "Type" => "Font",
-            "Subtype" => "TrueType",
-            "BaseFont" => "AAAAAA+LibviprsLatin-Regular",
-            "FirstChar" => 32,
-            "LastChar" => 255,
-            "Widths" => WIDTHS.iter().map(|w| Object::Integer(*w)).collect::<Vec<_>>(),
-            "FontDescriptor" => descriptor,
-            "Encoding" => "WinAnsiEncoding",
-        })
-    } else {
-        doc.add_object(dictionary! {
-            "Type" => "Font",
-            "Subtype" => "Type1",
-            "BaseFont" => "Helvetica",
-            "Encoding" => "WinAnsiEncoding",
-        })
-    };
-    let mut kids = Vec::new();
-    for page in pages {
-        let content = doc.add_object(Stream::new(Dictionary::new(), page.content.into_bytes()));
+/// A PDF written as it is made: objects go to the file the moment they are complete, their offsets
+/// are kept (eight bytes each), and the page tree, catalog and cross reference table come last. The
+/// output is a function of what was written and in what order: object numbers follow the order of
+/// writing, and there is no date and no document id.
+struct PdfOut {
+    file: io::BufWriter<fs::File>,
+    pos: u64,
+    /// Where object `n + 1` starts.
+    offsets: Vec<u64>,
+    font: u32,
+}
+
+/// The object number of the page tree, reserved first so every page can name its parent.
+const PAGES: u32 = 1;
+
+impl PdfOut {
+    /// Creates `path` and writes the header and the font.
+    fn new(path: &Path, embedded: bool) -> io::Result<Self> {
+        /// A subset of Liberation Sans Regular (SIL OFL 1.1, renamed, see `fonts/LIBERATION-OFL.txt`):
+        /// Latin glyphs, with Arial's advance widths.
+        const FACE: &[u8] = include_bytes!("../../fonts/LibviprsLatin-Regular.ttf");
+        /// The face's advance widths in 1/1000 em for the WinAnsi codes 32 to 255 (0 where it has no glyph).
+        const WIDTHS: [i64; 224] = [
+            278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278, 278, 556,
+            556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584, 584, 556, 1015, 667,
+            667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556, 833, 722, 778, 667, 778, 722,
+            667, 611, 722, 667, 944, 667, 667, 611, 278, 278, 278, 469, 556, 333, 556, 556, 500,
+            556, 556, 278, 556, 556, 222, 222, 500, 222, 833, 556, 556, 556, 556, 333, 500, 278,
+            556, 500, 722, 500, 500, 500, 334, 260, 334, 584, 0, 556, 0, 0, 0, 0, 1000, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 222, 222, 333, 333, 350, 556, 1000, 0, 1000, 0, 0, 0, 0, 0, 0,
+            278, 333, 556, 556, 556, 556, 260, 556, 333, 737, 370, 556, 584, 333, 737, 552, 400,
+            549, 333, 333, 333, 576, 537, 333, 333, 333, 365, 556, 834, 834, 834, 611, 667, 667,
+            667, 667, 667, 667, 1000, 722, 667, 667, 667, 667, 278, 278, 278, 278, 722, 722, 778,
+            778, 778, 778, 778, 584, 778, 722, 722, 722, 722, 667, 667, 611, 556, 556, 556, 556,
+            556, 556, 889, 500, 556, 556, 556, 556, 278, 278, 278, 278, 556, 556, 556, 556, 556,
+            556, 556, 549, 611, 556, 556, 556, 556, 500, 556, 500,
+        ];
+        let mut out = Self {
+            file: io::BufWriter::new(fs::File::create(path)?),
+            pos: 0,
+            offsets: vec![0],
+            font: 0,
+        };
+        out.put(b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n")?;
+        out.font = if embedded {
+            let program = out
+                .stream(&format!("/Length1 {}", FACE.len()), |w| {
+                    w.write_all(FACE).map_err(publish_io)
+                })
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let descriptor = out.object(&format!(
+                "<< /Type /FontDescriptor /FontName /AAAAAA+LibviprsLatin-Regular /Flags 32 \
+                 /FontBBox [-544 -303 1302 980] /ItalicAngle 0 /Ascent 905 /Descent -212 \
+                 /CapHeight 688 /StemV 80 /FontFile2 {program} 0 R >>"
+            ))?;
+            let widths: Vec<String> = WIDTHS.iter().map(i64::to_string).collect();
+            out.object(&format!(
+                "<< /Type /Font /Subtype /TrueType /BaseFont /AAAAAA+LibviprsLatin-Regular \
+                 /FirstChar 32 /LastChar 255 /Widths [{}] /FontDescriptor {descriptor} 0 R \
+                 /Encoding /WinAnsiEncoding >>",
+                widths.join(" ")
+            ))?
+        } else {
+            out.object(
+                "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+            )?
+        };
+        Ok(out)
+    }
+
+    fn put(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.file.write_all(bytes)?;
+        self.pos += bytes.len() as u64;
+        Ok(())
+    }
+
+    /// The next object number, with its start recorded as the current position.
+    fn begin(&mut self) -> io::Result<u32> {
+        self.offsets.push(self.pos);
+        let id = self.offsets.len() as u32;
+        self.put(format!("{id} 0 obj\n").as_bytes())?;
+        Ok(id)
+    }
+
+    /// A whole object whose body is `body`.
+    fn object(&mut self, body: &str) -> io::Result<u32> {
+        let id = self.begin()?;
+        self.put(format!("{body}\nendobj\n").as_bytes())?;
+        Ok(id)
+    }
+
+    /// A Flate stream whose bytes `fill` writes straight into the file. Its length is the
+    /// indirect object written right after it, which is how the stream is not held to be counted.
+    fn stream(
+        &mut self,
+        entries: &str,
+        fill: impl FnOnce(&mut dyn Write) -> Result<(), PvecConvertError>,
+    ) -> Result<u32, PvecConvertError> {
+        let id = self.begin().map_err(publish_io)?;
+        // The length object is the next number, and is written once the stream is.
+        let length = id + 1;
+        self.put(
+            format!("<< {entries} /Filter /FlateDecode /Length {length} 0 R >>\nstream\n")
+                .as_bytes(),
+        )
+        .map_err(publish_io)?;
+        let start = self.pos;
+        let mut counted = Counted {
+            out: &mut self.file,
+            written: 0,
+        };
+        let mut z = ZlibEncoder::new(&mut counted, Compression::best());
+        fill(&mut z)?;
+        z.finish().map_err(publish_io)?;
+        let len = counted.written;
+        self.pos = start + len;
+        self.put(b"\nendstream\nendobj\n").map_err(publish_io)?;
+        let made = self.object(&len.to_string()).map_err(publish_io)?;
+        debug_assert_eq!(made, length);
+        Ok(id)
+    }
+
+    /// The page object of `page`, which names objects already written.
+    fn page(&mut self, page: &PageRef) -> io::Result<u32> {
         // The box is the paper as it feeds: the displayed frame, turned back when the page rotates.
         let [w, h] = if page.rotate == 0 {
             page.size
         } else {
             [page.size[1], page.size[0]]
         };
-        let mut resources = Dictionary::new();
-        if page.text {
-            resources.set("Font", dictionary! { "F1" => font });
-        }
-        if !page.images.is_empty() {
-            let mut xobjects = Dictionary::new();
-            for (n, image) in page.images.iter().enumerate() {
-                let mut dict = dictionary! {
-                    "Type" => "XObject",
-                    "Subtype" => "Image",
-                    "Width" => i64::from(image.width),
-                    "Height" => i64::from(image.height),
-                    "ColorSpace" => "DeviceRGB",
-                    "BitsPerComponent" => 8,
-                };
-                if let Some(alpha) = &image.alpha {
-                    let mask = doc.add_object(Stream::new(
-                        dictionary! {
-                            "Type" => "XObject",
-                            "Subtype" => "Image",
-                            "Width" => i64::from(image.width),
-                            "Height" => i64::from(image.height),
-                            "ColorSpace" => "DeviceGray",
-                            "BitsPerComponent" => 8,
-                        },
-                        alpha.clone(),
-                    ));
-                    dict.set("SMask", mask);
-                }
-                let id = doc.add_object(Stream::new(dict, image.rgb.clone()));
-                xobjects.set(format!("Im{n}"), id);
-            }
-            resources.set("XObject", xobjects);
-        }
-        let id = doc.add_object(dictionary! {
-            "Type" => "Page",
-            "Parent" => pages_id,
-            "MediaBox" => vec![0.into(), 0.into(), Object::Real(w as f32), Object::Real(h as f32)],
-            "Rotate" => page.rotate,
-            "Resources" => resources,
-            "Contents" => content,
-        });
-        kids.push(Object::Reference(id));
+        let font = if page.text {
+            format!("/Font << /F1 {} 0 R >> ", self.font)
+        } else {
+            String::new()
+        };
+        let xobjects = if page.images.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = page
+                .images
+                .iter()
+                .enumerate()
+                .map(|(n, id)| format!("/Im{n} {id} 0 R"))
+                .collect();
+            format!("/XObject << {} >> ", list.join(" "))
+        };
+        self.object(&format!(
+            "<< /Type /Page /Parent {PAGES} 0 R /MediaBox [0 0 {} {}] /Rotate {} \
+             /Resources << {font}{xobjects}>> /Contents {} 0 R >>",
+            w as f32, h as f32, page.rotate, page.content
+        ))
     }
-    let count = kids.len() as i64;
-    doc.objects.insert(
-        pages_id,
-        Object::Dictionary(dictionary! {
-            "Type" => "Pages",
-            "Kids" => kids,
-            "Count" => count,
-        }),
-    );
-    let catalog = doc.add_object(dictionary! { "Type" => "Catalog", "Pages" => pages_id });
-    doc.trailer.set("Root", catalog);
-    let info = doc.add_object(dictionary! {
-        "Producer" => Object::string_literal(concat!("libviprs ", env!("CARGO_PKG_VERSION"))),
-    });
-    doc.trailer.set("Info", info);
-    // Flate on every stream, as a plotter's PDF has it.
-    doc.compress();
-    doc.save(dest).map(|_| ())
+
+    /// Writes the page tree, the catalog, the information dictionary, the cross reference table and
+    /// the trailer, and hands the file back to be synced.
+    fn finish(mut self, kids: &[u32]) -> io::Result<fs::File> {
+        let list: Vec<String> = kids.iter().map(|k| format!("{k} 0 R")).collect();
+        // The page tree is object 1: its slot was kept for it, and it is written last.
+        self.offsets[0] = self.pos;
+        self.put(
+            format!(
+                "{PAGES} 0 obj\n<< /Type /Pages /Kids [{}] /Count {} >>\nendobj\n",
+                list.join(" "),
+                kids.len()
+            )
+            .as_bytes(),
+        )?;
+        let catalog = self.object(&format!("<< /Type /Catalog /Pages {PAGES} 0 R >>"))?;
+        let info = self.object(&format!(
+            "<< /Producer (libviprs {}) >>",
+            env!("CARGO_PKG_VERSION")
+        ))?;
+        let start = self.pos;
+        let size = self.offsets.len() + 1;
+        let mut table = format!("xref\n0 {size}\n0000000000 65535 f \n");
+        for at in &self.offsets {
+            table.push_str(&xref_entry(*at)?);
+        }
+        table.push_str(&format!(
+            "trailer\n<< /Size {size} /Root {catalog} 0 R /Info {info} 0 R >>\nstartxref\n{start}\n%%EOF\n"
+        ));
+        self.put(table.as_bytes())?;
+        self.file
+            .into_inner()
+            .map_err(io::IntoInnerError::into_error)
+    }
+}
+
+/// One in-use entry of a classic cross reference table: ten digits of offset, so a file whose
+/// objects start at 10 GB or more cannot be addressed and is refused rather than written wrong.
+fn xref_entry(offset: u64) -> io::Result<String> {
+    if offset >= 10_000_000_000 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "an object starts at 10 GB or more, past what a classic xref table can address",
+        ));
+    }
+    Ok(format!("{offset:010} 00000 n \n"))
+}
+
+/// Counts what goes through to the file, so a stream's compressed length is known without holding it.
+struct Counted<'a> {
+    out: &'a mut io::BufWriter<fs::File>,
+    written: u64,
+}
+
+impl Write for Counted<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.out.write(buf)?;
+        self.written += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.out.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::xref_entry;
+
+    #[test]
+    fn an_xref_entry_is_twenty_bytes_and_refuses_what_ten_digits_cannot_hold() {
+        assert_eq!(xref_entry(9_999_999_999).unwrap().len(), 20);
+        assert_eq!(xref_entry(17).unwrap(), "0000000017 00000 n \n");
+        let e = xref_entry(10_000_000_000).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::InvalidData);
+    }
 }
