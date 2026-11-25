@@ -1782,3 +1782,11 @@ annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_an_open_polyli
 annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_bulged_side_cut_by_the_sheet_edge_keeps_the_straight_side
 annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_patterned_polyline_with_arcs_is_plotted_with_plinegen_on_too
 annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_sheet_with_a_line_and_a_polyline_with_arcs_draws_both
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_clean_check_is_reported_as_checked
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_failed_check_carries_qpdfs_own_words
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_missing_qpdf_skips_instead_of_failing
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_streamed_plot_passes_qpdf_check
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_streamed_plot_with_its_tail_cut_off_fails_qpdf_check
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_nothing_is_found_when_neither_names_a_qpdf
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_path_is_searched_in_order_when_the_variable_is_unset
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_the_environment_variable_wins_over_path
