@@ -288,19 +288,52 @@ fn issue_1718_the_width_prints_when_the_layout_does_not_print_lineweights() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-#[ignore = "this reads the artifact of a plain PvecConversion, which still refuses a polyline with arc sides (WRT-08); #1719 writes one record per side only for the PDF plot (PdfPlot), so measure it through a plot or wait for PVec to take composite curves"]
 fn issue_1718_a_constant_width_on_a_bulged_side_keeps_the_arc_and_the_width() {
-    let r = plot(
-        "bulged-constant",
-        lw(&[[0.0, 0.0], [10.0, 0.0]], &[1.0, 0.0], &[], 0.4, false),
+    // A plain PvecConversion keeps a polyline with arc sides whole and PVec's writer refuses it
+    // (WRT-08), so this is measured through a plot, which writes one record per side (#1717,
+    // #1719): the page holds a half circle of radius 5 and a straight side, both stroked 0.4 mm.
+    let dir = scratch("bulged-constant");
+    let bytes = sheet(
+        lw(
+            &[[0.0, 0.0], [10.0, 0.0], [10.0, 10.0]],
+            &[1.0, 0.0, 0.0],
+            &[],
+            0.4,
+            false,
+        ),
         1.0,
         1.0,
         true,
     );
-    let (w, _, height) = only(&r);
-    assert_near(w.expect("a stroke width"), 0.4, 1e-6, "width in mm");
-    // a semicircle of radius 5 reaches 5 mm off its chord
-    assert_near(*height, 5.0, 0.05, "the arc's height");
+    let dest = dir.join("o.pdf");
+    libviprs::pvec_convert::PdfPlot::new(CadSource::Bytes(&bytes), &dest)
+        .plot_style_table(acadrust::plot_style::PlotStyleTable::identity("t"))
+        .unit(SourceUnit::Millimeters)
+        .view_profile(ViewProfile::print_profile("Sheet"))
+        .layouts(["Sheet"])
+        .convert_with::<libviprs::pvec::dwg_acadrust::AcadrustProvider>()
+        .unwrap_or_else(|e| panic!("the plot failed: {e}"));
+    let pdf = lopdf::Document::load(&dest).unwrap();
+    let id = pdf.get_pages()[&1];
+    let ops = pdf.get_and_decode_page_content(id).unwrap().operations;
+    let count = |op: &str| ops.iter().filter(|o| o.operator == op).count();
+    assert_eq!(count("c"), 2, "the half circle is two quarter turns");
+    // the polyline's own sides: one straight, the line beside it is the other `l`
+    assert_eq!(count("l"), 2, "the straight side and the plain line");
+    let widths: Vec<f64> = ops
+        .iter()
+        .filter(|o| o.operator == "w")
+        .map(|o| f64::from(o.operands[0].as_float().unwrap()))
+        .collect();
+    let want = 0.4 * 72.0 / 25.4;
+    // the arc and the straight side, with the identity table so the default monochrome one does
+    // not overrule the polyline's own width
+    let wide = widths.iter().filter(|w| (*w - want).abs() < 1e-3).count();
+    assert_eq!(
+        wide, 2,
+        "two strokes of 0.4 mm ({want} pt) among {widths:?}"
+    );
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
