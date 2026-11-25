@@ -144,7 +144,7 @@ use crate::pvec::writer::{
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
     LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
-    SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile,
+    RawVertex, SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile,
     ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule,
     select_layout,
 };
@@ -4060,7 +4060,7 @@ fn classify_leaf(
 ) -> Result<Done, PvecConvertError> {
     let class = f.entity.provenance.class_name.as_str();
     // A plan shows a sloped line as the segment it covers, when the caller asked for that.
-    let mut flattened = match &f.entity.geometry {
+    let flattened = match &f.entity.geometry {
         RawGeometry::Line { start, end } if gate.project_plan && start[2] != end[2] => {
             Some(RawEntity {
                 geometry: RawGeometry::Line {
@@ -4073,39 +4073,67 @@ fn classify_leaf(
         _ => None,
     };
     // A plotter draws a polyline through its points and skips a side with no length, so for a plot
-    // the vertex that starts such a side goes and the rest is drawn (#1706). The stored geometry
-    // stays strict: only a plan's conversion repairs.
+    // the repeats go in one pass and the rest is drawn (#1706). The stored geometry stays strict:
+    // only a plan's conversion repairs.
+    let subject = flattened.as_ref().unwrap_or(&f.entity);
     let mut skipped = 0usize;
-    let basic = loop {
-        let subject = flattened.as_ref().unwrap_or(&f.entity);
-        match dwg_basic::extract(subject) {
-            Ok(b) => break b,
-            Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate, viewport),
-            Err(BasicError::CoincidentVertices { index }) if gate.project_plan => {
-                let mut next = subject.clone();
-                match &mut next.geometry {
-                    RawGeometry::Polyline { vertices, .. }
-                        if vertices.len() > 2 && index < vertices.len() =>
-                    {
-                        vertices.remove(index);
-                    }
-                    _ => {
-                        let e = BasicError::CoincidentVertices { index };
-                        return Ok(without_geometry(
-                            e.classification(class),
-                            vec![e.warning(class)],
-                        ));
-                    }
-                }
-                skipped += 1;
-                flattened = Some(next);
-            }
-            Err(e) => {
-                return Ok(without_geometry(
+    let basic = match dwg_basic::extract(subject) {
+        Ok(b) => b,
+        Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate, viewport),
+        Err(BasicError::CoincidentVertices { index }) if gate.project_plan => {
+            let refused = |e: BasicError| {
+                Ok(without_geometry(
                     e.classification(class),
                     vec![e.warning(class)],
-                ));
+                ))
+            };
+            let RawGeometry::Polyline {
+                vertices, closed, ..
+            } = &subject.geometry
+            else {
+                return refused(BasicError::CoincidentVertices { index });
+            };
+            // PVec's own rule says which two points are one point. A vertex that repeats the one
+            // before it replaces it, so the side that starts at the survivor keeps its own bulge.
+            let same = |a: &RawVertex, b: &RawVertex| match (
+                Point2::checked(a.x, a.y),
+                Point2::checked(b.x, b.y),
+            ) {
+                (Ok(p), Ok(q)) => Polyline::new(vec![p, q]).is_err(),
+                _ => false,
+            };
+            let mut kept: Vec<RawVertex> = Vec::with_capacity(vertices.len());
+            for v in vertices {
+                match kept.last_mut() {
+                    Some(last) if same(last, v) => {
+                        *last = *v;
+                        skipped += 1;
+                    }
+                    _ => kept.push(*v),
+                }
             }
+            // A closed polyline whose last point is its first has a closing side of no length.
+            if *closed && kept.len() > 2 && same(&kept[kept.len() - 1], &kept[0]) {
+                kept.pop();
+                skipped += 1;
+            }
+            if kept.len() < 2 {
+                return refused(BasicError::CoincidentVertices { index });
+            }
+            let mut next = subject.clone();
+            if let RawGeometry::Polyline { vertices, .. } = &mut next.geometry {
+                *vertices = kept;
+            }
+            match dwg_basic::extract(&next) {
+                Ok(b) => b,
+                Err(e) => return refused(e),
+            }
+        }
+        Err(e) => {
+            return Ok(without_geometry(
+                e.classification(class),
+                vec![e.warning(class)],
+            ));
         }
     };
     // A curve seen edge on is drawn as the segment it projects to: what a plan shows, and not the

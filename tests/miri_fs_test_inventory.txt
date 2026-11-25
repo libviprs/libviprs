@@ -1770,3 +1770,5 @@ annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stored_file_o
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_the_directory_is_private_and_so_are_the_files
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stale_scratch_file_does_not_stop_a_store_and_is_left_alone
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_threads_storing_the_same_default_all_succeed_and_leave_no_scratch
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_two_hundred_thousand_repeats_are_skipped_in_one_pass
+annotated   fs-detected  tests/pvec_1706_repeated_vertex.rs::issue_1706_a_polyline_of_identical_points_is_refused_without_a_panic_or_a_wait
