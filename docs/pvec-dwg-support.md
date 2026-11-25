@@ -74,7 +74,7 @@ KB and a few hundred records, using 22 record types: lines, filled cells and tex
   rasterised, no dependency comes in, and a metafile that is the same table at any scale stays sharp.
 - **O-3 Placement.** The metafile's bounds, which are inclusive on both edges, are mapped onto the
   frame's two corners, so a table's outer lines land on them. The frame's own plane and any viewport
-  or block it is seen through apply as for any entity.
+  or block it is seen through apply as for any entity. The map mode, window and viewport origins and extents, and the world transform (set or modified) are applied to every point, so a picture with a window origin or a non-1:1 ratio lands where it says.
 - **O-4 A raster or DIB is placed like an IMAGE (#1667).** A frame is made from the corners and the
   picture goes through the same placement, with the same limits: 64 Mpixel an image, 256 images and 256
   Mpixel in all, the declared size read from the header and refused before a pixel is allocated. A DIB
@@ -82,9 +82,11 @@ KB and a few hundred records, using 22 record types: lines, filled cells and tex
   features the crate builds with have no BMP codec.
 - **O-5 Limits.** A preview over 8 MiB (an EMF) or 32 MiB (a raster) is refused. An EMF is refused for
   more than 200000 records, more than 4096 shapes, a handle past 4096, more than 64 saved device
-  contexts, a record that is shorter than its header, not a whole number of words or runs past the
+  contexts, more than 131072 characters of text, a record that is shorter than its header, not a whole number of words or runs past the
   end, a first record that is not a header, or a picture with no width or height. Each is a typed
-  `EmfRefusal` and the frame draws nothing. No input panics, and none allocates past these limits.
+  `EmfRefusal` and the frame draws nothing. A raster or DIB preview is charged to `max_allocation_bytes`
+  (its bytes and four bytes a declared pixel) before it is decoded, and a conversion over the budget is
+  refused with `LIMIT_ALLOCATION_BYTES` as for the other stages. No input panics, and none allocates past these limits.
 - **O-6 What the row says.** A frame's row says what became of it: `OLE2FRAME: drawn from its EMF
   preview`, `placed as a raster from its preview`, or `not drawn, <why>` (no preview, a Windows
   metafile, a refusal, a limit). A record type the player does not know is counted in a note, never
@@ -95,6 +97,6 @@ KB and a few hundred records, using 22 record types: lines, filled cells and tex
 #### What is not carried
 
 Pen and text colours and pen widths (a stroke and a text take the entity's own style; a cell keeps its
-brush colour), bitmaps inside an EMF, curves, world transforms, clip regions beyond their bounding box,
+brush colour), bitmaps inside an EMF, curves, clip regions beyond their bounding box,
 and a Windows metafile preview, which is not played. A frame is one row per line it draws, as a
 leader is.

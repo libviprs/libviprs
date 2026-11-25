@@ -391,7 +391,7 @@ fn issue_1705_a_record_the_player_does_not_know_is_counted_in_the_notes() {
         drawing
             .notes
             .iter()
-            .any(|n| n.contains("17") && n.contains('1')),
+            .any(|n| n.contains("58") && n.contains('1')),
         "{:?}",
         drawing.notes
     );
@@ -637,7 +637,7 @@ fn issue_1705_with_previews_on_the_table_is_in_the_artifact() {
         ole_warnings(&out)
     );
     assert!(
-        ole_says(&out, "17"),
+        ole_says(&out, "58"),
         "an unknown record is named: {:?}",
         ole_warnings(&out)
     );

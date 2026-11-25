@@ -15,27 +15,16 @@
 //!
 //! The picture's bounds (device pixels, left and right edge both inside) are mapped onto the
 //! corners, so the table's outer lines land on them. What it does not carry: pen and text colours
-//! and pen widths (a stroke takes the entity's own style), bitmaps, curves, and world transforms.
+//! and pen widths (a stroke takes the entity's own style), bitmaps and curves.
 
 use std::collections::BTreeMap;
 
-/// The most bytes of a preview the player reads.
-const MAX_BYTES: usize = 8 << 20;
-/// The most records it plays.
-const MAX_RECORDS: u32 = 200_000;
 /// The most shapes it carries: a table is a few hundred.
 const MAX_SHAPES: usize = 4096;
 /// The most object handles it keeps.
 const MAX_OBJECTS: usize = 4096;
 /// The most device contexts it keeps saved.
 const MAX_DEPTH: usize = 64;
-/// The most characters of one text run, and of all of them.
-const MAX_RUN_CHARS: usize = 4096;
-const MAX_TEXT_CHARS: usize = 1 << 17;
-/// The most points of one polyline; a longer chain goes on in the next shape.
-const MAX_POINTS: usize = 1024;
-/// The most notes.
-const MAX_NOTES: usize = 64;
 
 /// The em of a face, and where its capitals and baseline sit in it, as for Arial, the face Office sets
 /// a table in.
@@ -169,6 +158,55 @@ struct Dc {
     /// The clip rectangle, `[left, top, right, bottom]` in device units.
     clip: Option<[f64; 4]>,
     at: [i32; 2],
+    /// The world transform, `[m11, m12, m21, m22, dx, dy]`: x' = m11 x + m21 y + dx.
+    world: [f64; 6],
+    /// Window and viewport origins and extents, and whether the map mode scales by their ratio.
+    window: [[f64; 2]; 2],
+    viewport: [[f64; 2]; 2],
+    scaled: bool,
+}
+
+impl Dc {
+    /// A logical point in device units: the world transform, then the window to viewport map.
+    fn dev(&self, p: [f64; 2]) -> [f64; 2] {
+        let w = &self.world;
+        let q = [
+            w[0] * p[0] + w[2] * p[1] + w[4],
+            w[1] * p[0] + w[3] * p[1] + w[5],
+        ];
+        let ratio = |k: usize| {
+            if self.scaled && self.window[1][k] != 0.0 && self.viewport[1][k] != 0.0 {
+                self.viewport[1][k] / self.window[1][k]
+            } else {
+                1.0
+            }
+        };
+        [
+            (q[0] - self.window[0][0]) * ratio(0) + self.viewport[0][0],
+            (q[1] - self.window[0][1]) * ratio(1) + self.viewport[0][1],
+        ]
+    }
+
+    /// The device box of a logical box (a turn of the picture is not followed).
+    fn dev_rect(&self, r: [f64; 4]) -> [f64; 4] {
+        let (a, b) = (self.dev([r[0], r[1]]), self.dev([r[2], r[3]]));
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[0].max(b[0]),
+            a[1].max(b[1]),
+        ]
+    }
+
+    /// How much the picture's y axis is stretched.
+    fn y_scale(&self) -> f64 {
+        let ratio = if self.scaled && self.window[1][1] != 0.0 && self.viewport[1][1] != 0.0 {
+            self.viewport[1][1] / self.window[1][1]
+        } else {
+            1.0
+        };
+        pvec_numeric::detmath::hypot(self.world[1], self.world[3]) * ratio.abs()
+    }
 }
 
 fn word(rec: &[u8], at: usize) -> Option<u32> {
@@ -255,6 +293,15 @@ pub fn play(
     upper_left: [f64; 2],
     lower_right: [f64; 2],
 ) -> Result<EmfDrawing, EmfRefusal> {
+    // The most bytes of a preview the player reads.
+    const MAX_BYTES: usize = 8 << 20;
+    // The most records it plays, characters of one text run and of all of them, points of one
+    // polyline (a longer chain goes on in the next shape) and notes.
+    const MAX_RECORDS: u32 = 200_000;
+    const MAX_RUN_CHARS: usize = 4096;
+    const MAX_TEXT_CHARS: usize = 1 << 17;
+    const MAX_POINTS: usize = 1024;
+    const MAX_NOTES: usize = 64;
     if bytes.len() > MAX_BYTES {
         return Err(EmfRefusal::TooLarge { limit: MAX_BYTES });
     }
@@ -300,6 +347,10 @@ pub fn play(
         align: 0,
         clip: None,
         at: [0, 0],
+        world: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+        window: [[0.0; 2], [1.0; 2]],
+        viewport: [[0.0; 2], [1.0; 2]],
+        scaled: false,
     };
     // The polyline a run of LineTo records is extending, and where it ends in device units.
     let mut open: Option<(usize, [i32; 2])> = None;
@@ -330,6 +381,51 @@ pub fn play(
             // State this player does not need: colours, modes, comments.
             18 | 20 | 24 | 25 | 70 => {}
             22 => dc.align = body(0).ok_or(bad)?,
+            9..=12 => {
+                let v = [
+                    f64::from(ibody(0).ok_or(bad)?),
+                    f64::from(ibody(4).ok_or(bad)?),
+                ];
+                match kind {
+                    9 => dc.window[1] = v,
+                    10 => dc.window[0] = v,
+                    11 => dc.viewport[1] = v,
+                    _ => dc.viewport[0] = v,
+                }
+            }
+            // Only the isotropic and anisotropic modes scale by the extents.
+            17 => dc.scaled = matches!(body(0).ok_or(bad)?, 7 | 8),
+            35 | 36 => {
+                let mut x = [0.0f64; 6];
+                for (k, v) in x.iter_mut().enumerate() {
+                    *v = f64::from(f32::from_bits(body(k * 4).ok_or(bad)?));
+                }
+                if !x.iter().all(|v| v.is_finite() && v.abs() < 1e12) {
+                    return Err(bad);
+                }
+                // Row vectors, so `then(a, b)` is a first and b second.
+                let then = |a: [f64; 6], b: [f64; 6]| {
+                    [
+                        a[0] * b[0] + a[1] * b[2],
+                        a[0] * b[1] + a[1] * b[3],
+                        a[2] * b[0] + a[3] * b[2],
+                        a[2] * b[1] + a[3] * b[3],
+                        a[4] * b[0] + a[5] * b[2] + b[4],
+                        a[4] * b[1] + a[5] * b[3] + b[5],
+                    ]
+                };
+                dc.world = if kind == 35 {
+                    x
+                } else {
+                    match body(24).ok_or(bad)? {
+                        1 => [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+                        2 => then(x, dc.world),
+                        3 => then(dc.world, x),
+                        4 => x,
+                        _ => dc.world,
+                    }
+                };
+            }
             33 => {
                 if saved.len() >= MAX_DEPTH {
                     return Err(EmfRefusal::TooDeep);
@@ -344,7 +440,7 @@ pub fn play(
                     }
                 }
             }
-            30 => dc.clip = Some(intersect(dc.clip, rect(rec, 8).ok_or(bad)?)),
+            30 => dc.clip = Some(intersect(dc.clip, dc.dev_rect(rect(rec, 8).ok_or(bad)?))),
             75 => {
                 let (cb, mode) = (body(0).ok_or(bad)?, body(4).ok_or(bad)?);
                 if cb == 0 {
@@ -353,7 +449,7 @@ pub fn play(
                     }
                 } else {
                     // The region's bounding box stands for it, which only ever clips less.
-                    let r = rect(rec, 8 + 8 + 16).ok_or(bad)?;
+                    let r = dc.dev_rect(rect(rec, 8 + 8 + 16).ok_or(bad)?);
                     match mode {
                         5 => dc.clip = Some(r),
                         1 => dc.clip = Some(intersect(dc.clip, r)),
@@ -447,8 +543,8 @@ pub fn play(
                 dc.at = to;
                 if dc.pen_visible
                     && let Some((a, b)) = clipped(
-                        [f64::from(from[0]), f64::from(from[1])],
-                        [f64::from(to[0]), f64::from(to[1])],
+                        dc.dev([f64::from(from[0]), f64::from(from[1])]),
+                        dc.dev([f64::from(to[0]), f64::from(to[1])]),
                         dc.clip,
                     )
                 {
@@ -474,7 +570,7 @@ pub fn play(
                 }
             }
             43 => {
-                let r = rect(rec, 8).ok_or(bad)?;
+                let r = dc.dev_rect(rect(rec, 8).ok_or(bad)?);
                 if let Some(color) = dc.brush
                     && let Some(r) = fill_box(r, dc.clip)
                 {
@@ -512,12 +608,12 @@ pub fn play(
                         None
                     }
                 };
-                let r = [
+                let r = dc.dev_rect([
                     f64::from(x.min(x.saturating_add(w))),
                     f64::from(y.min(y.saturating_add(h))),
                     f64::from(x.max(x.saturating_add(w))),
                     f64::from(y.max(y.saturating_add(h))),
-                ];
+                ]);
                 if let (Some(color), Some(r)) = (color, fill_box(r, dc.clip)) {
                     shapes.push(fill(r, color, &map));
                 }
@@ -535,7 +631,9 @@ pub fn play(
                     .ok_or(bad)?;
                 chars += n;
                 if chars > MAX_TEXT_CHARS {
-                    return Err(EmfRefusal::TooManyShapes { limit: MAX_SHAPES });
+                    return Err(EmfRefusal::TooMuchText {
+                        limit: MAX_TEXT_CHARS,
+                    });
                 }
                 let text: String = char::decode_utf16(
                     raw.as_chunks::<2>()
@@ -546,11 +644,10 @@ pub fn play(
                 .map(|c| c.unwrap_or(' '))
                 .map(|c| if c.is_control() { ' ' } else { c })
                 .collect();
+                let (rx, ry) = (f64::from(rx), f64::from(ry));
                 let inside = dc.clip.is_none_or(|c| {
-                    f64::from(rx) >= c[0]
-                        && f64::from(rx) <= c[2]
-                        && f64::from(ry) >= c[1]
-                        && f64::from(ry) <= c[3]
+                    let p = dc.dev([rx, ry]);
+                    p[0] >= c[0] && p[0] <= c[2] && p[1] >= c[1] && p[1] <= c[3]
                 });
                 if inside && !text.trim().is_empty() {
                     // The reference point is the baseline, the top or the bottom of the cell.
@@ -565,9 +662,9 @@ pub fn play(
                         _ => 0.0,
                     };
                     shapes.push(EmfShape::Text {
-                        at: map([f64::from(rx), f64::from(ry) + down]),
-                        height: CAP_HEIGHT * dc.em * scale[1].abs(),
-                        rotation: dc.escapement.to_radians(),
+                        at: map(dc.dev([rx, ry + down])),
+                        height: CAP_HEIGHT * dc.em * dc.y_scale() * scale[1].abs(),
+                        rotation: dc.escapement.to_radians() + dc.world[1].atan2(dc.world[0]),
                         anchor,
                         text,
                     });

@@ -16,11 +16,6 @@ use crate::pvec::emf::{self, EmfShape};
 use crate::pvec::{Annotation, ImageFrame, OleFrame, OlePreview, Point3, RawVertex, TextAnchorV};
 use crate::raster_pvec::pyramid::RasterPyramid;
 
-/// The most bytes of a raster or DIB preview.
-const MAX_PICTURE_BYTES: usize = 32 << 20;
-/// The most frames one flatten draws; every other one says why it did not.
-pub(super) const MAX_FRAMES: usize = 256;
-
 /// What a frame's preview comes to.
 pub(super) struct OleDrawn {
     /// The polylines to draw, in the frame's block coordinates, and their height.
@@ -35,19 +30,8 @@ pub(super) struct OleDrawn {
     pub notes: Vec<String>,
 }
 
-/// A frame that draws nothing, for the reason given.
-pub(super) fn refused(why: &str) -> OleDrawn {
-    OleDrawn {
-        lines: Vec::new(),
-        elevation: 0.0,
-        runs: Vec::new(),
-        picture: None,
-        notes: vec![format!("OLE2FRAME: not drawn, {why}")],
-    }
-}
-
 /// The shapes of `frame`'s preview, or why it draws nothing.
-pub(super) fn draw(frame: &OleFrame) -> OleDrawn {
+pub(super) fn draw(frame: OleFrame) -> OleDrawn {
     let (ul, lr) = (frame.upper_left, frame.lower_right);
     let mut out = OleDrawn {
         lines: Vec::new(),
@@ -58,10 +42,37 @@ pub(super) fn draw(frame: &OleFrame) -> OleDrawn {
     };
     let refuse =
         |out: &mut OleDrawn, why: &str| out.notes.push(format!("OLE2FRAME: not drawn, {why}"));
-    match &frame.preview {
+    // The most bytes of a raster or DIB preview; the preview's bytes move into the result, so a
+    // frame never holds two copies of them.
+    const MAX_PICTURE_BYTES: usize = 32 << 20;
+    let mut picture = |out: &mut OleDrawn, bytes: Vec<u8>, dib: bool| {
+        if bytes.len() > MAX_PICTURE_BYTES {
+            out.notes.push(format!(
+                "OLE2FRAME: not drawn, its preview is over {MAX_PICTURE_BYTES} bytes"
+            ));
+            return;
+        }
+        // One pixel is the whole frame, so the picture's own size never matters to its place:
+        // pixel (s, t) of the unit square is at the lower-left corner plus s along the frame's
+        // width and t up its height.
+        let at = |i: usize| (ul[i].min(lr[i]), (ul[i] - lr[i]).abs());
+        let ((x, w), (y, h)) = (at(0), at(1));
+        let image = ImageFrame {
+            file_name: String::new(),
+            insert: [x, y, ul[2]],
+            u: [w, 0.0, 0.0],
+            v: [0.0, h, 0.0],
+            size: [1.0, 1.0],
+            visible: true,
+            clip: Vec::new(),
+            clip_inverted: false,
+        };
+        out.picture = Some((image, bytes, dib));
+    };
+    match frame.preview {
         None => refuse(&mut out, "it carries no preview"),
         Some(OlePreview::Wmf(_)) => refuse(&mut out, "a Windows metafile preview is not played"),
-        Some(OlePreview::Emf(bytes)) => match emf::play(bytes, [ul[0], ul[1]], [lr[0], lr[1]]) {
+        Some(OlePreview::Emf(bytes)) => match emf::play(&bytes, [ul[0], ul[1]], [lr[0], lr[1]]) {
             Err(why) => refuse(&mut out, &why.to_string()),
             Ok(drawing) => {
                 out.notes
@@ -113,38 +124,37 @@ pub(super) fn draw(frame: &OleFrame) -> OleDrawn {
                 }
             }
         },
-        Some(OlePreview::Raster(bytes) | OlePreview::Dib(bytes)) => {
-            if bytes.len() > MAX_PICTURE_BYTES {
-                refuse(
-                    &mut out,
-                    &format!("its preview is over {MAX_PICTURE_BYTES} bytes"),
-                );
-            } else {
-                // One pixel is the whole frame, so the picture's own size never matters to its place:
-                // pixel (s, t) of the unit square is at the lower-left corner plus s along the frame's
-                // width and t up its height.
-                let at = |a: Point3, b: Point3, i: usize| (a[i].min(b[i]), (a[i] - b[i]).abs());
-                let (x, w) = at(ul, lr, 0);
-                let (y, h) = at(ul, lr, 1);
-                let image = ImageFrame {
-                    file_name: String::new(),
-                    insert: [x, y, ul[2]],
-                    u: [w, 0.0, 0.0],
-                    v: [0.0, h, 0.0],
-                    size: [1.0, 1.0],
-                    visible: true,
-                    clip: Vec::new(),
-                    clip_inverted: false,
-                };
-                out.picture = Some((
-                    image,
-                    bytes.clone(),
-                    matches!(frame.preview, Some(OlePreview::Dib(_))),
-                ));
-            }
-        }
+        Some(OlePreview::Raster(bytes)) => picture(&mut out, bytes, false),
+        Some(OlePreview::Dib(bytes)) => picture(&mut out, bytes, true),
     }
     out
+}
+
+/// The size in pixels a raster or DIB preview declares, from its header alone.
+pub(super) fn pixels(bytes: &[u8], dib: bool) -> Result<u64, String> {
+    let (w, h) = match (dib, bytes.strip_prefix(b"BM")) {
+        (true, _) => dib_size(bytes)?,
+        (false, Some(rest)) if rest.len() > 12 => dib_size(&bytes[14..])?,
+        _ => ::image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| e.to_string())?
+            .into_decoder()
+            .map(|d| ::image::ImageDecoder::dimensions(&d))
+            .map_err(|e| format!("its preview does not decode ({e})"))?,
+    };
+    Ok(u64::from(w) * u64::from(h))
+}
+
+/// The width and height a DIB header declares.
+fn dib_size(b: &[u8]) -> Result<(u32, u32), String> {
+    let at = |i: usize| {
+        b.get(i..i + 4)
+            .map(|s| i32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+    };
+    match (at(4), at(8)) {
+        (Some(w), Some(h)) if w > 0 && h != 0 => Ok((w as u32, h.unsigned_abs())),
+        _ => Err("its DIB is cut short".to_owned()),
+    }
 }
 
 /// The pyramid of a raster preview placed by `frame`, as [`dwg_image::place`] does for a file.

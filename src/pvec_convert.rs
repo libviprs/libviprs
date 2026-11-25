@@ -3003,6 +3003,16 @@ impl<'a> PvecConversion<'a> {
                     && let Some((frame, bytes, dib)) = &d.picture
                 {
                     let left = dwg_image::MAX_TOTAL_PIXELS.saturating_sub(placed_pixels);
+                    // The decoded picture and the bytes it came from are charged before it is decoded.
+                    if let Ok(px) = ole_preview::pixels(bytes, *dib)
+                        && let Err(e) = over(
+                            "ole preview",
+                            px.saturating_mul(4).saturating_add(bytes.len() as u64),
+                        )
+                    {
+                        failure = Some(e);
+                        break;
+                    }
                     let placed = if rasters.len() >= dwg_image::MAX_IMAGES {
                         Err(format!(
                             "the conversion already placed {} images",
@@ -4230,7 +4240,7 @@ fn line_leaves<P: DwgProvider>(
 
 /// The leaves an OLE2FRAME's preview draws as lines (#1705), each with the entity's provenance, style
 /// and placement like a leader's, and what is left of each frame's preview (cells, text, a raster and
-/// the notes of its row) by the frame's leaf key. A frame past `ole_preview::MAX_FRAMES` draws nothing
+/// the notes of its row) by the frame's leaf key. A frame past 256 draws nothing
 /// and says so.
 fn ole_leaves<P: DwgProvider>(
     provider: &P,
@@ -4251,10 +4261,21 @@ fn ole_leaves<P: DwgProvider>(
         else {
             continue;
         };
-        let mut made = if drawn.len() < ole_preview::MAX_FRAMES {
-            ole_preview::draw(&frame)
+        // A frame past this many says why it draws nothing.
+        const MAX_FRAMES: usize = 256;
+        let mut made = if drawn.len() < MAX_FRAMES {
+            ole_preview::draw(frame)
         } else {
-            ole_preview::refused("the conversion already drew its limit of frames")
+            ole_preview::OleDrawn {
+                lines: Vec::new(),
+                elevation: 0.0,
+                runs: Vec::new(),
+                picture: None,
+                notes: vec![
+                    "OLE2FRAME: not drawn, the conversion already drew its limit of frames"
+                        .to_owned(),
+                ],
+            }
         };
         for points in std::mem::take(&mut made.lines) {
             lines.push(
