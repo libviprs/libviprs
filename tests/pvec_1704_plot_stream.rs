@@ -19,6 +19,8 @@ use libviprs::{
     pvec_convert::{PdfPlot, PdfPlotOutput, PvecConvertError},
 };
 
+#[path = "common/qpdf.rs"]
+mod qpdf;
 #[path = "pvec_1704_support/mod.rs"]
 mod support;
 
@@ -238,6 +240,7 @@ fn issue_1704_a_streamed_file_has_one_xref_table_and_the_pages_in_order() {
     assert!(indirect >= 5, "{indirect} streams with an indirect /Length");
     let doc = lopdf::Document::load(&dest).unwrap();
     assert_eq!(doc.get_pages().len(), 5);
+    qpdf::check_pdf(&dest).unwrap();
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -250,6 +253,7 @@ fn issue_1704_a_one_sheet_plot_is_structurally_what_it_was() {
     let dest = dir.join("plot.pdf");
     let bytes = support::drawing(1, 3);
     run(&bytes, &dest, 1).unwrap();
+    qpdf::check_pdf(&dest).unwrap();
     let doc = lopdf::Document::load(&dest).unwrap();
     let pages = doc.get_pages();
     assert_eq!(pages.len(), 1);
