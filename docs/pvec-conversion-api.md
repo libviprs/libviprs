@@ -73,7 +73,7 @@ cancel token is polled once per batch of 256 entities and during the write. A ca
 
 `PvecLayoutSet` and `PdfPlot` also send `ConversionSheetStarted { index, total, layout }` and `ConversionSheetFinished { index, total, layout, status, code }`
 for each sheet (`index` counts from 1 over the sheets asked for; `status` is `written`, `empty`, `empty-after-view`, `failed`, `cancelled` or `deadline`).
-`PdfPlot` takes `cancel` and `observer` like a conversion does. `deadline(Duration)` on `PvecConversion`, `PvecLayoutSet` and `PdfPlot` bounds the
+`PdfPlot` takes `cancel` and `observer` like a conversion does. With no `plot_style_table` it plots monochrome (every stroke, text and solid fill black, every stroke 0.25 mm), and `cad::plot_files::default_plot_style` and `default_pc3` are that default as real `.ctb` and `.pc3` files; `cad::plot_defaults` keeps a user's own pair in a config directory the caller names, and `PdfPlot` never reads it (#1670). `deadline(Duration)` on `PvecConversion`, `PvecLayoutSet` and `PdfPlot` bounds the
 wall-clock time from the call to `convert`, polled where the cancel token is. Past it the run fails with `Deadline` and publishes nothing, and the caller's
 token is untouched; a cancel by the caller wins when both happened. On a set it bounds the whole set (sheets already published stay, no index); set in a
 sheet's own options it fails that sheet only (#1674).

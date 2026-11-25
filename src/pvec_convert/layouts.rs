@@ -356,8 +356,8 @@ impl<'a> PvecLayoutSet<'a> {
         let mut sheets = Vec::new();
         let mut rows = Vec::new();
         let total = wanted.iter().filter(|w| **w).count() as u32;
-        let mut started = 0u32;
-        for (n, layout) in paper.iter().enumerate().filter(|(n, _)| wanted[*n]) {
+        let chosen = paper.iter().enumerate().filter(|(n, _)| wanted[*n]);
+        for ((n, layout), started) in chosen.zip(1u32..) {
             let nn = format!("{:0width$}", n + 1);
             let name = format!("{stem}.{nn}-{}.pvec", slug(&layout.name));
             let file = self.dest_dir.join(&name);
@@ -377,7 +377,6 @@ impl<'a> PvecLayoutSet<'a> {
                 });
             }
             let observer = c.observer.clone();
-            started += 1;
             let tell = |event: EngineEvent| {
                 if let Some(o) = &observer {
                     o.on_event(event);
