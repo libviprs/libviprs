@@ -1776,3 +1776,11 @@ annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stored_file_o
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_the_directory_is_private_and_so_are_the_files
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stale_scratch_file_does_not_stop_a_store_and_is_left_alone
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_threads_storing_the_same_default_all_succeed_and_leave_no_scratch
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_clean_check_is_reported_as_checked
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_failed_check_carries_qpdfs_own_words
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_missing_qpdf_skips_instead_of_failing
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_streamed_plot_passes_qpdf_check
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_streamed_plot_with_its_tail_cut_off_fails_qpdf_check
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_nothing_is_found_when_neither_names_a_qpdf
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_path_is_searched_in_order_when_the_variable_is_unset
+annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_the_environment_variable_wins_over_path
