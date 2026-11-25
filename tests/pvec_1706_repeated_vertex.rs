@@ -10,6 +10,8 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use acadrust::entities::{LwPolyline, Polyline2D, Vertex2D};
 use acadrust::objects::ObjectType;
@@ -165,5 +167,34 @@ fn issue_1706_a_polyline_that_is_one_point_repeated_draws_nothing_and_does_not_f
         "dot",
         lw(&[[10.0, 10.0], [10.0, 10.0], [10.0, 10.0]], &[], false),
     );
+    assert_eq!(strokes(&ops), 0);
+}
+
+/// Plots on another thread and gives up after `secs`, so a quadratic repair fails the test instead of
+/// hanging it.
+fn plot_within(tag: &'static str, secs: u64, entity: EntityType) -> Vec<Operation> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(plot(tag, entity));
+    });
+    rx.recv_timeout(Duration::from_secs(secs))
+        .unwrap_or_else(|_| panic!("{tag}: the plot took over {secs} s"))
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1706_two_hundred_thousand_repeats_are_skipped_in_one_pass() {
+    // 100000 copies of one point, then 100000 of another: the repair has to be linear.
+    let mut points = vec![[10.0, 10.0]; 100_000];
+    points.extend(vec![[100.0, 10.0]; 100_000]);
+    let ops = plot_within("many", 60, lw(&points, &[], false));
+    assert_eq!(strokes(&ops), 1);
+    assert_eq!(drawn(&ops), 1, "one side is left");
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1706_a_polyline_of_identical_points_is_refused_without_a_panic_or_a_wait() {
+    let ops = plot_within("same", 60, lw(&vec![[10.0, 10.0]; 200_000], &[], false));
     assert_eq!(strokes(&ops), 0);
 }
