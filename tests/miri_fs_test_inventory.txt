@@ -995,6 +995,9 @@ annotated   fs-detected  tests/pvec_1718_polyline_width.rs::issue_1718_a_width_o
 annotated   fs-detected  tests/pvec_1718_polyline_width.rs::issue_1718_equal_start_and_end_widths_on_the_vertices_are_the_same_stroke
 annotated   fs-detected  tests/pvec_1718_polyline_width.rs::issue_1718_the_width_is_paper_millimetres_after_the_plot_scale
 annotated   fs-detected  tests/pvec_1718_polyline_width.rs::issue_1718_the_width_prints_when_the_layout_does_not_print_lineweights
+annotated   fs-detected  tests/pvec_1718_polyline_width.rs::issue_1718_the_width_takes_the_scale_of_the_block_it_is_drawn_through
+annotated   fs-detected  tests/pvec_1718_polyline_width.rs::issue_1718_the_width_takes_the_scale_of_the_viewport_it_is_seen_through
+annotated   fs-detected  tests/pvec_1718_polyline_width.rs::issue_1718_a_hostile_polyline_finishes_fast_and_stays_under_the_point_cap
 annotated   fs-detected  tests/pvec_302_scene_gate.rs::blueprint_mix_writes_only_features_the_driver_supports
 annotated   fs-detected  tests/pvec_api_surface.rs::issue_1093_components_name_no_provider_specific_type
 annotated   fs-detected  tests/pvec_1481_memory.rs::the_baseline_has_a_stage_row_per_scale_with_every_stage
