@@ -316,6 +316,9 @@ pub struct PvecConversion<'a> {
     /// The conversion is a plot's (#1704): no row per entity is kept and no report is read by
     /// anyone, so the report it still has to hand back carries only counts and the sheet summary.
     plot_mode: bool,
+    /// The plot has no style table, so it is monochrome (#1670): every stroke takes the built-in
+    /// default's 0.25 mm as its lineweight, and a polyline's own width still beats it (#1723).
+    monochrome: bool,
     /// The model pass a plot keeps between its sheets (#1713).
     model_cache: Option<Arc<Mutex<Option<Arc<ModelPass>>>>>,
     #[cfg(feature = "pvec-raster-thumbnail")]
@@ -443,6 +446,7 @@ impl<'a> PvecConversion<'a> {
             deadline: None,
             empty_sheet_ok: false,
             plot_mode: false,
+            monochrome: false,
             model_cache: None,
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail_width: None,
@@ -2522,6 +2526,9 @@ impl<'a> PvecConversion<'a> {
                         }
                     }
                 }
+                // No table: the built-in default's 0.25 mm is the lineweight of every stroke. It is a
+                // lineweight, so a polyline's own width laid over it below still wins (#1723).
+                let monochrome = self.monochrome;
                 // The ACI the stroke is drawn in, through BYLAYER and BYBLOCK; a true colour has none.
                 let effective_aci = match paint_of(&leaf_key_of(&raw.provenance)) {
                     Some(LeafPaint::Colour(SourceColour::Aci(i))) if table.is_some() => Some(*i),
@@ -2574,6 +2581,9 @@ impl<'a> PvecConversion<'a> {
                             input.linetype_name = None;
                             input.linetype_elements = Some(p).filter(|p| !p.is_empty());
                         }
+                    }
+                    if monochrome {
+                        input.lineweight = Some(DwgLineweight::Hundredths(25));
                     }
                     input
                 };

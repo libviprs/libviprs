@@ -1833,3 +1833,9 @@ annotated   fs-detected  tests/pvec_1705_ole2frame.rs::issue_1705_a_plot_draws_t
 annotated   fs-detected  tests/pvec_1705_ole2frame.rs::issue_1705_a_plot_shows_the_cell_text_as_text_and_fills_the_cell
 annotated   fs-detected  tests/pvec_1705_ole2frame.rs::issue_1705_a_plot_without_the_option_draws_none_of_it
 annotated   fs-detected  tests/pvec_1705_owner_ole.rs::issue_1705_the_first_sheet_gains_text_and_strokes_from_its_embedded_objects
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_a_width_zero_polyline_still_takes_the_tables_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_a_table_of_another_pen_width_a_constant_width_polyline_keeps_its_own_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_an_identity_table_a_constant_width_polyline_plots_at_its_own_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_a_constant_width_polyline_plots_at_its_own_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_a_straight_wide_polyline_plots_at_its_own_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_everything_else_stays_at_the_defaults_quarter_millimetre
