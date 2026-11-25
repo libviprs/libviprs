@@ -730,14 +730,12 @@ impl ViewProfile {
             walk.load_hidden(&EntityScope::Layout(model.id))?;
         }
         let mut cursor = provider.entities(&EntityScope::Layout(model.id))?;
-        let mut top = Vec::new();
+        // Each top level entity is visited as it is read, so the guard refuses a model that is too
+        // large before all of it is held (#1726).
         while let Some(e) = cursor.next_entity()? {
-            top.push(e);
-        }
-        drop(cursor);
-        for e in top {
             walk.visit(e, 0, None, None, 1)?;
         }
+        drop(cursor);
 
         let mut by_field = BTreeMap::new();
         let mut by_layer = BTreeMap::new();

@@ -942,8 +942,9 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1717 adds 6: the `tests/pvec_1717_arc_sides.rs` cells that plot a drawing written in memory (a polyline with arc sides) into a temp dir and read the PDF back.
 /// #1706 adds 7: the seven `tests/pvec_1706_repeated_vertex.rs` cells that write a drawing with acadrust and plot it into a temp dir (five for #1706, two long-polyline cells for #1720). It said 1573 before this line moved.
 /// #1723 adds 6: the `tests/pvec_1723_default_width.rs` cells that write a drawing with acadrust and plot it into a temp dir. It said 1580 before this line moved.
-/// #1705 adds 13: the `tests/pvec_1705_ole2frame.rs` cells that convert or plot a drawing with an OLE2FRAME in a temp dir, the hostile compound file of `tests/pvec_1705_hostile_cfb.rs`, and the owner-only `tests/pvec_1705_owner_ole.rs`. It said 1586 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1599;
+/// #1726 adds 4: the four `tests/pvec_1726_plot_budget.rs` cells that plot a synthetic drawing into a temp dir under a counting allocator. It said 1586 before this line moved.
+/// #1705 adds 13: the `tests/pvec_1705_ole2frame.rs` cells that convert or plot a drawing with an OLE2FRAME in a temp dir, the hostile compound file of `tests/pvec_1705_hostile_cfb.rs`, and the owner-only `tests/pvec_1705_owner_ole.rs`. It said 1590 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1603;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {

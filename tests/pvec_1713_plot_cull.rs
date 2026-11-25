@@ -231,7 +231,7 @@ fn issue_1713_a_layout_set_records_the_refused_sheet_and_goes_on() {
     let bytes = support::drawing(SHEETS, 4_000, SMALL, false, 8);
     let out = PvecLayoutSet::new(CadSource::Bytes(&bytes), &dir)
         .stem("plan")
-        .sheets(|c| c.unit(SourceUnit::Millimeters).limits(limits(11 << 19)))
+        .sheets(|c| c.unit(SourceUnit::Millimeters).limits(limits(9 << 18)))
         .convert_with::<support::Synthetic>()
         .unwrap();
     let failed: Vec<_> = out.failed().collect();
