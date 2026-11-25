@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`read_page` in the PDF plot takes the plot instead of two of its settings** (issue #1722). It had eight arguments, one over clippy's `too_many_arguments` limit, and the lint only showed with `--features pvec-convert`. The hairline limit and the monochrome flag are now read from the `PdfPlot` it is given, so the signature has seven. No behaviour change.
 - **Two clippy lints in `pvec_convert`** (issue #1707). `explicit_counter_loop` in `layouts.rs` (the sheet counter is now a `zip` with `1..`) and `chunks_exact_to_as_chunks` in `dwg_image.rs` (the alpha mask walks `as_chunks_mut::<4>()`). Both showed under `--features pvec-convert`, which the pre-commit hook does not lint. No behaviour changes.
 - **The DWG basic extractors use `detmath::hypot` for the planarity length** (issue #1702). #1695 compared a LINE's end Z and an ELLIPSE's major axis Z against a length taken with the libm `hypot`, which differs in the last bit between architectures, and `n_1471_no_geometry_libviprs_computes_goes_through_libm_hypot` caught it on main. Both calls now go through PVec's `detmath::hypot`; the tolerance is 1e-9 of the length, so no conversion changes.
 
