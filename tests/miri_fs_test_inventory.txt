@@ -1815,3 +1815,9 @@ annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_streamed_pl
 annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_nothing_is_found_when_neither_names_a_qpdf
 annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_path_is_searched_in_order_when_the_variable_is_unset
 annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_the_environment_variable_wins_over_path
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_a_width_zero_polyline_still_takes_the_tables_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_a_table_of_another_pen_width_a_constant_width_polyline_keeps_its_own_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_an_identity_table_a_constant_width_polyline_plots_at_its_own_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_a_constant_width_polyline_plots_at_its_own_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_a_straight_wide_polyline_plots_at_its_own_width
+annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_everything_else_stays_at_the_defaults_quarter_millimetre
