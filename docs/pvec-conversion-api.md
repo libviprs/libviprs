@@ -78,6 +78,8 @@ wall-clock time from the call to `convert`, polled where the cancel token is. Pa
 token is untouched; a cancel by the caller wins when both happened. On a set it bounds the whole set (sheets already published stay, no index); set in a
 sheet's own options it fails that sheet only (#1674).
 
+`PdfPlot` holds one sheet at a time (#1704): each sheet is converted into a scratch artifact with a plot mode that builds no per entity rows, its page (rasters, Flate content, page object) is written straight to a temporary file, and the artifact and its report are removed before the next sheet starts. The PDF is renamed over the destination, after a sync, only when every page is in; it is written by a small writer of the plot's own (header and font, then per sheet its objects, then the page tree, catalog, info, classic xref table and trailer), so object numbers follow the order of writing and the bytes are a pure function of the drawing and the options. `PvecLayoutSet::keep_rows(false)` drops each written sheet's report rows from its outcome (they stay in the report file).
+
 ## What it writes
 
 The artifact (with its calibration block when there is a calibration, `docs/pvec-georeference.md`) and `<dest>.report.json`

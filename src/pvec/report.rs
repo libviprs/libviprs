@@ -507,6 +507,9 @@ pub enum ReportError {
 #[derive(Debug, Default)]
 pub struct ReportBuilder {
     rows: Vec<EntityRow>,
+    /// Rows are only counted, not kept (a plot never reads them).
+    counting: bool,
+    counted: u64,
 }
 
 impl ReportBuilder {
@@ -516,9 +519,23 @@ impl ReportBuilder {
         Self::default()
     }
 
+    /// A builder that counts rows and keeps none, for a plot, which never reads them. Its report
+    /// has no `entities`, and its totals carry only `encountered`.
+    #[must_use]
+    pub fn counting() -> Self {
+        Self {
+            counting: true,
+            ..Self::default()
+        }
+    }
+
     /// Adds a row.
     pub fn push(&mut self, row: EntityRow) {
-        self.rows.push(row);
+        if self.counting {
+            self.counted += 1;
+        } else {
+            self.rows.push(row);
+        }
     }
 
     /// Rewrites the row of `id` to a refusing class, for an entity the writer refused after it was
@@ -548,7 +565,11 @@ impl ReportBuilder {
         xrefs: XrefSummary,
         bounds: BoundsSplit,
     ) -> Result<ConversionReport, ReportError> {
-        let rows = self.rows.len() as u64;
+        let rows = if self.counting {
+            self.counted
+        } else {
+            self.rows.len() as u64
+        };
         if rows != encountered {
             return Err(ReportError::CountMismatch { rows, encountered });
         }

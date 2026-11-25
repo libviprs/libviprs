@@ -291,6 +291,9 @@ pub struct PvecConversion<'a> {
     /// A paper sheet with nothing to stroke is a success with `written == 0` and no artifact,
     /// for a caller (the PDF plot, #1636) that still wants the empty page.
     empty_sheet_ok: bool,
+    /// The conversion is a plot's (#1704): no row per entity is kept and no report is read by
+    /// anyone, so the report it still has to hand back carries only counts and the sheet summary.
+    plot_mode: bool,
     #[cfg(feature = "pvec-raster-thumbnail")]
     thumbnail_width: Option<u32>,
     xrefs: Vec<(String, CadSource<'a>)>,
@@ -413,6 +416,7 @@ impl<'a> PvecConversion<'a> {
             plot_settings: PlotSettings::default(),
             deadline: None,
             empty_sheet_ok: false,
+            plot_mode: false,
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail_width: None,
             xrefs: Vec::new(),
@@ -1884,8 +1888,9 @@ impl<'a> PvecConversion<'a> {
         // Rows drawn through each window, and the VIEWPORT entities the provider said nothing of.
         let mut through = vec![0u64; windows.len()];
         let mut unreported: Vec<u64> = Vec::new();
+        let counting = self.plot_mode;
         let consumed = std::thread::scope(|scope| {
-            let consumer = scope.spawn(|| consume(rx, &sent, observer));
+            let consumer = scope.spawn(|| consume(rx, &sent, observer, counting));
             let mut failure = None;
             for (n, &at) in perm.iter().enumerate() {
                 if n.is_multiple_of(BATCH) && cancel.is_cancelled() {
@@ -3828,10 +3833,15 @@ fn consume(
     rx: impl IntoIterator<Item = Outcome>,
     sent: &AtomicU64,
     observer: Option<&dyn EngineObserver>,
+    counting: bool,
 ) -> Consumed {
     let mut out = Consumed {
         tally: Tally::new(),
-        rows: ReportBuilder::new(),
+        rows: if counting {
+            ReportBuilder::counting()
+        } else {
+            ReportBuilder::new()
+        },
         geometries: Vec::new(),
         stored: Vec::new(),
         diagnostics: Vec::new(),
