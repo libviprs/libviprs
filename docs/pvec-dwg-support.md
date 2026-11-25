@@ -21,6 +21,6 @@ proxy entities (`unmapped-source-class`), an unresolved xref block (`unresolved-
 (`docs/pvec-hatch-policy.md`), and units are `docs/pvec-units.md`.
 
 One known gap: a curve PVec's container cannot store deterministically (`WRT-08`) fails the whole conversion today instead of
-being counted against its entity (#1446). The corpus regression baseline records the three fixtures it affects.
+being counted against its entity (#1446). A plot is the exception for a polyline with arc sides: `PdfPlot` writes it one record per side and draws it (#1717). The corpus regression baseline records the three fixtures it affects.
 
 The codes and their wording are `docs/pvec-diagnostics.md`.

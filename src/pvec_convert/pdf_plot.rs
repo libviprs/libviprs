@@ -342,6 +342,7 @@ impl<'a> PdfPlot<'a> {
                     conversion = conversion.observer(o.clone());
                 }
                 conversion.empty_sheet_ok = true;
+                conversion.arc_sides = true;
                 if let Some(dir) = &self.images {
                     conversion = conversion.images(dir.clone());
                 }

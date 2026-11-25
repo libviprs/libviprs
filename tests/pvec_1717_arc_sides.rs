@@ -12,15 +12,14 @@
 
 use std::fs;
 
-use acadrust::entities::LwPolyline;
+use acadrust::entities::{Line, LwPolyline};
 use acadrust::objects::ObjectType;
 use acadrust::tables::{LineType, LineTypeElement};
 use acadrust::types::Vector2;
 use acadrust::{CadDocument, DwgWriter, EntityType};
 use libviprs::cad::CadSource;
-use libviprs::pvec::components::StreamSelection;
 use libviprs::pvec::{SourceUnit, ViewProfile};
-use libviprs::pvec_convert::{PdfPlot, PvecConversion};
+use libviprs::pvec_convert::PdfPlot;
 use lopdf::Document;
 use lopdf::content::Operation;
 
@@ -195,27 +194,47 @@ fn issue_1717_a_patterned_polyline_with_arcs_is_plotted_with_plinegen_on_too() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1717_the_conversion_writes_one_record_per_side_of_a_polyline_with_arcs() {
-    let mut doc = CadDocument::new();
-    doc.add_entity(lw(&TRI, &[-1.0], true, "Continuous", false))
-        .unwrap();
-    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
-    let dir = std::env::temp_dir().join(format!("libviprs-1717-conv-{}", std::process::id()));
+fn issue_1717_a_sheet_with_a_line_and_a_polyline_with_arcs_draws_both() {
+    // The polyline used to be dropped and the line plotted alone, with nothing to say so.
+    let dir = std::env::temp_dir().join(format!("libviprs-1717-both-{}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
-    let dest = dir.join("o.pvec");
-    PvecConversion::new(CadSource::Bytes(&bytes), &dest)
+    let mut doc = CadDocument::new();
+    doc.add_layout("A3").unwrap();
+    let layout = doc
+        .objects
+        .values_mut()
+        .find_map(|o| match o {
+            ObjectType::Layout(l) if l.name == "A3" => Some(l),
+            _ => None,
+        })
+        .unwrap();
+    layout.paper_width = 420.0;
+    layout.paper_height = 297.0;
+    layout.plot_paper_units = 1;
+    layout.plot_type = 5;
+    layout.plot_scale_numerator = 1.0;
+    layout.plot_scale_denominator = 1.0;
+    layout.paper_size = "USER_(420.00_x_297.00_MM)".into();
+    doc.add_entity_to_layout(
+        EntityType::Line(Line::from_coords(10.0, 10.0, 0.0, 200.0, 10.0, 0.0)),
+        "A3",
+    )
+    .unwrap();
+    doc.add_entity_to_layout(lw(&TRI, &[-1.0], true, "Continuous", false), "A3")
+        .unwrap();
+    let bytes = DwgWriter::write_to_vec(&doc).unwrap();
+    let dest = dir.join("out.pdf");
+    PdfPlot::new(CadSource::Bytes(&bytes), &dest)
         .unit(SourceUnit::Millimeters)
-        .components(StreamSelection::NONE)
-        .convert()
-        .unwrap_or_else(|e| panic!("the conversion failed: {e}"));
-    let reader = libviprs::pvec::publish::open_published(&dest).unwrap();
-    let curves = reader.entities().unwrap();
-    let straight = curves
-        .iter()
-        .filter(|(_, c)| matches!(c, pvec_facade::Curve::Polyline(_)))
-        .count();
-    assert_eq!(curves.len(), 3, "an arc record and two line records");
-    assert_eq!(straight, 2);
+        .view_profile(ViewProfile::print_profile("A3"))
+        .layouts(["A3"])
+        .convert_with::<libviprs::pvec::dwg_acadrust::AcadrustProvider>()
+        .unwrap_or_else(|e| panic!("the plot failed: {e}"));
+    let pdf = Document::load(&dest).unwrap();
+    let id = pdf.get_pages()[&1];
+    let ops = pdf.get_and_decode_page_content(id).unwrap().operations;
+    assert_eq!(count(&ops, "l"), 3, "the line and the two straight sides");
+    assert_eq!(count(&ops, "c"), 2, "the half circle");
     let _ = fs::remove_dir_all(dir);
 }

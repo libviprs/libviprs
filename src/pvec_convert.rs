@@ -297,6 +297,10 @@ pub struct PvecConversion<'a> {
     xref_note: Arc<Mutex<xref::XrefNote>>,
     /// The directory a DWG IMAGE's file is read from (#1667); `None` places no image.
     images: Option<PathBuf>,
+    /// A polyline with arc sides is written one record per side (#1717), for a caller (the PDF
+    /// plot) that draws the sides and has no use for the polyline as one composite curve, which
+    /// PVec's writer refuses (`WRT-08`). Off, a conversion keeps the stored geometry strict.
+    arc_sides: bool,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -414,6 +418,7 @@ impl<'a> PvecConversion<'a> {
             xrefs: Vec::new(),
             xref_note: Arc::default(),
             images: None,
+            arc_sides: false,
         }
     }
 
@@ -812,6 +817,7 @@ impl<'a> PvecConversion<'a> {
             plot_style,
             plot_settings,
             images,
+            arc_sides,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -2424,21 +2430,35 @@ impl<'a> PvecConversion<'a> {
                 // at an edge is. Only a polyline that has a pattern is split. A solid one, or one
                 // with PLINEGEN on, stays whole, and the flag is the entity's own: the header's
                 // PLINEGEN only seeds the polylines drawn after it.
-                if components.line_style
-                    && !frozen_here
+                //
+                // A polyline with an arc side is a composite, which PVec's writer refuses (WRT-08). A
+                // plot writes it one record per side whatever its style and PLINEGEN (#1717). With
+                // PLINEGEN on and a pattern, the pattern then starts anew on each side: a polyline
+                // drawn with a small break at its vertices beats one dropped.
+                let split_arcs = *arc_sides
+                    && std::iter::once(&done).chain(more.iter()).any(|d| {
+                        matches!(
+                            d.geometry.geometry(),
+                            Some(Curve::Composite(c))
+                                if c.segments().iter().any(|s| !matches!(s, Curve::Polyline(_)))
+                        )
+                    });
+                if !frozen_here
                     && matches!(raw.geometry, RawGeometry::Polyline { .. })
                     && matches!(
                         raw.provenance.class_name.as_str(),
                         "LWPOLYLINE" | "POLYLINE"
                     )
-                    && (table.is_some()
-                        || dwg_style_input(&raw.style, true)
-                            .linetype_elements
-                            .is_some())
-                    && raw
-                        .provenance
-                        .handle
-                        .is_some_and(|h| !provider.polyline_linetype_generation(h))
+                    && (split_arcs
+                        || (components.line_style
+                            && (table.is_some()
+                                || dwg_style_input(&raw.style, true)
+                                    .linetype_elements
+                                    .is_some())
+                            && raw
+                                .provenance
+                                .handle
+                                .is_some_and(|h| !provider.polyline_linetype_generation(h))))
                 {
                     // Each side of an uncut polyline also has its pattern centred (#1699). The pattern as it
                     // is drawn, every element in the output's unit and on the alternating slots a dash
@@ -2555,7 +2575,14 @@ impl<'a> PvecConversion<'a> {
                             .map(|c| Normalized2DGeometry::from_curve(c, fidelity))
                             .collect();
                         match built {
-                            Ok(parts) if parts.len() > 1 => {
+                            Ok(parts)
+                                if parts.len() > 1
+                                    || (split_arcs
+                                        && matches!(
+                                            d.geometry.geometry(),
+                                            Some(Curve::Composite(_))
+                                        )) =>
+                            {
                                 for (k, part) in parts.into_iter().enumerate() {
                                     match gated(part, &raw.provenance, gate) {
                                         Ok(mut piece) => {
