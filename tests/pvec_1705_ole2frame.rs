@@ -129,7 +129,7 @@ fn text_out(x: i32, y: i32, s: &str) -> Vec<u8> {
 }
 
 /// The table: a frame of four lines, a red cell, the text "Hello" 20 pixels tall on a baseline, and
-/// a record type the player does not know (an EMR_SETMAPMODE, 17).
+/// a record type the player does not know (an EMR_SETMITERLIMIT, 58).
 fn table() -> Vec<u8> {
     assemble(&[
         create_pen(1, 0),
@@ -146,7 +146,7 @@ fn table() -> Vec<u8> {
         select(3),
         text_align(24),
         text_out(20, 80, "Hello"),
-        rec(17, &words(&[8])),
+        rec(58, &words(&[10])),
     ])
 }
 
@@ -487,6 +487,130 @@ fn issue_1705_a_selected_object_that_was_never_made_does_not_panic() {
     let _ = play(&assemble(&records), UPPER_LEFT, LOWER_RIGHT);
 }
 
+fn map_mode(m: i32) -> Vec<u8> {
+    rec(17, &words(&[m]))
+}
+
+fn window_org(x: i32, y: i32) -> Vec<u8> {
+    rec(10, &words(&[x, y]))
+}
+
+fn window_ext(x: i32, y: i32) -> Vec<u8> {
+    rec(9, &words(&[x, y]))
+}
+
+fn viewport_org(x: i32, y: i32) -> Vec<u8> {
+    rec(12, &words(&[x, y]))
+}
+
+fn viewport_ext(x: i32, y: i32) -> Vec<u8> {
+    rec(11, &words(&[x, y]))
+}
+
+/// SETWORLDTRANSFORM (35) with eM11, eM12, eM21, eM22, eDx, eDy.
+fn world(m: [f32; 6]) -> Vec<u8> {
+    rec(
+        35,
+        &m.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>(),
+    )
+}
+
+/// The corners a frame of one black line across the picture reaches.
+fn line_extent(records: &[Vec<u8>]) -> ([f64; 2], [f64; 2]) {
+    let drawing = play(&assemble(records), UPPER_LEFT, LOWER_RIGHT).expect("plays");
+    let points: Vec<[f64; 2]> = drawing
+        .shapes
+        .iter()
+        .filter_map(|s| match s {
+            EmfShape::Line(p) => Some(p.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(!points.is_empty(), "a line is drawn");
+    let lo = points
+        .iter()
+        .fold([f64::MAX; 2], |a, p| [a[0].min(p[0]), a[1].min(p[1])]);
+    let hi = points
+        .iter()
+        .fold([f64::MIN; 2], |a, p| [a[0].max(p[0]), a[1].max(p[1])]);
+    (lo, hi)
+}
+
+// ---- window, viewport and world transform (the review of #1710) ----------------------------
+
+#[test]
+fn issue_1705_a_window_origin_and_extents_map_the_logical_picture_onto_the_device() {
+    // The window is 100 by 50 logical units at (1000, 500) and the viewport is 199 by 99 pixels, so
+    // a line from the window's corner to its far corner crosses the whole picture.
+    let (lo, hi) = line_extent(&[
+        map_mode(8),
+        window_org(1000, 500),
+        window_ext(100, 50),
+        viewport_org(0, 0),
+        viewport_ext(199, 99),
+        create_pen(1, 0),
+        select(1),
+        move_to(1000, 500),
+        line_to(1100, 550),
+    ]);
+    assert!(near(lo[0], 100.0) && near(hi[0], 150.0), "x {lo:?} {hi:?}");
+    assert!(near(lo[1], 175.0) && near(hi[1], 200.0), "y {lo:?} {hi:?}");
+}
+
+#[test]
+fn issue_1705_a_world_transform_scales_and_moves_what_follows() {
+    // x doubled, y moved down 10: a line (0, 0) to (99, 89) is the picture's diagonal.
+    let (lo, hi) = line_extent(&[
+        world([2.0, 0.0, 0.0, 1.0, 1.0, 10.0]),
+        create_pen(1, 0),
+        select(1),
+        move_to(0, 0),
+        line_to(99, 89),
+    ]);
+    let x = |px: f64| 100.0 + px * 50.0 / 199.0;
+    let y = |py: f64| 200.0 - py * 25.0 / 99.0;
+    assert!(
+        near(lo[0], x(1.0)) && near(hi[0], x(199.0)),
+        "x {lo:?} {hi:?}"
+    );
+    assert!(
+        near(lo[1], y(99.0)) && near(hi[1], y(10.0)),
+        "y {lo:?} {hi:?}"
+    );
+}
+
+#[test]
+fn issue_1705_a_modified_world_transform_composes() {
+    // Identity, then a left-multiplied scale by 2 in x: the same picture as setting it outright.
+    let mut modify = words(&[0; 0]);
+    modify.extend(
+        [2.0f32, 0.0, 0.0, 1.0, 0.0, 0.0]
+            .iter()
+            .flat_map(|v| v.to_le_bytes()),
+    );
+    modify.extend(2u32.to_le_bytes());
+    let (lo, hi) = line_extent(&[
+        rec(36, &modify),
+        create_pen(1, 0),
+        select(1),
+        move_to(0, 0),
+        line_to(99, 99),
+    ]);
+    assert!(
+        near(lo[0], 100.0) && near(hi[0], 100.0 + 198.0 * 50.0 / 199.0),
+        "x {lo:?} {hi:?}"
+    );
+}
+
+#[test]
+fn issue_1705_text_past_its_limit_says_so_and_is_not_a_shape_count() {
+    let long = "a".repeat(4096);
+    let records: Vec<Vec<u8>> = (0..40).map(|i| text_out(10, 10 + i, &long)).collect();
+    let err = play(&assemble(&records), UPPER_LEFT, LOWER_RIGHT).unwrap_err();
+    assert!(matches!(err, EmfRefusal::TooMuchText { .. }), "{err:?}");
+}
+
 // ---- the conversion ----------------------------------------------------------------------
 
 #[test]
@@ -647,4 +771,26 @@ fn issue_1705_a_plot_without_the_option_draws_none_of_it() {
         "only the rule"
     );
     assert!(!o.iter().any(|o| o.operator == "Tj"));
+}
+
+// ---- the allocation budget ---------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1705_a_raster_preview_is_charged_to_the_allocation_budget_before_it_is_decoded() {
+    let img = image::RgbaImage::from_pixel(600, 600, image::Rgba([10, 20, 30, 255]));
+    let mut png = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let bytes = sheet_with(frame(&[("CONTENTS", png.into_inner())]));
+    let dir = scratch("budget");
+    // 600 x 600 x 4 is 1.44 MB of pixels, over a 1 MiB budget.
+    let mut limits = libviprs::pvec::SourceLimits::default();
+    limits.max_allocation_bytes = 1 << 20;
+    let e = PvecConversion::new(CadSource::Bytes(&bytes), &dir.join("sheet.pvec"))
+        .view_profile(ViewProfile::print_profile(SHEET))
+        .limits(limits)
+        .ole_previews(true)
+        .convert()
+        .unwrap_err();
+    assert_eq!(e.code(), "LIMIT_ALLOCATION_BYTES", "{e}");
 }

@@ -76,6 +76,11 @@ pub enum EmfRefusal {
         /// The most handles it keeps.
         limit: usize,
     },
+    /// The text runs hold more characters than the player carries.
+    TooMuchText {
+        /// The most characters it carries.
+        limit: usize,
+    },
     /// The picture has no width or no height to map onto the corners.
     NoExtent,
     /// More device contexts are saved than the player keeps.
@@ -96,6 +101,9 @@ impl std::fmt::Display for EmfRefusal {
             }
             Self::TooManyObjects { limit } => {
                 write!(f, "the preview names an object handle past {limit}")
+            }
+            Self::TooMuchText { limit } => {
+                write!(f, "the preview's text is over {limit} characters")
             }
             Self::NoExtent => f.write_str("the preview's picture has no width or height"),
             Self::TooDeep => write!(f, "the preview saves more than {MAX_DEPTH} device contexts"),

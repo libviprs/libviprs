@@ -1839,3 +1839,4 @@ annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_an_id
 annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_a_constant_width_polyline_plots_at_its_own_width
 annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_a_straight_wide_polyline_plots_at_its_own_width
 annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_everything_else_stays_at_the_defaults_quarter_millimetre
+annotated   fs-detected  tests/pvec_1705_ole2frame.rs::issue_1705_a_raster_preview_is_charged_to_the_allocation_budget_before_it_is_decoded
