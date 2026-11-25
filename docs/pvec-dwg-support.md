@@ -86,7 +86,7 @@ KB and a few hundred records, using 22 record types: lines, filled cells and tex
   end, a first record that is not a header, or a picture with no width or height. Each is a typed
   `EmfRefusal` and the frame draws nothing. A raster or DIB preview is charged to `max_allocation_bytes`
   (its bytes and four bytes a declared pixel) before it is decoded, and a conversion over the budget is
-  refused with `LIMIT_ALLOCATION_BYTES` as for the other stages. No input panics, and none allocates past these limits.
+  refused with `LIMIT_ALLOCATION_BYTES` as for the other stages. The player allocates no more than these limits allow, and a fuzzed record stream does not panic it. The compound file the preview is found in is read by acadrust, whose reader took a stream's declared size on trust until the fork's #76; the pin is at that fix, and a compound file whose chains loop or whose streams declare more than the file holds gives no preview, so the frame has a row that says so.
 - **O-6 What the row says.** A frame's row says what became of it: `OLE2FRAME: drawn from its EMF
   preview`, `placed as a raster from its preview`, or `not drawn, <why>` (no preview, a Windows
   metafile, a refusal, a limit). A record type the player does not know is counted in a note, never

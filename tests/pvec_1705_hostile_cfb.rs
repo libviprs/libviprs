@@ -116,7 +116,6 @@ fn hostile_cfb() -> Vec<u8> {
 }
 
 #[test]
-#[cfg_attr(miri, ignore)]
 fn issue_1705_the_readers_own_peak_on_a_hostile_compound_file_is_small() {
     let _turn = TURN.lock().unwrap_or_else(|e| e.into_inner());
     // The same bytes straight into the reader the provider calls, so a drawing that carries them
