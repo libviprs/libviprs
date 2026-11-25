@@ -85,6 +85,8 @@ pub mod pdf_tiling;
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-write")))]
 pub mod pdf_to_pvec;
 pub mod pdf_vector;
+#[cfg(feature = "pvec-convert")]
+pub(crate) mod polyline_width;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod provenance;
