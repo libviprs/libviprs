@@ -1740,3 +1740,9 @@ annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_a_one_sheet_
 annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_a_streamed_file_has_one_xref_table_and_the_pages_in_order
 annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_the_same_plot_is_the_same_bytes_every_time
 annotated   fs-detected  tests/pvec_1704_plot_stream.rs::issue_1704_the_scratch_never_holds_more_than_one_sheet
+annotated   fs-detected  tests/pvec_1713_plot_cull.rs::issue_1713_a_budget_above_the_need_plots_the_same_bytes
+annotated   fs-detected  tests/pvec_1713_plot_cull.rs::issue_1713_a_budget_below_one_sheet_is_refused_by_code_and_writes_nothing
+annotated   fs-detected  tests/pvec_1713_plot_cull.rs::issue_1713_a_cancel_and_a_deadline_still_win_over_a_budget
+annotated   fs-detected  tests/pvec_1713_plot_cull.rs::issue_1713_a_layout_set_records_the_refused_sheet_and_goes_on
+annotated   fs-detected  tests/pvec_1713_plot_cull.rs::issue_1713_a_small_window_holds_less_than_the_whole_model
+annotated   fs-detected  tests/pvec_1713_plot_cull.rs::issue_1713_leaving_out_what_is_off_the_window_does_not_change_the_page
