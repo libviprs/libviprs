@@ -66,10 +66,11 @@ use crate::cad::{CadSource, Fill, ItemHandle, decode_escapes, display_text, gdt_
 use crate::pvec::provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
     EntityScope, EntityStyle, Facet, FacetSource, ImageFrame, InstancePath, LayerState,
-    LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, PatternLine,
-    Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry, RawVertex,
-    SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform, TextAnchorV,
-    TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment, z_axis_flip,
+    LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState, OleFrame,
+    OlePreview, PatternLine, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity,
+    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
+    SourceTransform, TextAnchorV, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    z_axis_flip,
 };
 use crate::pvec::units::SourceUnit;
 
@@ -1308,6 +1309,23 @@ impl DwgProvider for AcadrustProvider {
             visible: img.is_visible(),
             clip,
             clip_inverted: img.clip_boundary.clip_mode == acr::entities::ClipMode::Inside,
+        })
+    }
+
+    fn ole_frame(&self, handle: ItemHandle) -> Option<OleFrame> {
+        use acr::entities::OlePresentation as P;
+        let EntityType::Ole2Frame(o) = self.doc.get_entity(acr::Handle::new(handle.get()))? else {
+            return None;
+        };
+        Some(OleFrame {
+            upper_left: p3(o.upper_left_corner),
+            lower_right: p3(o.lower_right_corner),
+            preview: o.presentation().map(|p| match p {
+                P::Emf(b) => OlePreview::Emf(b),
+                P::Raster(b) => OlePreview::Raster(b),
+                P::Dib(b) => OlePreview::Dib(b),
+                P::Wmf(b) => OlePreview::Wmf(b),
+            }),
         })
     }
 

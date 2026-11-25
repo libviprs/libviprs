@@ -64,6 +64,7 @@ mod dwg_image;
 mod georef;
 mod layouts;
 mod manifest;
+mod ole_preview;
 mod pdf_hatch;
 mod pdf_plot;
 pub use pdf_plot::{PdfPlot, PdfPlotOutput};
@@ -142,11 +143,11 @@ use crate::pvec::writer::{
     open_geometry,
 };
 use crate::pvec::{
-    DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
-    LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
-    SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile,
-    ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule,
-    select_layout,
+    Annotation, DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass,
+    LayerStateRule, LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity,
+    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection,
+    ViewProfile, ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity,
+    ViewportFreezeRule, select_layout,
 };
 use crate::pvec::{LeafPaint, Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
@@ -298,7 +299,6 @@ pub struct PvecConversion<'a> {
     /// The directory a DWG IMAGE's file is read from (#1667); `None` places no image.
     images: Option<PathBuf>,
     /// Whether an OLE2FRAME is drawn from its cached preview (#1705).
-    #[allow(dead_code)]
     ole_previews: bool,
 }
 
@@ -825,6 +825,7 @@ impl<'a> PvecConversion<'a> {
             plot_style,
             plot_settings,
             images,
+            ole_previews,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -1325,7 +1326,15 @@ impl<'a> PvecConversion<'a> {
                 &mut LineageStore::new(),
             )
             .map_err(PvecConvertError::Flatten)?;
-        let (flat_lines, leader_lines) = line_leaves(provider, &flat.entities);
+        let (mut flat_lines, leader_lines) = line_leaves(provider, &flat.entities);
+        // An OLE2FRAME's preview, when the caller asked for it (#1705): its lines join the leader
+        // lines, and the rest of it waits here for its own leaf.
+        let mut ole_drawn: BTreeMap<LeafKey, ole_preview::OleDrawn> = BTreeMap::new();
+        if *ole_previews {
+            let (lines, drawn) = ole_leaves(provider, &flat.entities);
+            flat_lines.extend(lines);
+            ole_drawn = drawn;
+        }
 
         // The leaves the profile kept. The view pass decides visibility and the flatten pass owns
         // the composed maps, so a flattened leaf is drawn when the view pass kept the same one.
@@ -1468,6 +1477,11 @@ impl<'a> PvecConversion<'a> {
             );
             if let Some(mf) = &model_flat {
                 (model_lines, model_leader_lines) = line_leaves(provider, &mf.entities);
+                if *ole_previews {
+                    let (lines, drawn) = ole_leaves(provider, &mf.entities);
+                    model_lines.extend(lines);
+                    ole_drawn.extend(drawn);
+                }
             }
             if drawn
                 .iter()
@@ -2640,49 +2654,63 @@ impl<'a> PvecConversion<'a> {
                     done.warnings
                         .push(format!("{class}: not carried, {choice} are off"));
                 }
+                // An OLE2FRAME's preview (#1705): the notes of its row, and its cells and text when
+                // the texts or fills choice lets them in.
+                let ole_here = (class_name == "OLE2FRAME"
+                    && !frozen_here
+                    && matches!(item, Item::Leaf(_))
+                    && matches!(raw.geometry, RawGeometry::Unmapped { .. }))
+                .then(|| ole_drawn.get(&leaf_key_of(&raw.provenance)))
+                .flatten();
+                let ole_wanted = |r: &Annotation| match r {
+                    Annotation::Text { .. } => *want_texts,
+                    _ => *want_fills,
+                };
+                let ole_runs = annotate && ole_here.is_some_and(|d| d.runs.iter().any(ole_wanted));
                 if annotate
                     && !frozen_here
                     && let Item::Leaf(f) = item
                     && matches!(raw.geometry, RawGeometry::Unmapped { .. })
-                    && ((text_class && *want_texts) || (fill_class && *want_fills))
+                    && (ole_runs || (text_class && *want_texts) || (fill_class && *want_fills))
                 {
                     let class = raw.provenance.class_name.as_str();
-                    let made = raw
-                        .provenance
-                        .handle
-                        .and_then(|h| match raw.provenance.block_path.steps().last() {
-                            Some(via) if class == "ATTDEF" => {
-                                provider.inserted_attribute(h, via.insert_handle)
+                    let keep = |p: [f64; 2]| {
+                        clip_box.is_none_or(|b| {
+                            p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
+                        }) && ring.is_none_or(|r| {
+                            // Even-odd crossing count over the viewport's polygon.
+                            let mut inside = false;
+                            for (i, a) in r.iter().enumerate() {
+                                let b = &r[(i + 1) % r.len()];
+                                if (a[1] > p[1]) != (b[1] > p[1])
+                                    && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]
+                                {
+                                    inside = !inside;
+                                }
                             }
-                            _ => provider.annotation(h),
+                            inside
                         })
-                        .ok_or("it draws nothing the provider can report")
-                        .and_then(|a| {
-                            annotation::map(
-                                f,
-                                a,
-                                &|p| {
-                                    clip_box.is_none_or(|b| {
-                                        p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3]
-                                    }) && ring.is_none_or(|r| {
-                                        // Even-odd crossing count over the viewport's polygon.
-                                        let mut inside = false;
-                                        for (i, a) in r.iter().enumerate() {
-                                            let b = &r[(i + 1) % r.len()];
-                                            if (a[1] > p[1]) != (b[1] > p[1])
-                                                && p[0]
-                                                    < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1])
-                                                        + a[0]
-                                            {
-                                                inside = !inside;
-                                            }
-                                        }
-                                        inside
-                                    })
-                                },
-                                if ring.is_none() { clip_box } else { None },
-                            )
-                        });
+                    };
+                    let cut_to = if ring.is_none() { clip_box } else { None };
+                    let made = match ole_here {
+                        Some(d) if ole_runs => annotation::map_runs(
+                            f,
+                            d.runs.iter().filter(|r| ole_wanted(r)).cloned().collect(),
+                            &keep,
+                            cut_to,
+                        ),
+                        _ => raw
+                            .provenance
+                            .handle
+                            .and_then(|h| match raw.provenance.block_path.steps().last() {
+                                Some(via) if class == "ATTDEF" => {
+                                    provider.inserted_attribute(h, via.insert_handle)
+                                }
+                                _ => provider.annotation(h),
+                            })
+                            .ok_or("it draws nothing the provider can report")
+                            .and_then(|a| annotation::map(f, a, &keep, cut_to)),
+                    };
                     let made_clipped = matches!(made, Err(annotation::CLIPPED));
                     let carried = match made {
                         Ok((carriers, body)) => carriers
@@ -2790,6 +2818,48 @@ impl<'a> PvecConversion<'a> {
                         Err(why) => done
                             .warnings
                             .push(format!("IMAGE: not drawn, {why} ({named})")),
+                    }
+                }
+                // What became of an OLE2FRAME's preview goes on its row, whether the leaf stayed or a
+                // carrier took its place; a raster or DIB preview is placed like an IMAGE, behind the
+                // same limits (#1705).
+                if let Some(d) = ole_here {
+                    done.warnings.extend(d.notes.iter().cloned());
+                    if !d.runs.is_empty() && !ole_runs {
+                        done.warnings.push(
+                            "OLE2FRAME: its cells and text are not carried, texts and fills are off"
+                                .to_owned(),
+                        );
+                    }
+                }
+                if let (Some(d), Item::Leaf(f)) = (ole_here, item)
+                    && let Some((frame, bytes, dib)) = &d.picture
+                {
+                    let left = dwg_image::MAX_TOTAL_PIXELS.saturating_sub(placed_pixels);
+                    let placed = if rasters.len() >= dwg_image::MAX_IMAGES {
+                        Err(format!(
+                            "the conversion already placed {} images",
+                            dwg_image::MAX_IMAGES
+                        ))
+                    } else {
+                        ole_preview::place(
+                            frame,
+                            bytes,
+                            *dib,
+                            |p| f.map_point(p),
+                            clip_box,
+                            ring.map(Vec::as_slice),
+                            left,
+                        )
+                    };
+                    match placed {
+                        Ok(pyramid) => {
+                            placed_pixels += u64::from(pyramid.width) * u64::from(pyramid.height);
+                            rasters.push(pyramid);
+                            done.warnings
+                                .push("OLE2FRAME: placed as a raster from its preview".to_owned());
+                        }
+                        Err(why) => done.warnings.push(format!("OLE2FRAME: not drawn, {why}")),
                     }
                 }
                 let mut carried_ids: Vec<EntityId> = Vec::new();
@@ -2951,6 +3021,17 @@ impl<'a> PvecConversion<'a> {
                 }
                 match pending {
                     Some(Body::Text(lines)) => texts.extend(carried_ids.into_iter().zip(lines)),
+                    Some(Body::Runs(parts)) => {
+                        let mut ids = carried_ids.into_iter();
+                        for (n, part) in parts {
+                            let mine: Vec<EntityId> = ids.by_ref().take(n).collect();
+                            match part {
+                                Body::Text(lines) => texts.extend(mine.into_iter().zip(lines)),
+                                Body::Fill(f) => fills.push((mine, f)),
+                                Body::Runs(_) => {}
+                            }
+                        }
+                    }
                     Some(Body::Fill(mut f)) => {
                         // The plot style table's colour and screening for the fill's ACI, as a stroke
                         // gets them: a table that plots ACI 9 black plots a fill in ACI 9 black (#1670).
@@ -3965,6 +4046,60 @@ fn line_leaves<P: DwgProvider>(
         );
     }
     (lines, replaced)
+}
+
+/// The leaves an OLE2FRAME's preview draws as lines (#1705), each with the entity's provenance, style
+/// and placement like a leader's, and what is left of each frame's preview (cells, text, a raster and
+/// the notes of its row) by the frame's leaf key. A frame past `ole_preview::MAX_FRAMES` draws nothing
+/// and says so.
+fn ole_leaves<P: DwgProvider>(
+    provider: &P,
+    leaves: &[FlatEntity],
+) -> (Vec<FlatEntity>, BTreeMap<LeafKey, ole_preview::OleDrawn>) {
+    let (mut lines, mut drawn) = (Vec::new(), BTreeMap::new());
+    for f in leaves {
+        if f.entity.provenance.class_name != "OLE2FRAME"
+            || !matches!(f.entity.geometry, RawGeometry::Unmapped { .. })
+        {
+            continue;
+        }
+        let Some(frame) = f
+            .entity
+            .provenance
+            .handle
+            .and_then(|h| provider.ole_frame(h))
+        else {
+            continue;
+        };
+        let mut made = if drawn.len() < ole_preview::MAX_FRAMES {
+            ole_preview::draw(&frame)
+        } else {
+            ole_preview::refused("the conversion already drew its limit of frames")
+        };
+        for points in std::mem::take(&mut made.lines) {
+            lines.push(
+                f.carrying(RawEntity {
+                    geometry: RawGeometry::Polyline {
+                        vertices: points
+                            .iter()
+                            .map(|p| RawVertex {
+                                x: p[0],
+                                y: p[1],
+                                bulge: 0.0,
+                            })
+                            .collect(),
+                        closed: false,
+                        elevation: made.elevation,
+                        normal: [0.0, 0.0, 1.0],
+                    },
+                    provenance: f.entity.provenance.clone(),
+                    style: f.entity.style.clone(),
+                }),
+            );
+        }
+        drawn.insert(flat_key(f), made);
+    }
+    (lines, drawn)
 }
 
 /// A leaf's handle, block path and class, which says which view pass decision is its own.

@@ -490,6 +490,7 @@ fn issue_1705_a_selected_object_that_was_never_made_does_not_panic() {
 // ---- the conversion ----------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_off_by_default_the_frame_is_counted_and_nothing_is_drawn() {
     let out = convert(&table_sheet(), "off", false);
     assert!(
@@ -503,6 +504,7 @@ fn issue_1705_off_by_default_the_frame_is_counted_and_nothing_is_drawn() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_with_previews_on_the_table_is_in_the_artifact() {
     let out = convert(&table_sheet(), "on", true);
     assert!(
@@ -523,6 +525,7 @@ fn issue_1705_with_previews_on_the_table_is_in_the_artifact() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_a_frame_with_no_preview_has_a_row_that_says_so() {
     let bytes = sheet_with(frame(&[("Other", vec![1, 2, 3, 4])]));
     let out = convert(&bytes, "none", true);
@@ -530,6 +533,7 @@ fn issue_1705_a_frame_with_no_preview_has_a_row_that_says_so() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_a_windows_metafile_preview_is_not_played_and_says_so() {
     // A placeable WMF header and one end record: the object's cached picture, not an EMF.
     let mut wmf = 0x9AC6_CDD7u32.to_le_bytes().to_vec();
@@ -543,6 +547,7 @@ fn issue_1705_a_windows_metafile_preview_is_not_played_and_says_so() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_a_hostile_preview_is_a_typed_row_and_the_sheet_still_converts() {
     let mut bad = table();
     bad[88 + 4..88 + 8].copy_from_slice(&0x00FF_FF00u32.to_le_bytes());
@@ -553,6 +558,7 @@ fn issue_1705_a_hostile_preview_is_a_typed_row_and_the_sheet_still_converts() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_a_png_preview_is_placed_like_an_image_at_the_corners() {
     let img = image::RgbaImage::from_fn(4, 2, |x, y| {
         image::Rgba([(60 * x + 30) as u8, (100 * y + 30) as u8, 128, 255])
@@ -572,6 +578,7 @@ fn issue_1705_a_png_preview_is_placed_like_an_image_at_the_corners() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_a_png_over_the_pixel_limit_is_refused_before_it_is_decoded() {
     // A header that declares 100000 by 100000 pixels with no pixels behind it.
     let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13];
@@ -586,6 +593,7 @@ fn issue_1705_a_png_over_the_pixel_limit_is_refused_before_it_is_decoded() {
 // ---- the plot ----------------------------------------------------------------------------
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_a_plot_draws_the_table_at_the_frame_corners() {
     let pdf = plot(&table_sheet(), "plot", true);
     let o = ops(&pdf);
@@ -603,6 +611,7 @@ fn issue_1705_a_plot_draws_the_table_at_the_frame_corners() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_a_plot_shows_the_cell_text_as_text_and_fills_the_cell() {
     let pdf = plot(&table_sheet(), "plottext", true);
     let o = ops(&pdf);
@@ -629,6 +638,7 @@ fn issue_1705_a_plot_shows_the_cell_text_as_text_and_fills_the_cell() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn issue_1705_a_plot_without_the_option_draws_none_of_it() {
     let pdf = plot(&table_sheet(), "plotoff", false);
     let o = ops(&pdf);
