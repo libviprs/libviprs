@@ -71,8 +71,6 @@ const SHEETS: u32 = 3;
 const MODEL: u32 = 60_000;
 /// A window of 28 model units tall: 40 by 28 of a model 1000 wide and 60 tall.
 const SMALL: u32 = 28;
-/// A window that shows the whole model.
-const WHOLE: u32 = 700;
 
 fn dir_for(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("libviprs-1713-{name}-{}", std::process::id()));
@@ -114,13 +112,17 @@ fn limits(bytes: u64) -> SourceLimits {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn issue_1713_a_small_window_holds_less_than_the_whole_model() {
+fn issue_1713_the_peak_follows_the_window_not_the_viewport_count() {
     let _g = measuring();
-    let small = peak_of(&support::drawing(SHEETS, MODEL, SMALL, false, 0), "small");
-    let whole = peak_of(&support::drawing(SHEETS, MODEL, WHOLE, false, 0), "whole");
+    // The last sheet shows the same small window through one viewport or through nine. Taking
+    // every kept leaf per viewport lists the model nine times; taking what the window shows lists
+    // the same few leaves, so the extra viewports cost allocator noise.
+    let one = peak_of(&support::drawing(SHEETS, MODEL, SMALL, false, 0), "one");
+    let nine = peak_of(&support::drawing(SHEETS, MODEL, SMALL, false, 8), "nine");
+    let slack = 3 << 20;
     assert!(
-        small * 2 <= whole,
-        "a window onto 1/25 of the model peaks at {small} bytes against {whole} for all of it"
+        nine <= one + slack,
+        "peak {nine} bytes through nine viewports against {one} through one: follows the model"
     );
 }
 
