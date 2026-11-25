@@ -37,10 +37,43 @@ pub(crate) enum Body {
     Text(Vec<TextBody>),
     /// A hatch record over every carrier.
     Fill(FillBody),
+    /// Several annotations of one entity (an OLE2FRAME's cells and text, #1705): each with how many
+    /// carriers it took, in order.
+    Runs(Vec<(usize, Body)>),
 }
 
 /// Why [`map`] returns nothing for a text with no line inside the clip it was asked to keep to.
 pub(crate) const CLIPPED: &str = "it is outside the sheet or viewport it is drawn through";
+
+/// [`map`] for each of `runs`, whose carriers and records go together under one body (#1705). A run
+/// that maps to nothing (cut away by the clip, or not drawable) is left out; what is left is an error
+/// only when nothing is.
+pub(crate) fn map_runs(
+    leaf: &FlatEntity,
+    runs: Vec<Annotation>,
+    keep: &dyn Fn([f64; 2]) -> bool,
+    clip: Option<[f64; 4]>,
+) -> Result<(Vec<RawEntity>, Body), &'static str> {
+    let (mut carriers, mut bodies, mut clipped) = (Vec::new(), Vec::new(), false);
+    for run in runs {
+        match map(leaf, run, keep, clip) {
+            Ok((c, body)) => {
+                bodies.push((c.len(), body));
+                carriers.extend(c);
+            }
+            Err(CLIPPED) => clipped = true,
+            Err(_) => {}
+        }
+    }
+    if bodies.is_empty() {
+        return Err(if clipped {
+            CLIPPED
+        } else {
+            "none of its cells or text can be drawn"
+        });
+    }
+    Ok((carriers, Body::Runs(bodies)))
+}
 
 /// The hidden entities to write for `annotation`, in block space like every other leaf, and the
 /// stream record that goes with them, or why it cannot be mapped. A text is laid out in its own

@@ -6,7 +6,7 @@ acadrust, I run it over the AutoCAD-authored saves and the upstream MIT samples 
 provider back to the existing decoder with the traits unchanged, and I stop and report instead of
 shipping. This is that run.
 
-Gate 0: PASS, rerun at acadrust `5bf63c7b` (the CTB round trip, libviprs#1634) on the UGREEN NAS, native x86_64, with every Tier A count unchanged (it passed at the 0.6.8 pin before, libviprs#1487). All 22 AutoCAD-authored files open through `AcadrustProvider`, no `OPEN_FAILED` in Tier A.
+Gate 0: PASS, rerun at acadrust `ceccd10e` (the fork's main with the compound-file bounds of acadrust#76, libviprs#1705) on MARS, native x86_64. All 22 AutoCAD-authored files open through `AcadrustProvider` and re-read identically, with the same layers, layouts, blocks and entity counts as at `5bf63c7b`. Only the unmapped counts changed, and they fell: libviprs now follows a DIMENSION into its block (#1658), so those are no longer unmapped.
 
 `OPEN_FAILED` means `AcadrustProvider::open` returned an error, or the process running it died,
 for that file. A reader panic counts, because the provider catches it and reports it as an open
@@ -15,11 +15,11 @@ fails if the two disagree, if a Tier A row is `OPEN_FAILED`, or if a corpus file
 
 ## What I ran
 
-- acadrust: libviprs/acadrust at `5bf63c7b1653fbb5a51f2f8a5a5a3f01a567c094` (acadrust PR #71: `f1e00c11` plus the CTB writer that keeps a file's own text, version 0.6.8), the same
+- acadrust: libviprs/acadrust at `ceccd10e2a875138034664e61af3b8c7ce9408ff` (the fork's main after acadrust#76; it was `5bf63c7b`, acadrust PR #71, before), the same
   full rev `Cargo.toml` pins for the `dwg-acadrust` feature. A test checks the two stay equal.
-- Provider: `AcadrustProvider` at libviprs `c3c3d62d` plus the pin bump (libviprs#1634), release build,
+- Provider: `AcadrustProvider` at libviprs `39b99104` (libviprs#1705), release build,
   through `examples/dwg_gate0.rs`, one process per file so a crash is one row.
-- Host: the UGREEN NAS (HIGARA, MARS was out of disk), native x86_64, `rust:1.99.1-bookworm`, in a container, by `acadrust-gate0/run.sh`.
+- Host: MARS, native x86_64, `viprs-hooks:1.99.1` (rust 1.99.1), in a container, the same build and loop as `acadrust-gate0/run.sh` through `dh.sh`.
 - Corpus: ACadSharp `samples/` at `d7dc111023477d8a9fffc2153139459c95b4f345` (MIT). Tier A is the
   AutoCAD-authored set and decides. Tier B is the 50 `g11_*`/`g13_*` regression files
   already in `tests/fixtures/cad/g13` (ACadSharp `DwgWriter`), and Tier S the two spike fixtures
@@ -45,23 +45,23 @@ fails if the two disagree, if a Tier A row is `OPEN_FAILED`, or if a corpus file
 | BLOCKVISIBILITYPARAMETER.dwg | AC1032 | OPEN_OK | 1 | 3 | 16 | 4 | 65 | 0 |
 | BLOCKXYPARAMETER.dwg | AC1032 | OPEN_OK | 1 | 3 | 7 | 2 | 25 | 0 |
 | empty.dwg | AC1032 | OPEN_OK | 1 | 3 | 3 | 0 | 0 | 0 |
-| export_sample.dwg | AC1032 | OPEN_OK | 4 | 9 | 32 | 22 | 455 | 173 |
+| export_sample.dwg | AC1032 | OPEN_OK | 4 | 9 | 32 | 22 | 455 | 164 |
 | geoloc.dwg | AC1032 | OPEN_OK | 1 | 3 | 3 | 0 | 0 | 0 |
-| sample_AC1014.dwg | AC1014 | OPEN_OK | 21 | 4 | 27 | 163 | 341 | 187 |
-| sample_AC1015.dwg | AC1015 | OPEN_OK | 21 | 4 | 27 | 163 | 341 | 187 |
-| sample_AC1018.dwg | AC1018 | OPEN_OK | 21 | 4 | 27 | 163 | 341 | 187 |
-| sample_AC1021.dwg | AC1021 | OPEN_OK | 21 | 4 | 27 | 163 | 341 | 187 |
-| sample_AC1024.dwg | AC1024 | OPEN_OK | 19 | 4 | 27 | 163 | 341 | 187 |
-| sample_AC1027.dwg | AC1027 | OPEN_OK | 19 | 4 | 27 | 163 | 341 | 188 |
-| sample_AC1032.dwg | AC1032 | OPEN_OK | 19 | 4 | 27 | 163 | 341 | 188 |
-| sample_base.dwg | AC1032 | OPEN_OK | 19 | 4 | 27 | 163 | 341 | 188 |
+| sample_AC1014.dwg | AC1014 | OPEN_OK | 21 | 4 | 27 | 163 | 341 | 176 |
+| sample_AC1015.dwg | AC1015 | OPEN_OK | 21 | 4 | 27 | 163 | 341 | 176 |
+| sample_AC1018.dwg | AC1018 | OPEN_OK | 21 | 4 | 27 | 163 | 341 | 176 |
+| sample_AC1021.dwg | AC1021 | OPEN_OK | 21 | 4 | 27 | 163 | 341 | 176 |
+| sample_AC1024.dwg | AC1024 | OPEN_OK | 19 | 4 | 27 | 163 | 341 | 176 |
+| sample_AC1027.dwg | AC1027 | OPEN_OK | 19 | 4 | 27 | 163 | 341 | 177 |
+| sample_AC1032.dwg | AC1032 | OPEN_OK | 19 | 4 | 27 | 163 | 341 | 177 |
+| sample_base.dwg | AC1032 | OPEN_OK | 19 | 4 | 27 | 163 | 341 | 177 |
 
 The plan says Tier A is 23 files with eleven dynamic-block drawings. At that commit upstream has
 ten `BLOCK*.dwg` (22 files in all), so I ran what is there and did not go looking for a missing one...
 
 Cross-version invariance, the plan's best oracle: the seven saves are one drawing saved by
 AutoCAD at seven versions, and the provider gives 163 model-space entities and 341 in all scopes
-for every one of them. The unmapped count is 187 up to AC1024 and 188 for AC1027 and AC1032, and
+for every one of them. The unmapped count is 176 up to AC1024 and 177 for AC1027 and AC1032, and
 the one extra is a SPLINE, see Findings.
 
 ## AutoCAD's own statement of the counts
@@ -106,7 +106,7 @@ Tier S: 2 of 2 open. Rows are in the TSV.
 - **`geoloc.dwg` yields no entities at all** (0 in model space, 0 in every scope). I have no second
   reading of that file, so I cannot say whether it is empty or the reader loses its contents. The
   plan names it for georeferencing, which is not entity data.
-- **Many classes are not mapped yet.** Of 341 entities in the AC1032 save, 188 are `Unmapped`
+- **Many classes are not mapped yet.** Of 341 entities in the AC1032 save, 177 are `Unmapped`
   (POINT, MTEXT, TEXT, MULTILEADER, SOLID, HATCH, dimensions, and others, listed per file in the TSV).
   That is the extraction work of N4.2 to N4.9 and not a Gate 0 criterion.
 

@@ -52,6 +52,7 @@ pub mod dump;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod dwg_basic;
+pub mod emf;
 pub mod fidelity;
 pub mod fill_policy;
 #[cfg(feature = "pvec-normalized")]
@@ -159,9 +160,9 @@ pub use provider::{
     Annotation, ArrayGrid, Availability, BlockRef, DwgProvider, EntityCursor, EntityFacts,
     EntityScope, EntityStyle, Facet, FacetCap, FacetSource, ImageFrame, InstancePath, InstanceStep,
     LayerState, LayerStateMask, LayoutId, LayoutKind, LayoutPlot, LayoutState, NamedLayerState,
-    PatternLine, Point3, ProvenanceStub, ProviderCaps, ProviderError, RawEntity, RawGeometry,
-    RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight, SourceTransform,
-    TextAnchorV, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
+    OleFrame, OlePreview, PatternLine, Point3, ProvenanceStub, ProviderCaps, ProviderError,
+    RawEntity, RawGeometry, RawVertex, SourceColour, SourceFact, SourceLinetype, SourceLineweight,
+    SourceTransform, TextAnchorV, TextStyleRef, ViewportClip, ViewportEntity, XrefAttachment,
 };
 pub use text_policy::{
     DwgTextCounts, PdfTextOperatorCounts, TextFontOutcome, TextReport, shx_outcome,

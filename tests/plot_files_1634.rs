@@ -149,7 +149,13 @@ fn ctb_announced_length_over_cap_is_refused_before_inflating() {
     let error = PlotStyleTable::from_bytes("x.ctb", &file)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("announces"), "{error}");
+    // The fork's reader (since the pin of #1705) inflates a damaged stream under a hard output budget
+    // and then says it is incomplete, where it used to refuse on the header alone. Either way the
+    // table is refused and nothing past the budget is allocated.
+    assert!(
+        error.contains("announces") || error.contains("incomplete"),
+        "{error}"
+    );
 }
 
 #[test]

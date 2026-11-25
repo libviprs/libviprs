@@ -811,6 +811,34 @@ pub struct ImageFrame {
     pub clip_inverted: bool,
 }
 
+/// What an `OLE2FRAME` carries to draw (#1705): the two corners of the frame and the picture the
+/// application cached for display. A linked object has its cached picture and nothing else: the
+/// linked file is never opened.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct OleFrame {
+    /// The upper-left corner of the frame, in the coordinates of the block the entity is in.
+    pub upper_left: Point3,
+    /// The lower-right corner.
+    pub lower_right: Point3,
+    /// The cached picture, or `None` when the object stores none.
+    pub preview: Option<OlePreview>,
+}
+
+/// The cached picture of an `OLE2FRAME`, tagged with how its bytes are read.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub enum OlePreview {
+    /// An enhanced metafile record stream.
+    Emf(Vec<u8>),
+    /// A whole raster file: PNG, JPEG, GIF or BMP.
+    Raster(Vec<u8>),
+    /// A DIB without a file header (a `BITMAPINFO` and the bits).
+    Dib(Vec<u8>),
+    /// A Windows metafile.
+    Wmf(Vec<u8>),
+}
+
 /// What a text-like or fill-like entity draws, in the coordinates of the block it sits in, for the
 /// text and hatch component streams (#1609). A provider that cannot report one says nothing.
 ///
@@ -1525,6 +1553,15 @@ pub trait DwgProvider {
     /// in, or `None` for any other entity (#1667). The conversion places the image from it when
     /// the caller said where the image files are. The default has none.
     fn image_frame(&self, handle: ItemHandle) -> Option<ImageFrame> {
+        let _ = handle;
+        None
+    }
+
+    /// The frame and cached picture of the `OLE2FRAME` entity with this handle, or `None` for any
+    /// other entity (#1705). The conversion draws the picture when the caller asked for it
+    /// (`PvecConversion::ole_previews`). The
+    /// default has none.
+    fn ole_frame(&self, handle: ItemHandle) -> Option<OleFrame> {
         let _ = handle;
         None
     }

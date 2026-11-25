@@ -63,6 +63,19 @@ pub(super) fn place(
         return Err("its display is switched off".to_owned());
     }
     let picture = read(dir, &frame.file_name, max_pixels.min(MAX_PIXELS))?;
+    place_picture(frame, picture, map, clip_box, ring)
+}
+
+/// The pyramid of `picture` placed by `frame`'s corners, clip and the leaf's `map`, as [`place`]
+/// does for a file. An OLE2FRAME's raster preview comes this way too (#1705), with a frame made from
+/// its corners.
+pub(super) fn place_picture(
+    frame: &ImageFrame,
+    picture: DynamicImage,
+    map: impl Fn(Point3) -> [f64; 2],
+    clip_box: Option<[f64; 4]>,
+    ring: Option<&[[f64; 2]]>,
+) -> Result<RasterPyramid, String> {
     let (w, h) = (picture.width(), picture.height());
     let (wf, hf) = (f64::from(w), f64::from(h));
 
@@ -213,6 +226,12 @@ fn read(dir: &Path, path: &str, max_pixels: u64) -> Result<DynamicImage, String>
         ));
     }
     let bytes = fs::read(&file).map_err(|e| format!("{name}: {e}"))?;
+    decode(bytes, name, max_pixels)
+}
+
+/// The picture in `bytes`, whose header size is checked against `max_pixels` before a pixel is
+/// allocated. `name` is what a refusal calls it.
+pub(super) fn decode(bytes: Vec<u8>, name: &str, max_pixels: u64) -> Result<DynamicImage, String> {
     let mut decoder = ImageReader::new(Cursor::new(bytes))
         .with_guessed_format()
         .map_err(|e| format!("{name}: {e}"))?
