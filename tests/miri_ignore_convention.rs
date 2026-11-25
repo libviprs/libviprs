@@ -940,7 +940,8 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1718 adds 16: the `tests/pvec_1718_polyline_width.rs` cells that write a drawing with acadrust and convert a plotted sheet into a temp dir. It said 1542 before this line moved.
 /// #1713 adds 9: the `tests/pvec_1713_*.rs` cells that plot a synthetic drawing, a layout set or PMTiles into a temp dir and look at what is on disk. It said 1558 before this line moved.
 /// #1717 adds 6: the `tests/pvec_1717_arc_sides.rs` cells that plot a drawing written in memory (a polyline with arc sides) into a temp dir and read the PDF back.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1573;
+/// #1706 adds 7: the seven `tests/pvec_1706_repeated_vertex.rs` cells that write a drawing with acadrust and plot it into a temp dir (five for #1706, two long-polyline cells for #1720). It said 1573 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1580;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
