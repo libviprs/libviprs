@@ -34,7 +34,7 @@ pub(crate) fn plan(vertices: &[RawVertex], closed: bool, widths: &[[f64; 2]]) ->
         // The angle one flattened piece of an arc turns through, at most.
         const ARC_STEP: f64 = std::f64::consts::PI / 24.0;
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-        let chord = dx.hypot(dy);
+        let chord = pvec_numeric::detmath::hypot(dx, dy);
         if !(chord.is_finite() && chord > 0.0) {
             return Vec::new();
         }
@@ -51,7 +51,7 @@ pub(crate) fn plan(vertices: &[RawVertex], closed: bool, widths: &[[f64; 2]]) ->
             (a[1] + b[1]) / 2.0 + left[1] * offset,
         ];
         let (rx, ry) = (a[0] - centre[0], a[1] - centre[1]);
-        let radius = rx.hypot(ry);
+        let radius = pvec_numeric::detmath::hypot(rx, ry);
         let pieces = ((angle.abs() / ARC_STEP).ceil() as usize).clamp(1, 96);
         (0..=pieces)
             .map(|j| {

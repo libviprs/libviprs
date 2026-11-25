@@ -326,6 +326,10 @@ pub struct PvecConversion<'a> {
     images: Option<PathBuf>,
     /// Whether an OLE2FRAME is drawn from its cached preview (#1705).
     ole_previews: bool,
+    /// A polyline with arc sides is written one record per side (#1717), for a caller (the PDF
+    /// plot) that draws the sides and has no use for the polyline as one composite curve, which
+    /// PVec's writer refuses (`WRT-08`). Off, a conversion keeps the stored geometry strict.
+    arc_sides: bool,
 }
 
 /// What a paper sheet plots (issue #1628, spec section 6 of the CAD import): the choices a caller
@@ -446,6 +450,7 @@ impl<'a> PvecConversion<'a> {
             xref_note: Arc::default(),
             images: None,
             ole_previews: false,
+            arc_sides: false,
         }
     }
 
@@ -894,6 +899,7 @@ impl<'a> PvecConversion<'a> {
             plot_settings,
             images,
             ole_previews,
+            arc_sides,
             ..
         } = self;
         let observer = observer.as_deref();
@@ -2576,21 +2582,35 @@ impl<'a> PvecConversion<'a> {
                 // at an edge is. Only a polyline that has a pattern is split. A solid one, or one
                 // with PLINEGEN on, stays whole, and the flag is the entity's own: the header's
                 // PLINEGEN only seeds the polylines drawn after it.
-                if components.line_style
-                    && !frozen_here
+                //
+                // A polyline with an arc side is a composite, which PVec's writer refuses (WRT-08). A
+                // plot writes it one record per side whatever its style and PLINEGEN (#1717). With
+                // PLINEGEN on and a pattern, the pattern then starts anew on each side: a polyline
+                // drawn with a small break at its vertices beats one dropped.
+                let split_arcs = *arc_sides
+                    && std::iter::once(&done).chain(more.iter()).any(|d| {
+                        matches!(
+                            d.geometry.geometry(),
+                            Some(Curve::Composite(c))
+                                if c.segments().iter().any(|s| !matches!(s, Curve::Polyline(_)))
+                        )
+                    });
+                if !frozen_here
                     && matches!(raw.geometry, RawGeometry::Polyline { .. })
                     && matches!(
                         raw.provenance.class_name.as_str(),
                         "LWPOLYLINE" | "POLYLINE"
                     )
-                    && (table.is_some()
-                        || dwg_style_input(&raw.style, true)
-                            .linetype_elements
-                            .is_some())
-                    && raw
-                        .provenance
-                        .handle
-                        .is_some_and(|h| !provider.polyline_linetype_generation(h))
+                    && (split_arcs
+                        || (components.line_style
+                            && (table.is_some()
+                                || dwg_style_input(&raw.style, true)
+                                    .linetype_elements
+                                    .is_some())
+                            && raw
+                                .provenance
+                                .handle
+                                .is_some_and(|h| !provider.polyline_linetype_generation(h))))
                 {
                     // Each side of an uncut polyline also has its pattern centred (#1699). The pattern as it
                     // is drawn, every element in the output's unit and on the alternating slots a dash
@@ -2707,7 +2727,14 @@ impl<'a> PvecConversion<'a> {
                             .map(|c| Normalized2DGeometry::from_curve(c, fidelity))
                             .collect();
                         match built {
-                            Ok(parts) if parts.len() > 1 => {
+                            Ok(parts)
+                                if parts.len() > 1
+                                    || (split_arcs
+                                        && matches!(
+                                            d.geometry.geometry(),
+                                            Some(Curve::Composite(_))
+                                        )) =>
+                            {
                                 for (k, part) in parts.into_iter().enumerate() {
                                     match gated(part, &raw.provenance, gate) {
                                         Ok(mut piece) => {
@@ -4589,9 +4616,63 @@ fn classify_leaf(
         }
         _ => None,
     };
-    let basic = match dwg_basic::extract(flattened.as_ref().unwrap_or(&f.entity)) {
+    // A plotter draws a polyline through its points and skips a side with no length, so for a plot
+    // the repeats go in one pass and the rest is drawn (#1706). The stored geometry stays strict:
+    // only a plan's conversion repairs.
+    let subject = flattened.as_ref().unwrap_or(&f.entity);
+    let mut skipped = 0usize;
+    let basic = match dwg_basic::extract(subject) {
         Ok(b) => b,
         Err(BasicError::NotBasic) => return classify_spline_leaf(f, gate, viewport),
+        Err(BasicError::CoincidentVertices { index }) if gate.project_plan => {
+            let refused = |e: BasicError| {
+                Ok(without_geometry(
+                    e.classification(class),
+                    vec![e.warning(class)],
+                ))
+            };
+            let RawGeometry::Polyline {
+                vertices, closed, ..
+            } = &subject.geometry
+            else {
+                return refused(BasicError::CoincidentVertices { index });
+            };
+            // PVec's own rule says which two points are one point. A vertex that repeats the one
+            // before it replaces it, so the side that starts at the survivor keeps its own bulge.
+            let same = |a: &RawVertex, b: &RawVertex| match (
+                Point2::checked(a.x, a.y),
+                Point2::checked(b.x, b.y),
+            ) {
+                (Ok(p), Ok(q)) => Polyline::new(vec![p, q]).is_err(),
+                _ => false,
+            };
+            let mut kept: Vec<RawVertex> = Vec::with_capacity(vertices.len());
+            for v in vertices {
+                match kept.last_mut() {
+                    Some(last) if same(last, v) => {
+                        *last = *v;
+                        skipped += 1;
+                    }
+                    _ => kept.push(*v),
+                }
+            }
+            // A closed polyline whose last point is its first has a closing side of no length.
+            if *closed && kept.len() > 2 && same(&kept[kept.len() - 1], &kept[0]) {
+                kept.pop();
+                skipped += 1;
+            }
+            if kept.len() < 2 {
+                return refused(BasicError::CoincidentVertices { index });
+            }
+            let mut next = subject.clone();
+            if let RawGeometry::Polyline { vertices, .. } = &mut next.geometry {
+                *vertices = kept;
+            }
+            match dwg_basic::extract(&next) {
+                Ok(b) => b,
+                Err(e) => return refused(e),
+            }
+        }
         Err(e) => {
             return Ok(without_geometry(
                 e.classification(class),
@@ -4616,6 +4697,11 @@ fn classify_leaf(
         }
     };
     let mut done = promote_leaf(f, record, gate, viewport)?;
+    if skipped > 0 && done.geometry.geometry().is_some() {
+        done.warnings.push(format!(
+            "{class}: {skipped} repeated vertices skipped, as a plotter does"
+        ));
+    }
     if f.edge_on() && done.geometry.geometry().is_some() {
         done.warnings.push(format!(
             "{class}: in a block in a vertical plane, seen edge on and drawn as the segment it covers"

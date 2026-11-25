@@ -362,6 +362,7 @@ impl<'a> PdfPlot<'a> {
                 conversion = conversion.observer(o.clone());
             }
             conversion.empty_sheet_ok = true;
+            conversion.arc_sides = true;
             // Nothing reads the per entity report of a plot sheet, so none is built or kept.
             conversion.plot_mode = true;
             conversion.model_cache = Some(model_cache.clone());
