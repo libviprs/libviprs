@@ -1221,6 +1221,30 @@ impl DwgProvider for AcadrustProvider {
         }
     }
 
+    fn polyline_widths(&self, handle: ItemHandle) -> Option<Vec<[f64; 2]>> {
+        // A vertex that gives no width of its own has the entity's.
+        let pair = |own: [f64; 2], entity: [f64; 2]| if own == [0.0, 0.0] { entity } else { own };
+        let widths: Vec<[f64; 2]> = match self.doc.get_entity(acr::Handle::new(handle.get()))? {
+            EntityType::LwPolyline(p) => p
+                .vertices
+                .iter()
+                .map(|v| {
+                    pair(
+                        [v.start_width, v.end_width],
+                        [p.constant_width, p.constant_width],
+                    )
+                })
+                .collect(),
+            EntityType::Polyline2D(p) => p
+                .vertices
+                .iter()
+                .map(|v| pair([v.start_width, v.end_width], [p.start_width, p.end_width]))
+                .collect(),
+            _ => return None,
+        };
+        widths.iter().any(|w| *w != [0.0, 0.0]).then_some(widths)
+    }
+
     fn xref_blocks(&self) -> Result<Vec<XrefAttachment>, ProviderError> {
         Ok(self
             .doc

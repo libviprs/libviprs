@@ -1447,6 +1447,15 @@ pub trait DwgProvider {
         true
     }
 
+    /// The start and end width of each vertex of the polyline `handle`, in the polyline's own
+    /// units and the vertices' order, with the entity's constant or default width filled in
+    /// where a vertex gives none (#1718). A vertex's pair is the width of the side that leaves
+    /// it. `None` when the polyline has no width, so a provider that does not read widths
+    /// changes nothing.
+    fn polyline_widths(&self, _handle: ItemHandle) -> Option<Vec<[f64; 2]>> {
+        None
+    }
+
     /// The drawing's external-reference block records, in the block table's order.
     ///
     /// The default says the provider cannot report them.

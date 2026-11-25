@@ -125,6 +125,7 @@ use crate::pvec::flatten::{
 };
 use crate::pvec::mapping::{kind_of, row_for};
 use crate::pvec::ordering::key_cmp;
+use crate::pvec::polyline_width::{self, Widths};
 use crate::pvec::provenance::NoProvenance;
 use crate::pvec::publish::{PublishError, StreamedPublishError, publish_streamed_with};
 use crate::pvec::regions::{
@@ -135,7 +136,9 @@ use crate::pvec::report::{
     ReportBuilder, ReportError, SheetPlotSummary, SheetSummary, SheetViewport, UnresolvedXrefRow,
     ViewSummary, XrefSummary,
 };
-use crate::pvec::style::{DwgLineweight, LineStyleComponent, dwg_line_style, dwg_style_input};
+use crate::pvec::style::{
+    DwgLineweight, LineStyleComponent, StrokeWidth, dwg_line_style, dwg_style_input,
+};
 use crate::pvec::transform::{ComposedTransform, promote};
 use crate::pvec::writer::{
     CapabilityId, LeafConfig, OpenArtifact, SpillConfig, WriteConfig, WriteError, metres_per_unit,
@@ -1954,9 +1957,54 @@ impl<'a> PvecConversion<'a> {
                 let window = via[at].1;
                 // A model leaf drawn through a viewport gets the viewport's map composed onto its
                 // own here, the moment it is classified (#1563).
+                // A polyline with a width (#1718): one width is a stroke of that width, and a width
+                // that changes along it is the outline of the polygon it covers, drawn in its place.
+                let widths = match &items[at] {
+                    Item::Leaf(f)
+                        if matches!(
+                            f.entity.provenance.class_name.as_str(),
+                            "LWPOLYLINE" | "POLYLINE"
+                        ) =>
+                    {
+                        match (&f.entity.geometry, f.entity.provenance.handle) {
+                            (
+                                RawGeometry::Polyline {
+                                    vertices, closed, ..
+                                },
+                                Some(h),
+                            ) => provider
+                                .polyline_widths(h)
+                                .and_then(|w| polyline_width::plan(vertices, *closed, &w)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                let outlined_leaf;
+                let outlined;
+                let base: &Item<'_> = match (&widths, &items[at]) {
+                    (Some(Widths::Outline(ring)), Item::Leaf(f)) => {
+                        let mut leaf = (*f).clone();
+                        if let RawGeometry::Polyline {
+                            elevation, normal, ..
+                        } = leaf.entity.geometry
+                        {
+                            leaf.entity.geometry = RawGeometry::Polyline {
+                                vertices: ring.clone(),
+                                closed: true,
+                                elevation,
+                                normal,
+                            };
+                        }
+                        outlined_leaf = leaf;
+                        outlined = Item::Leaf(&outlined_leaf);
+                        &outlined
+                    }
+                    (_, item) => item,
+                };
                 let lifted_leaf;
                 let lifted;
-                let item: &Item<'_> = match (window.map(|k| &windows[k].1), &items[at]) {
+                let item: &Item<'_> = match (window.map(|k| &windows[k].1), base) {
                     (Some(Window::Drawn { map, .. }), Item::Leaf(f)) => {
                         lifted_leaf = f.through(*map);
                         lifted = Item::Leaf(&lifted_leaf);
@@ -1967,7 +2015,16 @@ impl<'a> PvecConversion<'a> {
                         lifted = Item::Leaf(&lifted_leaf);
                         &lifted
                     }
-                    _ => &items[at],
+                    _ => base,
+                };
+                // A stroke's width is in the polyline's units, so it takes the map the leaf is drawn
+                // through: its block's scale, the plot scale and the viewport's (#1718).
+                let stroke_width = match (&widths, item) {
+                    (Some(Widths::Stroke(w)), Item::Leaf(f)) => {
+                        let [a, b, c, d, ..] = f.matrix();
+                        Some(w * (a * d - b * c).abs().sqrt()).filter(|w| w.is_finite() && *w > 0.0)
+                    }
+                    _ => None,
                 };
                 // A leaf is classified where it sits; an excluded or skipped one has no entity of
                 // its own, so its stand-in is made for the moment it is classified.
@@ -2914,7 +2971,12 @@ impl<'a> PvecConversion<'a> {
                             if drop_widths {
                                 input.lineweight = None;
                             }
-                            let c = dwg_line_style(id, &input).ok();
+                            let mut c = dwg_line_style(id, &input).ok();
+                            // A polyline's width is geometry: it plots whether or not the layout
+                            // prints lineweights, and beats the lineweight the style would give.
+                            if let (Some(c), Some(w)) = (c.as_mut(), stroke_width) {
+                                c.width = Some(StrokeWidth::Width(w));
+                            }
                             let bad = c.is_none();
                             (c, bad, input.colour_index.is_some())
                         } else {
