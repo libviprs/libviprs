@@ -1801,6 +1801,12 @@ annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stored_file_o
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_the_directory_is_private_and_so_are_the_files
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_a_stale_scratch_file_does_not_stop_a_store_and_is_left_alone
 annotated   fs-detected  tests/plot_defaults_1670.rs::issue_1670_threads_storing_the_same_default_all_succeed_and_leave_no_scratch
+annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_closed_triangle_with_one_bulged_side_plots_the_arc_and_both_straight_sides
+annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_bulge_of_zero_stays_a_straight_polyline
+annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_an_open_polyline_with_a_half_circle_side_keeps_its_straight_side
+annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_bulged_side_cut_by_the_sheet_edge_keeps_the_straight_side
+annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_patterned_polyline_with_arcs_is_plotted_with_plinegen_on_too
+annotated   fs-detected  tests/pvec_1717_arc_sides.rs::issue_1717_a_sheet_with_a_line_and_a_polyline_with_arcs_draws_both
 annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_clean_check_is_reported_as_checked
 annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_failed_check_carries_qpdfs_own_words
 annotated   fs-detected  tests/pvec_1715_qpdf_check.rs::issue_1715_a_missing_qpdf_skips_instead_of_failing
