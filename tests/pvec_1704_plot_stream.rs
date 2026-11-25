@@ -269,7 +269,7 @@ fn issue_1704_every_xref_offset_lands_on_its_object() {
     let mut at_line = start + 5 + head.len() + 1;
     assert_eq!(line(at_line), "0000000000 65535 f ");
     for n in 1..size {
-        at_line += 21;
+        at_line += 20;
         let entry = line(at_line);
         assert_eq!(entry.len(), 19, "{entry:?}");
         assert!(entry.ends_with(" 00000 n "), "{entry:?}");
