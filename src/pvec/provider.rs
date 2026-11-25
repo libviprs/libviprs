@@ -346,7 +346,7 @@ pub struct LayoutPlot {
 /// The three arms are the whole point: [`Absent`](Self::Absent) is a fact about the
 /// drawing, [`NotReportable`](Self::NotReportable) is a fact about the provider, and
 /// they lead to different outcomes downstream.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub enum SourceFact<T> {
     /// The drawing has it and here it is.

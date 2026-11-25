@@ -241,7 +241,7 @@ fn issue_1726_a_budget_that_fits_the_drawing_but_not_the_model_refuses_while_rea
     assert_eq!(e.code(), "LIMIT_ALLOCATION_BYTES", "{e}");
     assert!(
         peak <= budget,
-        "the process held {peak} bytes before it refused a budget of {budget}"
+        "the process held {peak} bytes before it refused a budget of {budget}: {e}"
     );
     let _ = std::fs::remove_dir_all(dir);
 }

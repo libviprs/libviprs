@@ -22,7 +22,9 @@ use pvec_geometry::{Curve2d, Side};
 use std::collections::BTreeMap;
 use std::io::{self, Write};
 
-use super::{MODEL_LEAF_BYTES, ModelPass, PlotSettings, PvecConversion, PvecConvertError};
+use super::{
+    ModelPass, OPENED_BYTES_PER_SOURCE_BYTE, PlotSettings, PvecConversion, PvecConvertError,
+};
 use crate::CancelToken;
 use crate::cad::CadSource;
 use crate::observe::{EngineEvent, EngineObserver};
@@ -241,6 +243,25 @@ impl<'a> PdfPlot<'a> {
         if cancel.is_cancelled() {
             return Err(stopped());
         }
+        // The drawing is charged before it is opened: what it holds once opened is a multiple of its
+        // size, and that is known from the file or the bytes alone (#1726).
+        let ceiling = self
+            .limits
+            .unwrap_or(self.profile.limits)
+            .max_allocation_bytes;
+        let opened = match self.source {
+            CadSource::Path(p) => fs::metadata(p).map_or(0, |m| m.len()),
+            CadSource::Bytes(b) => b.len() as u64,
+        }
+        .saturating_mul(OPENED_BYTES_PER_SOURCE_BYTE);
+        if opened > ceiling {
+            return Err(PvecConvertError::AllocationBudget {
+                stage: "drawing",
+                layout: String::new(),
+                observed: opened,
+                ceiling,
+            });
+        }
         let provider = P::open(self.source).map_err(PvecConvertError::Open)?;
         let unit = self
             .unit
@@ -321,10 +342,6 @@ impl<'a> PdfPlot<'a> {
         let mut out = PdfOut::new(&temp.pdf, self.embedded_font).map_err(io)?;
         // The model walked once for the plot, and kept for the sheets that read it the same way.
         let model_cache: Arc<Mutex<Option<Arc<ModelPass>>>> = Arc::new(Mutex::new(None));
-        let ceiling = self
-            .limits
-            .unwrap_or(self.profile.limits)
-            .max_allocation_bytes;
         let mut kids: Vec<u32> = Vec::new();
         let mut notes: Vec<String> = Vec::new();
         for (n, name) in wanted.iter().enumerate() {
@@ -357,6 +374,7 @@ impl<'a> PdfPlot<'a> {
             conversion.plot_mode = true;
             conversion.monochrome = self.table.is_none();
             conversion.model_cache = Some(model_cache.clone());
+            conversion.carried = opened;
             if let Some(dir) = &self.images {
                 conversion = conversion.images(dir.clone());
             }
@@ -393,7 +411,7 @@ impl<'a> PdfPlot<'a> {
                             .lock()
                             .unwrap_or_else(|e| e.into_inner())
                             .as_ref()
-                            .map_or(0, |p| p.leaves.saturating_mul(MODEL_LEAF_BYTES)),
+                            .map_or(opened, |p| opened.saturating_add(p.held)),
                         layout: name,
                     };
                     budget.check(

@@ -1828,3 +1828,7 @@ annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_an_id
 annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_a_constant_width_polyline_plots_at_its_own_width
 annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_a_straight_wide_polyline_plots_at_its_own_width
 annotated   fs-detected  tests/pvec_1723_default_width.rs::issue_1723_with_no_table_everything_else_stays_at_the_defaults_quarter_millimetre
+annotated   fs-detected  tests/pvec_1726_plot_budget.rs::issue_1726_a_budget_above_the_real_peak_plots_the_same_bytes
+annotated   fs-detected  tests/pvec_1726_plot_budget.rs::issue_1726_a_budget_below_the_opened_drawing_refuses_before_opening_it
+annotated   fs-detected  tests/pvec_1726_plot_budget.rs::issue_1726_a_budget_below_the_real_peak_refuses_instead_of_plotting
+annotated   fs-detected  tests/pvec_1726_plot_budget.rs::issue_1726_a_budget_that_fits_the_drawing_but_not_the_model_refuses_while_reading_it

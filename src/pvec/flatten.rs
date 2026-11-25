@@ -257,6 +257,23 @@ impl FlatEntity {
 }
 
 impl FlatEntity {
+    /// A leaf put back together from what a compact store kept of it (#1726): it has no lineage, as
+    /// a leaf of a walk that records none does not.
+    #[cfg(feature = "pvec-convert")]
+    #[must_use]
+    pub(crate) const fn assembled(
+        entity: RawEntity,
+        matrix: [f64; 6],
+        edge_on: bool,
+    ) -> FlatEntity {
+        FlatEntity {
+            entity,
+            matrix,
+            lineage: None,
+            edge_on,
+        }
+    }
+
     /// This leaf's map and lineage over another entity: what stands in for it when it is carried by
     /// entities of its own (#1609).
     #[cfg(feature = "pvec-convert")]

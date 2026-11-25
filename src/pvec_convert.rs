@@ -50,7 +50,7 @@
 //!
 //! Needs the `pvec-convert` feature.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use thiserror::Error;
@@ -120,7 +120,7 @@ use crate::pvec::dwg_basic::{self, BasicError};
 use crate::pvec::dwg_spline::{self, SplineError};
 use crate::pvec::fidelity::{Basis, Classification, FidelityReport, ReasonCode, Tally, TallyError};
 use crate::pvec::flatten::{
-    BlockResolver, FlatEntity, FlattenBounds, FlattenError, Flattened, LineageStore, SkipReason,
+    BlockResolver, FlatEntity, FlattenBounds, FlattenError, LineageStore, SkipReason,
     SkippedInsert, UnplacedLeaf,
 };
 use crate::pvec::mapping::{kind_of, row_for};
@@ -146,10 +146,10 @@ use crate::pvec::writer::{
 };
 use crate::pvec::{
     DwgProvider, EntityId, EntityScope, EntityStyle, ExcludedEntity, FidelityClass, LayerStateRule,
-    LayoutKind, Limit, PolicyReason, ProvenanceStub, ProviderError, RawEntity, RawGeometry,
-    RawVertex, SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection, ViewProfile,
-    ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity, ViewportFreezeRule,
-    select_layout,
+    LayoutKind, Limit, LimitError, PolicyReason, ProvenanceStub, ProviderError, RawEntity,
+    RawGeometry, RawVertex, SourceColour, SourceFact, SourceLimits, SourceUnit, SpaceSelection,
+    ViewProfile, ViewProfileError, ViewportClip, ViewportClipping, ViewportEntity,
+    ViewportFreezeRule, select_layout,
 };
 use crate::pvec::{LeafPaint, Normalized2DGeometry, ViewedEntity};
 use crate::sync_queue::bounded;
@@ -241,13 +241,14 @@ pub enum PvecConvertError {
     /// same drawing and the same budget are refused the same way on every machine. Nothing was
     /// published.
     #[error(
-        "the {stage} of layout {layout} needs about {observed} bytes, over the {ceiling} byte allocation limit"
+        "the {stage}{} needs about {observed} bytes, over the {ceiling} byte allocation limit",
+        of_layout(.layout)
     )]
     AllocationBudget {
-        /// The stage that was refused: `model pass`, `viewport leaves`, `artifact read`, `image` or
-        /// `raster`.
+        /// The stage that was refused: `drawing`, `model pass`, `viewport leaves`, `artifact read`,
+        /// `image` or `raster`.
         stage: &'static str,
-        /// The layout being converted.
+        /// The layout being converted, empty for a stage that comes before any (`drawing`).
         layout: String,
         /// What the stage needs, estimated.
         observed: u64,
@@ -261,6 +262,15 @@ pub enum PvecConvertError {
         /// What is wrong with the page.
         reason: &'static str,
     },
+}
+
+/// What a refusal says of the layout it came at, when it came at one.
+fn of_layout(layout: &str) -> String {
+    if layout.is_empty() {
+        String::new()
+    } else {
+        format!(" of layout {layout}")
+    }
 }
 
 /// What a conversion produced.
@@ -320,6 +330,9 @@ pub struct PvecConversion<'a> {
     monochrome: bool,
     /// The model pass a plot keeps between its sheets (#1713).
     model_cache: Option<Arc<Mutex<Option<Arc<ModelPass>>>>>,
+    /// What a plot already holds when this conversion starts, in bytes: the opened drawing (#1726).
+    /// It counts against `max_allocation_bytes` in every stage that is charged.
+    carried: u64,
     #[cfg(feature = "pvec-raster-thumbnail")]
     thumbnail_width: Option<u32>,
     xrefs: Vec<(String, CadSource<'a>)>,
@@ -444,6 +457,7 @@ impl<'a> PvecConversion<'a> {
             empty_sheet_ok: false,
             plot_mode: false,
             monochrome: false,
+            carried: 0,
             model_cache: None,
             #[cfg(feature = "pvec-raster-thumbnail")]
             thumbnail_width: None,
@@ -833,6 +847,7 @@ impl<'a> PvecConversion<'a> {
         view_profile: &ViewProfile,
         model: &crate::pvec::LayoutState,
         source_name: &str,
+        layout: &str,
     ) -> Result<Arc<ModelPass>, PvecConvertError> {
         let mut held = self
             .model_cache
@@ -854,6 +869,8 @@ impl<'a> PvecConversion<'a> {
             view_profile,
             model,
             source_name,
+            self.carried,
+            layout,
         )?);
         if let Some(g) = held.as_mut() {
             **g = Some(built.clone());
@@ -1509,6 +1526,10 @@ impl<'a> PvecConversion<'a> {
             through_profile.space = SpaceSelection::Model;
             through_profile.viewport_clipping = ViewportClipping::Unsupported;
             through_profile.layers.frozen_in_viewport = ViewportFreezeRule::IgnoreAndReport;
+            // The walks are bounded by what the opened drawing leaves of the budget (#1726).
+            // A walk holds up to about twice what its guard charges (vectors grow by doubling, and
+            // an entity holds more than its guard counts), so it is given half of what is left.
+            through_profile.limits.max_allocation_bytes = budget.saturating_sub(self.carried) / 2;
             // A layer hidden for the drawing that one viewport shows again stays in the model
             // walk, and the other viewports freeze it (#1627).
             let rescued: Vec<String> = view_profile
@@ -1521,21 +1542,27 @@ impl<'a> PvecConversion<'a> {
                 .layers
                 .overrides
                 .retain(|(n, _)| !rescued.iter().any(|r| r.eq_ignore_ascii_case(n)));
-            let built =
-                self.model_pass(provider, through_profile, view_profile, model, &source_name)?;
-            over("model pass", built.leaves.saturating_mul(MODEL_LEAF_BYTES))?;
+            let built = self.model_pass(
+                provider,
+                through_profile,
+                view_profile,
+                model,
+                &source_name,
+                &layout.name,
+            )?;
+            over("model pass", self.carried.saturating_add(built.held))?;
             pass = Some(built);
             if drawn
                 .iter()
                 .any(|&k| !windows[k].0.frozen_layers.is_empty())
-                && let Some(mf) = pass.as_ref().map(|p| &p.flat)
+                && let Some(mf) = pass.as_ref()
             {
                 // Each scope an INSERT of some leaf's path sits in is read once: model space, and
                 // each block definition by name, whichever instance reached it first. An INSERT's
                 // handle and layer inside a definition are the same in every instance (#1581).
                 let mut read: BTreeSet<Option<&str>> = BTreeSet::new();
-                for f in &mf.entities {
-                    let steps = f.entity.provenance.block_path.steps();
+                for path in mf.paths() {
+                    let steps = path.steps();
                     let mut via_path = crate::pvec::InstancePath::root();
                     for (i, step) in steps.iter().enumerate() {
                         let container = i.checked_sub(1).map(|j| steps[j].block_name.as_str());
@@ -1566,11 +1593,12 @@ impl<'a> PvecConversion<'a> {
         }
         // What the model pass kept, by leaf: its layer and its colour. They stay in the pass, and the
         // sheet's own maps are asked first.
-        let no_layers: BTreeMap<LeafKey, String> = BTreeMap::new();
-        let no_paints: BTreeMap<LeafKey, LeafPaint> = BTreeMap::new();
-        let model_layers = pass.as_ref().map_or(&no_layers, |p| &p.layers);
-        let model_paints = pass.as_ref().map_or(&no_paints, |p| &p.paints);
-        let paint_of = |k: &LeafKey| paints.get(k).or_else(|| model_paints.get(k));
+        let model_layer = |k: &LeafKey| pass.as_ref().and_then(|p| p.layer_of(k));
+        let paint_of = |k: &LeafKey| {
+            paints
+                .get(k)
+                .or_else(|| pass.as_ref().and_then(|p| p.paint_of(k)))
+        };
         // Where each item draws: the paper itself, or through window k. The rank puts what the
         // viewports show under the sheet's own entities when `draw_viewports_first` says so. A
         // model leaf is listed once per drawn viewport and its map is composed only when it is
@@ -1588,11 +1616,11 @@ impl<'a> PvecConversion<'a> {
                     _ => None,
                 };
                 chosen.push(
-                    (0..p.eligible.len())
+                    (0..p.len())
                         .filter(|&i| {
-                            p.eligible[i]
+                            p.eligible(i)
                                 && window.as_ref().is_none_or(|(map, rect)| {
-                                    p.boxes[i].is_none_or(|b| meets(b, map, *rect))
+                                    p.bounds(i).is_none_or(|b| meets(b, map, *rect))
                                 })
                         })
                         .collect(),
@@ -1613,8 +1641,8 @@ impl<'a> PvecConversion<'a> {
             })
             .saturating_add(count(items.len()))
             .saturating_add(count(p.excluded.len()))
-            .saturating_add(count(p.flat.skipped.len()))
-            .saturating_add(count(p.flat.unplaced.len()));
+            .saturating_add(count(p.skipped.len()))
+            .saturating_add(count(p.unplaced.len()));
             let ceiling = view_profile.limits.max_entities;
             if observed > ceiling {
                 return Err(PvecConvertError::Flatten(FlattenError::Limit {
@@ -1626,20 +1654,20 @@ impl<'a> PvecConversion<'a> {
             }
             over(
                 "viewport leaves",
-                p.leaves.saturating_mul(MODEL_LEAF_BYTES).saturating_add(
+                self.carried.saturating_add(p.held).saturating_add(
                     // A leaf a viewport takes costs about 64 bytes while it is listed and classified.
                     count(listed).saturating_mul(64),
                 ),
             )?;
             for (n, &k) in drawn.iter().enumerate() {
                 for &i in &chosen[n] {
-                    items.push(Item::Leaf(p.leaf(i)));
+                    items.push(Item::Model(p, i));
                     via.push((u32::try_from(k).unwrap_or(u32::MAX - 2) + 1, Some(k)));
                 }
             }
         }
         let once = u32::try_from(windows.len()).unwrap_or(u32::MAX - 2) + 1;
-        if let Some((mv, mf)) = pass.as_ref().map(|p| (p, &p.flat)) {
+        if let Some(mv) = pass.as_ref() {
             let excluded: BTreeSet<u64> = mv
                 .excluded
                 .iter()
@@ -1649,20 +1677,15 @@ impl<'a> PvecConversion<'a> {
                 items.push(Item::Excluded(x));
                 via.push((once, None));
             }
-            for s in &mf.skipped {
+            for s in &mv.skipped {
                 if s.insert_handle.is_some_and(|h| excluded.contains(&h.get())) {
                     continue;
                 }
                 items.push(Item::Skipped(s));
                 via.push((once, None));
             }
-            for u in &mf.unplaced {
-                let p = &u.entity.provenance;
-                if model_layers.contains_key(&(
-                    p.handle.map(|h| h.get()),
-                    p.block_path.to_string(),
-                    p.class_name.clone(),
-                )) {
+            for u in &mv.unplaced {
+                if mv.keeps(&leaf_key_of(&u.entity.provenance)) {
                     items.push(Item::Unplaced(u));
                     via.push((once, None));
                 }
@@ -1680,6 +1703,7 @@ impl<'a> PvecConversion<'a> {
                 f.entity.provenance.handle,
                 i as u64,
             ),
+            Item::Model(p, n) => (p.path_of(*n), p.handle_of(*n), i as u64),
             Item::Excluded(x) => (&x.block_path, x.handle, i as u64),
             Item::Skipped(s) => (&s.block_path, s.insert_handle, i as u64),
             Item::Unplaced(u) => (
@@ -1969,7 +1993,17 @@ impl<'a> PvecConversion<'a> {
                 // own here, the moment it is classified (#1563).
                 // A polyline with a width (#1718): one width is a stroke of that width, and a width
                 // that changes along it is the outline of the polygon it covers, drawn in its place.
-                let widths = match &items[at] {
+                let model_leaf;
+                let model_item;
+                let current: &Item<'_> = match &items[at] {
+                    Item::Model(p, n) => {
+                        model_leaf = p.leaf(*n);
+                        model_item = Item::Leaf(&model_leaf);
+                        &model_item
+                    }
+                    other => other,
+                };
+                let widths = match current {
                     Item::Leaf(f)
                         if matches!(
                             f.entity.provenance.class_name.as_str(),
@@ -1992,7 +2026,7 @@ impl<'a> PvecConversion<'a> {
                 };
                 let outlined_leaf;
                 let outlined;
-                let base: &Item<'_> = match (&widths, &items[at]) {
+                let base: &Item<'_> = match (&widths, current) {
                     (Some(Widths::Outline(ring)), Item::Leaf(f)) => {
                         let mut leaf = (*f).clone();
                         if let RawGeometry::Polyline {
@@ -2041,6 +2075,7 @@ impl<'a> PvecConversion<'a> {
                 let stand_in;
                 let raw: &RawEntity = match item {
                     Item::Leaf(f) => &f.entity,
+                    Item::Model(..) => unreachable!("a model leaf is put back together above"),
                     Item::Unplaced(u) => &u.entity,
                     Item::Excluded(x) => {
                         stand_in = stub(
@@ -2154,12 +2189,9 @@ impl<'a> PvecConversion<'a> {
                             overridden |= cold(parent) && by_override(parent);
                         }
                     }
-                    let frozen = through_cold
-                        || model_layers
-                            .get(&flat_key(f))
-                            .is_some_and(|layer| cold(layer));
-                    overridden |= model_layers
-                        .get(&flat_key(f))
+                    let frozen =
+                        through_cold || model_layer(&flat_key(f)).is_some_and(|layer| cold(layer));
+                    overridden |= model_layer(&flat_key(f))
                         .is_some_and(|layer| cold(layer) && by_override(layer));
                     if frozen {
                         if view_profile.layers.frozen_in_viewport == ViewportFreezeRule::Apply {
@@ -3059,7 +3091,10 @@ impl<'a> PvecConversion<'a> {
                                 layer: match item {
                                     Item::Leaf(f) => {
                                         let key = flat_key(f);
-                                        kept.get(&key).or_else(|| model_layers.get(&key)).cloned()
+                                        kept.get(&key)
+                                            .map(String::as_str)
+                                            .or_else(|| model_layer(&key))
+                                            .map(str::to_owned)
                                     }
                                     _ => None,
                                 }
@@ -4068,6 +4103,8 @@ impl Gate {
 /// expanded, or a leaf of a block out of the plan's plane with no image in the plan (#1609).
 enum Item<'a> {
     Leaf(&'a FlatEntity),
+    /// Leaf `1` of a model pass, put back together when it is classified (#1726).
+    Model(&'a ModelPass, usize),
     Excluded(&'a ExcludedEntity),
     Skipped(&'a SkippedInsert),
     Unplaced(&'a UnplacedLeaf),
@@ -4126,39 +4163,324 @@ fn line_leaves<P: DwgProvider>(
     (lines, replaced)
 }
 
+/// A leaf's geometry in the least room that gives back the same [`RawGeometry`], bit for bit: a line,
+/// an arc or a circle in the drawing's plane and a polyline in it are held as their numbers alone,
+/// anything else as the value it is.
+enum Shape {
+    Line([f64; 6]),
+    Arc {
+        center: [f64; 3],
+        radius: f64,
+        start: f64,
+        end: f64,
+    },
+    Circle {
+        center: [f64; 3],
+        radius: f64,
+    },
+    Poly {
+        vertices: Box<[RawVertex]>,
+        closed: bool,
+        elevation: f64,
+    },
+    Other(Box<RawGeometry>),
+}
+
+/// The normal that says a curve lies in the drawing's plane, compared by bits so that taking it back
+/// out gives the very value that went in.
+const UP: [u64; 3] = [0, 0, 0x3FF0_0000_0000_0000];
+
+/// What the allocator adds to each block it hands out, as far as the budget is concerned.
+const BLOCK_OVERHEAD: u64 = 16;
+
+/// The bytes a geometry holds on the heap, counted the way the budget's guard counts them.
+fn geometry_heap(g: &RawGeometry) -> u64 {
+    let n = |len: usize, each: usize| (len as u64).saturating_mul(each as u64) + BLOCK_OVERHEAD;
+    match g {
+        RawGeometry::Polyline { vertices, .. } => n(vertices.len(), size_of::<RawVertex>()),
+        RawGeometry::Spline {
+            control_points,
+            knots,
+            weights,
+            ..
+        } => {
+            let each = |f: &SourceFact<Vec<f64>>| match f {
+                SourceFact::Present(v) => n(v.len(), size_of::<f64>()),
+                _ => 0,
+            };
+            n(control_points.len(), size_of::<[f64; 3]>()) + each(knots) + each(weights)
+        }
+        RawGeometry::Insert(r) => n(r.block_name.len(), 1),
+        RawGeometry::Unmapped { reason } => n(reason.len(), 1),
+        _ => 0,
+    }
+}
+
+impl Shape {
+    fn of(g: RawGeometry) -> Self {
+        let up = |n: &[f64; 3]| n.map(f64::to_bits) == UP;
+        match g {
+            RawGeometry::Line { start, end } => {
+                Self::Line([start[0], start[1], start[2], end[0], end[1], end[2]])
+            }
+            RawGeometry::Arc {
+                center,
+                radius,
+                start_angle,
+                end_angle,
+                normal,
+            } if up(&normal) => Self::Arc {
+                center,
+                radius,
+                start: start_angle,
+                end: end_angle,
+            },
+            RawGeometry::Circle {
+                center,
+                radius,
+                normal,
+            } if up(&normal) => Self::Circle { center, radius },
+            RawGeometry::Polyline {
+                vertices,
+                closed,
+                elevation,
+                normal,
+            } if up(&normal) => Self::Poly {
+                vertices: vertices.into_boxed_slice(),
+                closed,
+                elevation,
+            },
+            other => Self::Other(Box::new(other)),
+        }
+    }
+
+    fn geometry(&self) -> RawGeometry {
+        let up = [0.0, 0.0, 1.0];
+        match self {
+            Self::Line([a, b, c, d, e, f]) => RawGeometry::Line {
+                start: [*a, *b, *c],
+                end: [*d, *e, *f],
+            },
+            Self::Arc {
+                center,
+                radius,
+                start,
+                end,
+            } => RawGeometry::Arc {
+                center: *center,
+                radius: *radius,
+                start_angle: *start,
+                end_angle: *end,
+                normal: up,
+            },
+            Self::Circle { center, radius } => RawGeometry::Circle {
+                center: *center,
+                radius: *radius,
+                normal: up,
+            },
+            Self::Poly {
+                vertices,
+                closed,
+                elevation,
+            } => RawGeometry::Polyline {
+                vertices: vertices.to_vec(),
+                closed: *closed,
+                elevation: *elevation,
+                normal: up,
+            },
+            Self::Other(g) => (**g).clone(),
+        }
+    }
+
+    /// What this holds beyond the [`Leaf`] it sits in.
+    fn heap(&self) -> u64 {
+        match self {
+            Self::Poly { vertices, .. } => {
+                (vertices.len() as u64).saturating_mul(size_of::<RawVertex>() as u64)
+                    + BLOCK_OVERHEAD
+            }
+            Self::Other(g) => size_of::<RawGeometry>() as u64 + BLOCK_OVERHEAD + geometry_heap(g),
+            _ => 0,
+        }
+    }
+}
+
+/// One leaf of the model pass. What many leaves share (the instance path, the map, the style, the
+/// class and layer names) is held once in the pass and named here by index.
+struct Leaf {
+    shape: Shape,
+    handle: Option<crate::cad::ItemHandle>,
+    path: u32,
+    matrix: u32,
+    style: u32,
+    class: u32,
+    layer: u32,
+    edge_on: bool,
+    /// Drawn when a viewport shows it.
+    eligible: bool,
+}
+
+/// What the view pass decided for one leaf, by its handle, block path and class.
+struct Row {
+    has_handle: bool,
+    handle: u64,
+    path: u32,
+    class: u32,
+    layer: u32,
+    paint: LeafPaint,
+}
+
+impl Row {
+    fn key(&self) -> (bool, u64, u32, u32) {
+        (self.has_handle, self.handle, self.path, self.class)
+    }
+}
+
+/// The view pass's decisions, kept as a sorted table of small rows in place of its entities.
+struct Decisions {
+    rows: Vec<Row>,
+    /// Class and layer names, by index.
+    names: Vec<String>,
+    named: HashMap<String, u32>,
+    /// The block paths of the rows, as text, by index.
+    walks: HashMap<String, u32>,
+}
+
+impl Decisions {
+    fn name(&mut self, s: &str) -> u32 {
+        if let Some(&i) = self.named.get(s) {
+            return i;
+        }
+        let i = u32::try_from(self.names.len()).unwrap_or(u32::MAX);
+        self.names.push(s.to_owned());
+        self.named.insert(s.to_owned(), i);
+        i
+    }
+
+    /// The row of the leaf with this handle, block path and class. When the view pass met the same key
+    /// twice, the later row.
+    fn row(&self, key: &LeafKey) -> Option<&Row> {
+        let want = (
+            key.0.is_some(),
+            key.0.unwrap_or(0),
+            *self.walks.get(key.1.as_str())?,
+            *self.named.get(key.2.as_str())?,
+        );
+        let end = self.rows.partition_point(|r| r.key() <= want);
+        end.checked_sub(1)
+            .map(|i| &self.rows[i])
+            .filter(|r| r.key() == want)
+    }
+}
+
 /// What one pass over model space leaves behind (#1713): the leaves it flattened, which of them
 /// the profile keeps, and a conservative box for each so a viewport can take only the ones it shows.
-/// The view pass's own rows are dropped once their layer and colour are kept.
+/// The view pass's own rows are dropped once their layer and colour are kept, and the leaves are held
+/// compactly (#1726): the pass is the largest thing a plot carries from sheet to sheet.
 pub(crate) struct ModelPass {
     key: ViewProfile,
     excluded: Vec<ExcludedEntity>,
-    flat: Flattened,
-    lines: Vec<FlatEntity>,
-    layers: BTreeMap<LeafKey, String>,
-    paints: BTreeMap<LeafKey, LeafPaint>,
-    /// Per leaf (the flattened ones, then `lines`): drawn when a viewport shows it.
-    eligible: Vec<bool>,
-    /// Per leaf: its box in model coordinates, when a cheap one is known.
-    boxes: Vec<Option<[f64; 4]>>,
+    skipped: Vec<SkippedInsert>,
+    unplaced: Vec<UnplacedLeaf>,
+    /// The flattened leaves, then the lines drawn for annotations.
+    leaves: Vec<Leaf>,
+    /// Per leaf: its box in model coordinates, rounded outwards to single precision; NaN where no
+    /// cheap box is known.
+    boxes: Vec<[f32; 4]>,
+    paths: Vec<crate::pvec::InstancePath>,
+    matrices: Vec<[f64; 6]>,
+    styles: Vec<EntityStyle>,
+    decisions: Decisions,
     /// The flattened leaves the profile keeps.
     shown: usize,
-    leaves: u64,
+    /// What the pass holds, in bytes, counted from what it built.
+    held: u64,
 }
 
-/// What the model pass is estimated to hold per leaf, in bytes: the flattened leaf, the layer and
-/// colour maps and its box. Measured at 0.8 to 1 KiB on a large drawing.
-const MODEL_LEAF_BYTES: u64 = 1024;
+/// The largest single-precision number not above `x`, and the smallest not below it.
+fn f32_floor(x: f64) -> f32 {
+    let f = x as f32;
+    if f64::from(f) > x { f.next_down() } else { f }
+}
+fn f32_ceil(x: f64) -> f32 {
+    let f = x as f32;
+    if f64::from(f) < x { f.next_up() } else { f }
+}
+
+/// A guard's refusal while the model pass is read, as the budget's own: the guard counts against the
+/// ceiling left once the opened drawing is paid for.
+fn as_budget(e: PvecConvertError, carried: u64, ceiling: u64, layout: &str) -> PvecConvertError {
+    let observed = match &e {
+        PvecConvertError::View(ViewProfileError::Limit(LimitError::Exceeded {
+            limit: Limit::AllocationBytes,
+            observed,
+            ..
+        }))
+        | PvecConvertError::Flatten(FlattenError::Limit {
+            limit: Limit::AllocationBytes,
+            observed,
+            ..
+        }) => *observed,
+        _ => return e,
+    };
+    PvecConvertError::AllocationBudget {
+        stage: "model pass",
+        layout: layout.to_owned(),
+        observed: observed.saturating_add(carried),
+        ceiling,
+    }
+}
 
 impl ModelPass {
+    /// Walks model space under `key`'s rules. `carried` is what the plot already holds (the opened
+    /// drawing): the walks are bounded by what is left of the allocation ceiling, and one that passes it
+    /// is refused as the budget's own refusal naming `layout`.
     fn build<P: DwgProvider>(
         provider: &P,
         key: ViewProfile,
         view_profile: &ViewProfile,
         model: &crate::pvec::LayoutState,
         source_name: &str,
+        carried: u64,
+        layout: &str,
     ) -> Result<Self, PvecConvertError> {
-        let view = key.apply(provider).map_err(PvecConvertError::View)?;
-        let flat = BlockResolver::new(provider, FlattenBounds::from_profile(view_profile))
+        let ceiling = view_profile.limits.max_allocation_bytes;
+        let refused = |e| as_budget(e, carried, ceiling, layout);
+        let view = key
+            .apply(provider)
+            .map_err(|e| refused(PvecConvertError::View(e)))?;
+        let mut decisions = Decisions {
+            rows: Vec::with_capacity(view.included.len()),
+            names: Vec::new(),
+            named: HashMap::new(),
+            walks: HashMap::new(),
+        };
+        for e in &view.included {
+            let p = &e.entity.provenance;
+            let walk = p.block_path.to_string();
+            let next = u32::try_from(decisions.walks.len()).unwrap_or(u32::MAX);
+            let path = *decisions.walks.entry(walk).or_insert(next);
+            let (class, layer) = (
+                decisions.name(&p.class_name),
+                decisions.name(&e.effective_layer),
+            );
+            decisions.rows.push(Row {
+                has_handle: p.handle.is_some(),
+                handle: p.handle.map_or(0, |h| h.get()),
+                path,
+                class,
+                layer,
+                paint: e.paint,
+            });
+        }
+        let excluded = view.excluded;
+        drop(view.included);
+        decisions.rows.sort_by_key(Row::key);
+        decisions.rows.shrink_to_fit();
+
+        let mut bounds = FlattenBounds::from_profile(view_profile);
+        bounds.limits.max_allocation_bytes = key.limits.max_allocation_bytes;
+        let mut flat = BlockResolver::new(provider, bounds)
             .projecting(true)
             .flatten(
                 &EntityScope::Layout(model.id),
@@ -4167,50 +4489,229 @@ impl ModelPass {
                 &mut NoProvenance,
                 &mut LineageStore::new(),
             )
-            .map_err(PvecConvertError::Flatten)?;
+            .map_err(|e| refused(PvecConvertError::Flatten(e)))?;
         let (lines, leader_lines) = line_leaves(provider, &flat.entities);
-        let mut layers = BTreeMap::new();
-        let mut paints = BTreeMap::new();
-        for e in &view.included {
-            layers.insert(leaf_key(e), e.effective_layer.clone());
-            paints.insert(leaf_key(e), e.paint);
+        let flattened = flat.entities.len();
+        let total = flattened + lines.len();
+
+        let mut leaves: Vec<Leaf> = Vec::with_capacity(total);
+        let mut boxes: Vec<[f32; 4]> = Vec::with_capacity(total);
+        let mut paths: Vec<crate::pvec::InstancePath> = Vec::new();
+        let mut path_at: HashMap<crate::pvec::InstancePath, u32> = HashMap::new();
+        let mut matrices: Vec<[f64; 6]> = Vec::new();
+        let mut matrix_at: HashMap<[u64; 6], u32> = HashMap::new();
+        let mut styles: Vec<EntityStyle> = Vec::new();
+        let mut held = 0u64;
+        let mut shown = 0usize;
+        let at = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let all = std::mem::take(&mut flat.entities)
+            .into_iter()
+            .chain(lines)
+            .enumerate();
+        for (n, f) in all {
+            let kept = decisions.row(&flat_key(&f)).is_some();
+            let unmapped = matches!(f.entity.geometry, RawGeometry::Unmapped { .. });
+            let eligible = kept && !(unmapped && leader_lines.contains(&flat_key(&f)));
+            if kept && n < flattened {
+                shown += 1;
+            }
+            debug_assert!(f.lineage_handle().is_none());
+            boxes.push(leaf_box(&f).map_or([f32::NAN; 4], |b| {
+                [
+                    f32_floor(b[0]),
+                    f32_floor(b[1]),
+                    f32_ceil(b[2]),
+                    f32_ceil(b[3]),
+                ]
+            }));
+            let (matrix, edge_on) = (f.matrix(), f.edge_on());
+            let RawEntity {
+                geometry,
+                provenance,
+                style,
+            } = f.entity;
+            let ProvenanceStub {
+                handle,
+                class_name,
+                block_path,
+                layer,
+            } = provenance;
+            let path = match path_at.get(&block_path) {
+                Some(&i) => i,
+                None => {
+                    let i = at(paths.len());
+                    path_at.insert(block_path.clone(), i);
+                    paths.push(block_path);
+                    i
+                }
+            };
+            let matrix = *matrix_at
+                .entry(matrix.map(f64::to_bits))
+                .or_insert_with(|| {
+                    matrices.push(matrix);
+                    at(matrices.len() - 1)
+                });
+            // Few styles are different, so the last few are looked at first.
+            let style = match styles
+                .iter()
+                .rposition(|s| same_style(s, &style))
+                .filter(|_| styles.len() < 4096)
+            {
+                Some(i) => at(i),
+                None => {
+                    styles.push(style);
+                    at(styles.len() - 1)
+                }
+            };
+            let shape = Shape::of(geometry);
+            held += shape.heap();
+            leaves.push(Leaf {
+                shape,
+                handle,
+                path,
+                matrix,
+                style,
+                class: decisions.name(&class_name),
+                layer: decisions.name(&layer),
+                edge_on,
+                eligible,
+            });
         }
-        let excluded = view.excluded;
-        let all = || flat.entities.iter().chain(&lines);
-        let eligible = all()
-            .map(|f| {
-                layers.contains_key(&flat_key(f))
-                    && !(matches!(f.entity.geometry, RawGeometry::Unmapped { .. })
-                        && leader_lines.contains(&flat_key(f)))
-            })
-            .collect();
-        let shown = flat
-            .entities
-            .iter()
-            .filter(|f| layers.contains_key(&flat_key(f)))
-            .count();
+        drop((path_at, matrix_at));
+        paths.shrink_to_fit();
+        matrices.shrink_to_fit();
+        styles.shrink_to_fit();
+        let stub = |s: &str| (s.len() as u64) + BLOCK_OVERHEAD + size_of::<String>() as u64;
+        held += (leaves.len() * size_of::<Leaf>()) as u64
+            + (boxes.len() * size_of::<[f32; 4]>()) as u64
+            + (decisions.rows.len() * size_of::<Row>()) as u64
+            + (matrices.len() * size_of::<[f64; 6]>()) as u64
+            + (styles.len() * size_of::<EntityStyle>()) as u64
+            + paths
+                .iter()
+                .map(|p| {
+                    size_of::<crate::pvec::InstancePath>() as u64
+                        + p.steps()
+                            .iter()
+                            .map(|s| stub(&s.block_name) + size_of::<crate::pvec::InstancePath>() as u64)
+                            .sum::<u64>()
+                })
+                .sum::<u64>()
+            // Names are held twice (the list and the map that finds them), the walks once.
+            + decisions.names.iter().map(|s| 2 * stub(s)).sum::<u64>()
+            + decisions.walks.keys().map(|s| stub(s) + 8).sum::<u64>()
+            + excluded
+                .iter()
+                .map(|x| {
+                    size_of::<ExcludedEntity>() as u64
+                        + stub(&x.class_name)
+                        + stub(&x.layer)
+                        + x.block_path.depth() as u64 * 64
+                })
+                .sum::<u64>()
+            + (flat.skipped.len() * size_of::<SkippedInsert>()) as u64
+            + flat
+                .unplaced
+                .iter()
+                .map(|u| {
+                    size_of::<UnplacedLeaf>() as u64
+                        + geometry_heap(&u.entity.geometry)
+                        + u.entity.provenance.block_path.depth() as u64 * 64
+                })
+                .sum::<u64>();
         Ok(Self {
             key,
             excluded,
-            boxes: all().map(leaf_box).collect(),
-            eligible,
+            skipped: flat.skipped,
+            unplaced: flat.unplaced,
+            leaves,
+            boxes,
+            paths,
+            matrices,
+            styles,
+            decisions,
             shown,
-            leaves: (flat.entities.len() + lines.len()) as u64,
-            layers,
-            paints,
-            flat,
-            lines,
+            held,
         })
     }
 
-    /// Leaf `i`, counting the flattened leaves first and then the lines drawn for annotations.
-    fn leaf(&self, i: usize) -> &FlatEntity {
-        self.flat
-            .entities
-            .get(i)
-            .unwrap_or_else(|| &self.lines[i - self.flat.entities.len()])
+    /// How many leaves the pass holds, the flattened ones and then the lines drawn for annotations.
+    fn len(&self) -> usize {
+        self.leaves.len()
+    }
+
+    /// Whether a viewport that shows leaf `i` draws it.
+    fn eligible(&self, i: usize) -> bool {
+        self.leaves[i].eligible
+    }
+
+    /// Leaf `i`'s box in model coordinates, when a cheap one is known.
+    fn bounds(&self, i: usize) -> Option<[f64; 4]> {
+        let b = self.boxes[i].map(f64::from);
+        b.iter().all(|v| v.is_finite()).then_some(b)
+    }
+
+    /// The instance path of leaf `i`.
+    fn path_of(&self, i: usize) -> &crate::pvec::InstancePath {
+        &self.paths[self.leaves[i].path as usize]
+    }
+
+    fn handle_of(&self, i: usize) -> Option<crate::cad::ItemHandle> {
+        self.leaves[i].handle
+    }
+
+    /// Every block path a leaf of the pass is reached through, each once, in the order the first leaf
+    /// reaching it comes.
+    fn paths(&self) -> &[crate::pvec::InstancePath] {
+        &self.paths
+    }
+
+    /// The effective layer the view pass gave the leaf with this key, when it kept it.
+    fn layer_of(&self, key: &LeafKey) -> Option<&str> {
+        self.decisions
+            .row(key)
+            .map(|r| self.decisions.names[r.layer as usize].as_str())
+    }
+
+    /// The colour the view pass gave the leaf with this key, when it kept it.
+    fn paint_of(&self, key: &LeafKey) -> Option<&LeafPaint> {
+        self.decisions.row(key).map(|r| &r.paint)
+    }
+
+    /// Whether the view pass kept the leaf with this key.
+    fn keeps(&self, key: &LeafKey) -> bool {
+        self.decisions.row(key).is_some()
+    }
+
+    /// Leaf `i`, put back together.
+    fn leaf(&self, i: usize) -> FlatEntity {
+        let l = &self.leaves[i];
+        let names = &self.decisions.names;
+        FlatEntity::assembled(
+            RawEntity {
+                geometry: l.shape.geometry(),
+                provenance: ProvenanceStub {
+                    handle: l.handle,
+                    class_name: names[l.class as usize].clone(),
+                    block_path: self.paths[l.path as usize].clone(),
+                    layer: names[l.layer as usize].clone(),
+                },
+                style: self.styles[l.style as usize].clone(),
+            },
+            self.matrices[l.matrix as usize],
+            l.edge_on,
+        )
     }
 }
+
+/// Whether two styles are the same, facet by facet.
+fn same_style(a: &EntityStyle, b: &EntityStyle) -> bool {
+    a.colour == b.colour && a.lineweight == b.lineweight && a.linetype == b.linetype
+}
+
+/// What an opened drawing is charged per byte of its file, before it is opened (#1726). A DWG of 28.5 MiB
+/// held 24 times that once opened and peaked at 30 times while opening.
+const OPENED_BYTES_PER_SOURCE_BYTE: u64 = 30;
 
 /// A box that holds the whole leaf in model coordinates, or `None` where one is not cheap (text,
 /// hatches, INSERTs, curves in a plane other than the drawing's, a rational spline with a weight
@@ -4419,6 +4920,9 @@ fn classify_item(
 ) -> Result<Done, PvecConvertError> {
     let class = raw.provenance.class_name.as_str();
     Ok(match item {
+        Item::Model(..) => {
+            unreachable!("a model leaf is put back together before it is classified")
+        }
         Item::Excluded(x) => without_geometry(x.reason.classification(class), Vec::new()),
         Item::Skipped(s) => {
             let reason = match s.reason {
