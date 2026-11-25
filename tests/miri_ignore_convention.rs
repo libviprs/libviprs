@@ -935,9 +935,10 @@ const UNANNOTATED_FS_EXCEPTIONS: &[&str] = &[];
 /// #1670 adds 1: the generated-ctb plot cell of `tests/plot_files_1670_defaults.rs`, which plots a drawing written in memory into a temp dir. It said 1503 before this line moved.
 /// #1670 adds 17: the `tests/plot_defaults_1670.rs` cells that store, load and clear the two default files in a temp dir. It said 1504 before this line moved.
 /// #1670 adds 2: the two scratch-file cells of `tests/plot_defaults_1670.rs` (a stale scratch name, threads storing at once). It said 1521 before this line moved.
-/// #1706 adds 5: the five `tests/pvec_1706_repeated_vertex.rs` cells that write a drawing with acadrust and plot it into a temp dir. It said 1523 before this line moved.
-/// #1720 adds 2: the two long-polyline cells of `tests/pvec_1706_repeated_vertex.rs` that write a drawing with acadrust and plot it into a temp dir. It said 1528 before this line moved.
-const EXPECTED_FS_TOUCHING_TESTS: usize = 1530;
+/// #1704 adds 11: the `tests/pvec_1704_*.rs` cells that plot a synthetic drawing or a layout set into a temp dir and look at what is on disk. It said 1523 before this line moved.
+/// #1715 adds 8: the `tests/pvec_1715_qpdf_check.rs` cells that write a PDF or a stand-in qpdf into a temp dir. It said 1534 before this line moved.
+/// #1706 adds 7: the seven `tests/pvec_1706_repeated_vertex.rs` cells that write a drawing with acadrust and plot it into a temp dir (five for #1706, two long-polyline cells for #1720). It said 1542 before this line moved.
+const EXPECTED_FS_TOUCHING_TESTS: usize = 1549;
 
 /// Repo root (the directory holding the root `Cargo.toml`).
 fn repo_root() -> &'static Path {
