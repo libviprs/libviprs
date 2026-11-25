@@ -122,6 +122,8 @@ fn plot(tag: &str, entity: EntityType, paper: f64, drawing: f64, lineweights: bo
     out
 }
 
+/// The polyline is drawn 0.5 units right and 5 up, so none of it falls off the sheet's lower left
+/// corner and gets cut there.
 fn lw(
     points: &[[f64; 2]],
     bulges: &[f64],
@@ -131,7 +133,7 @@ fn lw(
 ) -> EntityType {
     let mut p = LwPolyline::new();
     for (i, q) in points.iter().enumerate() {
-        let mut v = LwVertex::new(Vector2::new(q[0], q[1]));
+        let mut v = LwVertex::new(Vector2::new(q[0] + 0.5, q[1] + 5.0));
         v.bulge = bulges.get(i).copied().unwrap_or(0.0);
         let [s, e] = widths.get(i).copied().unwrap_or([0.0, 0.0]);
         v.start_width = s;
