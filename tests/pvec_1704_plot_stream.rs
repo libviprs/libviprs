@@ -241,6 +241,47 @@ fn issue_1704_a_streamed_file_has_one_xref_table_and_the_pages_in_order() {
     let _ = fs::remove_dir_all(dir);
 }
 
+/// Every in-use entry of the cross reference table points at the byte where its own
+/// `N 0 obj` starts, and `startxref` points at the table.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn issue_1704_every_xref_offset_lands_on_its_object() {
+    let dir = scratch("offsets");
+    let dest = dir.join("plot.pdf");
+    let bytes = support::drawing(4, 30);
+    run(&bytes, &dest, 4).unwrap();
+    // Streams are binary, so offsets are read against the bytes and not a decoded string.
+    let raw = fs::read(&dest).unwrap();
+    let find = |needle: &[u8]| {
+        raw.windows(needle.len())
+            .rposition(|w| w == needle)
+            .unwrap()
+    };
+    let line = |at: usize| {
+        let end = raw[at..].iter().position(|b| *b == b'\n').unwrap();
+        String::from_utf8(raw[at..at + end].to_vec()).unwrap()
+    };
+    let tail = find(b"startxref\n") + 10;
+    let start: usize = line(tail).parse().unwrap();
+    assert_eq!(line(start), "xref", "startxref points at the table");
+    let head = line(start + 5);
+    let size: usize = head.split(' ').nth(1).unwrap().parse().unwrap();
+    let mut at_line = start + 5 + head.len() + 1;
+    assert_eq!(line(at_line), "0000000000 65535 f ");
+    for n in 1..size {
+        at_line += 21;
+        let entry = line(at_line);
+        assert_eq!(entry.len(), 19, "{entry:?}");
+        assert!(entry.ends_with(" 00000 n "), "{entry:?}");
+        let at: usize = entry[..10].parse().unwrap();
+        assert!(
+            raw[at..].starts_with(format!("{n} 0 obj\n").as_bytes()),
+            "object {n} is not at byte {at}"
+        );
+    }
+    let _ = fs::remove_dir_all(dir);
+}
+
 /// One sheet loads with the structure the plot has always had: one page, the paper's MediaBox,
 /// no rotation, a Flate content stream of the sheet's strokes, and the Producer.
 #[test]
