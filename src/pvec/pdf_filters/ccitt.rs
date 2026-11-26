@@ -7,8 +7,11 @@
 //! 8) * height`, and the pixel budget has already bounded `width * height`, so a hostile stream
 //! cannot grow it.
 //!
-//! `/Columns` (default 1728) and `/Rows` have to agree with `/Width` and `/Height`: a mismatch
-//! is [`FilterError::Parms`], never a silent resize.
+//! `/Columns` (default 1728) has to agree with `/Width`: a mismatch is [`FilterError::Parms`],
+//! never a silent resize. `/Rows` is only a hint (PDF 32000-1, table 11) and `/Height` is the
+//! number of scan lines, so a different `/Rows` is ignored, as pdf.js, mupdf and poppler do
+//! (AutoCAD writes the width there, issue #1734). A stream with fewer than `/Height` rows is
+//! still a short scan.
 
 use hayro_ccitt::{DecodeError, DecodeSettings, Decoder, DecoderContext, EncodingMode};
 use lopdf::Dictionary;
@@ -103,17 +106,10 @@ pub(in crate::pvec) fn decode(input: FilterInput<'_>) -> Result<FilterOutput, Pd
     }
     let k = int(parms, b"K", 0)?;
     let columns = int(parms, b"Columns", 1728)?;
-    let rows = int(parms, b"Rows", 0)?;
     if columns != i64::from(input.width) {
         return Err(parms_err(&format!(
             "/Columns {columns} is not /Width {}",
             input.width
-        )));
-    }
-    if rows != 0 && rows != i64::from(input.height) {
-        return Err(parms_err(&format!(
-            "/Rows {rows} is not /Height {}",
-            input.height
         )));
     }
     let encoding = match k {

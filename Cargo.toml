@@ -902,6 +902,10 @@ name = "pvec_1363_pdf_ccitt"
 required-features = ["pvec-raster"]
 
 [[test]]
+name = "pvec_1734_ccitt_rows_height"
+required-features = ["pvec-write"]
+
+[[test]]
 name = "pvec_1364_pdf_jpx"
 required-features = ["pvec-raster"]
 

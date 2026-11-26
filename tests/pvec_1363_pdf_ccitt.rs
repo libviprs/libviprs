@@ -290,11 +290,12 @@ fn columns_that_disagree_with_width_are_parms() {
 }
 
 #[test]
-fn rows_that_disagree_with_height_are_parms() {
+fn rows_that_disagree_with_height_are_ignored() {
+    // /Rows is a hint (#1734): /Height decides, so the image is written.
     let mut p = small_parms(-1);
     p.set("Rows", 7);
-    let e = refusal(&ccitt(40, 8, p, dictionary! {}, G4_SMALL));
-    assert!(matches!(filter_error(&e), FilterError::Parms(_)), "{e:?}");
+    let b = bake(&ccitt(40, 8, p, dictionary! {}, G4_SMALL));
+    assert!(b.refused.is_empty(), "{:?}", b.refused);
 }
 
 #[test]
