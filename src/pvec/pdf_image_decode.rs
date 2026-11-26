@@ -278,29 +278,49 @@ fn filters(dict: &Dictionary) -> Vec<String> {
     }
 }
 
-/// The chains the bake reads: nothing, `FlateDecode`, a codec, or `FlateDecode` then a codec.
+/// Whether `name` is one of the two ASCII stages, which only re-encode bytes as text.
+fn is_ascii_stage(name: &str) -> bool {
+    matches!(name, "ASCIIHexDecode" | "ASCII85Decode")
+}
+
+/// The chains the bake reads: `FlateDecode`, a codec and `FlateDecode` then a codec as before,
+/// with `ASCIIHexDecode` or `ASCII85Decode` stages allowed anywhere in front of the codec.
 fn check_filters(filters: &[String]) -> Result<(), PdfImageError> {
-    let ok = match filters
+    let core: Vec<&str> = filters
         .iter()
         .map(String::as_str)
-        .collect::<Vec<_>>()
-        .as_slice()
-    {
+        .filter(|f| !is_ascii_stage(f))
+        .collect();
+    let ok = match core.as_slice() {
         [] | ["FlateDecode"] => true,
-        [codec] | ["FlateDecode", codec] => is_codec(codec),
+        [codec] | ["FlateDecode", codec] => {
+            is_codec(codec) && filters.last().is_some_and(|l| l == codec)
+        }
         _ => false,
     };
     if ok {
         return Ok(());
     }
-    // Refuse by the first name that is not a plain Flate or a codec, so the report says which.
+    // Refuse by the first name that is not a plain Flate, an ASCII stage or a codec, so the
+    // report says which.
     let culprit = filters
         .iter()
-        .find(|f| f.as_str() != "FlateDecode" && !is_codec(f))
+        .find(|f| f.as_str() != "FlateDecode" && !is_codec(f) && !is_ascii_stage(f))
         .or_else(|| filters.first())
         .cloned()
         .unwrap_or_default();
     Err(PdfImageError::UnsupportedFilter(culprit))
+}
+
+/// One ASCII stage undone, through the reader the content streams use. It can only shrink.
+fn ascii_decode(filter: &str, data: &[u8]) -> Result<Vec<u8>, PdfImageError> {
+    let mut dict = Dictionary::new();
+    dict.set("Filter", Object::Name(filter.as_bytes().to_vec()));
+    let mut stream = lopdf::Stream::new(dict, data.to_vec());
+    stream.allows_compression = false;
+    stream
+        .decompressed_content()
+        .map_err(|e| bad(format!("{filter}: {e}")))
 }
 
 /// The last filter of the chain, or `none`.
@@ -320,7 +340,6 @@ fn unfilter(
     budget: DecodeLimits,
 ) -> Result<FilterOutput, PdfImageError> {
     let ncomp = space.map_or(4, Space::components);
-    let flate = filters.first().is_some_and(|f| f == "FlateDecode");
     let codec = filters.last().map(String::as_str).filter(|f| is_codec(f));
     let mut data = std::borrow::Cow::Borrowed(raw.content.as_slice());
     // The room a codestream inside Flate has: no row structure, so the room of a raw image.
@@ -328,20 +347,44 @@ fn unfilter(
         .saturating_mul(height as usize)
         .saturating_mul(4)
         .saturating_add(1 << 20);
-    if flate {
-        let cap = if codec.is_some() {
-            codestream_room
+    let room = if codec.is_some() {
+        codestream_room
+    } else {
+        (row_bytes(width, ncomp, bpc.unwrap_or(16)) + 1)
+            .saturating_mul(height as usize)
+            .saturating_add(4096)
+    };
+    let stages = filters.len() - usize::from(codec.is_some());
+    for (i, stage) in filters[..stages].iter().enumerate() {
+        if is_ascii_stage(stage) {
+            let decoded = ascii_decode(stage, &data)?;
+            if i + 1 == stages && decoded.len() > room {
+                return Err(bad("the image stream is longer than its dimensions allow"));
+            }
+            data = std::borrow::Cow::Owned(decoded);
+            continue;
+        }
+        // FlateDecode. Text that an ASCII stage turns into the samples afterwards is at most
+        // twice its size (hex), and a predictor cannot be read from under such a stage.
+        let ascii_follows = filters[i + 1..stages].iter().any(|f| is_ascii_stage(f));
+        let parms = parms_for(&raw.dict, i);
+        let cap = if ascii_follows {
+            room.saturating_mul(2).saturating_add(4096)
         } else {
-            let row_bytes = row_bytes(width, ncomp, bpc.unwrap_or(16));
-            (row_bytes + 1)
-                .saturating_mul(height as usize)
-                .saturating_add(4096)
+            room
         };
         let mut inflated = crate::pdf::flate_decompress(&data, cap).map_err(PdfImageError::Pdf)?;
-        if codec.is_none() {
+        if ascii_follows {
+            let predictor = parms
+                .and_then(|p| p.get(b"Predictor").ok())
+                .and_then(|o| o.as_i64().ok());
+            if predictor.is_some_and(|p| p > 1) {
+                return Err(bad("a /Predictor under an ASCII stage"));
+            }
+        } else if codec.is_none() {
             inflated = {
                 let max_row = inflated.len();
-                unpredict(parms_for(&raw.dict, 0), inflated, max_row).map_err(bad)?
+                unpredict(parms, inflated, max_row).map_err(bad)?
             };
         }
         data = std::borrow::Cow::Owned(inflated);

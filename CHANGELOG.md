@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A PDF image behind an `ASCII85Decode` or `ASCIIHexDecode` stage is baked, not refused** (issue #1732). The image filter chain now reads those two stages around the Flate stage, in the image's own stream and in its `/SMask`, so an AutoCAD site plan whose RGB regions carry a `[/FlateDecode /ASCII85Decode]` soft mask keeps its colour instead of every picture coming back as `unsupported-filter:ASCII85Decode`. The stages go through the reader the content streams already use, they can only shrink, and the pixel and stream limits hold as before. A `/Predictor` under an ASCII stage is a refusal. Tests in `tests/pvec_1732_pdf_image_ascii85.rs`.
+
 ## [0.7.0] — 2026-11-25
 
 ### Breaking
