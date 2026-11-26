@@ -335,6 +335,7 @@ annotated   fs-detected  tests/n_pages_meaning.rs::a_count_that_is_not_a_page_co
 annotated   fs-detected  tests/n_pages_meaning.rs::exactly_one_source_file_names_the_shared_key
 annotated   fs-detected  tests/n_pages_meaning.rs::no_source_file_has_real_code_past_its_cut
 annotated   fs-detected  tests/n_pages_meaning.rs::only_the_four_page_counting_loaders_attach_it
+annotated   not-detected tests/no_default_features_1730.rs::the_library_checks_with_no_default_features
 annotated   fs-detected  tests/oracle_capture_json.rs::every_json_dump_call_site_refuses_a_non_finite_float
 annotated   fs-detected  tests/oracle_capture_json.rs::every_oracle_capture_is_strict_json
 annotated   fs-detected  tests/oracle_capture_json.rs::the_repaired_captures_still_record_a_real_infinity_and_a_real_nan
