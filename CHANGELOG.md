@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-25
+
 ### Breaking
 
 - **`Annotation::Fill` gains a field, `pattern_lines`, and `PvecConversionOutput` gains `hatch_patterns`** (issue #1670). `Annotation` is `#[non_exhaustive]` but its variants are not, on purpose (see MIGRATION.md): a downstream provider that builds `Annotation::Fill { .. }` with a struct literal, or matches it exhaustively, stops compiling until it adds `pattern_lines: vec![]` (or the pattern's lines), and a struct literal of `PvecConversionOutput` needs `hatch_patterns`. Nothing else about either type changed. See "`Annotation::Fill` gains `pattern_lines`" in MIGRATION.md.
@@ -31,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The library builds with `--no-default-features` again** (issue #1730). `pvec::emf` (#1705) was compiled in every build but needs `pvec-numeric`, which only `pvec-spline` and `pvec-normalized` bring in, so a dependent with `default-features = false` could not build the core. The module is now behind `pvec-normalized`, like the rest of the `pvec` modules that use it. Test in `tests/no_default_features_1730.rs`.
 - **`read_page` in the PDF plot takes the plot instead of two of its settings** (issue #1722). It had eight arguments, one over clippy's `too_many_arguments` limit, and the lint only showed with `--features pvec-convert`. The hairline limit and the monochrome flag are now read from the `PdfPlot` it is given, so the signature has seven. No behaviour change.
 - **A polyline's own width survives the built-in default plot style** (issue #1723). A `PdfPlot` with no `plot_style_table` drew every stroke at the default's 0.25 mm, which overrode the width a polyline carries (#1718), so a plain plot never showed it and the bulged-width spec of #1717 had to pass an identity table to see it. The default's 0.25 mm is now the lineweight of every stroke in a monochrome plot, not a fixed width at the page writer, so a polyline's constant width, geometry as it is, wins over it, as it does over a table's pen. A polyline of width 0, a line and every other stroke stay at 0.25 mm, and a plot with a table is unchanged. Tests in `tests/pvec_1723_default_width.rs`; the bulged-width spec of #1718 no longer passes an identity table.
 - **A plot draws a polyline that has a repeated vertex** (issues #1706 and #1720). The conversion refused the whole LWPOLYLINE or 2D POLYLINE with `coincident-vertices` when two consecutive points were one point to PVec, so every such polyline vanished from a sheet. A plotter skips the zero length side and draws the rest. When the conversion is asked for the plan (`PdfPlot` does), one pass drops each vertex that repeats the one before it (and a closing vertex equal to the first), keeps the bulge of the side that starts at the survivor, and counts the repeats in a warning, then the extraction runs once more; a conversion that is not a plot still refuses the polyline, and one left with fewer than two distinct points is still refused without failing the plot. Amends P-1 of `docs/adr/pvec-print-profile.md`. Tests in `tests/pvec_1706_repeated_vertex.rs`.
@@ -9063,6 +9066,7 @@ common 0.2.0 call sites.
 
 Phase-3 hardening: manifest v1, sinks, resume, retry, dedupe, tracing.
 
+[0.7.0]: https://github.com/libviprs/libviprs/releases/tag/v0.7.0
 [0.6.1]: https://github.com/libviprs/libviprs/releases/tag/v0.6.1
 [0.6.0]: https://github.com/libviprs/libviprs/releases/tag/v0.6.0
 [0.5.1]: https://github.com/libviprs/libviprs/releases/tag/v0.5.1

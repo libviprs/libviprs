@@ -484,7 +484,7 @@ const EXPECTED_SRC_MODULES: usize = 31;
 /// #1475 adds 1: `tests/pvec_drift.rs::n_1471_the_example_prints_both_reports_and_fails_on_drift`, which runs the `pvec_drift` example. It said 57 before this line moved.
 /// #1515 adds 1: `tests/pvec_bounded_memory_bench.rs::bounded_memory_stages_bench`, which runs its children. It said 58 before this line moved.
 /// #1670 adds 2: the two `tests/pvec_1670_owner_layouts.rs` cells, which run `tools/plot_recall.py` (and are inert without the owner's files). It said 59 before this line moved.
-const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 61;
+const EXPECTED_PROCESS_SPAWNING_TESTS: usize = 62;
 
 /// The filesystem-touching tests still allowed to run under Miri, and so still
 /// allowed to end the whole run on their first syscall.
