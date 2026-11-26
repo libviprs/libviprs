@@ -9,6 +9,7 @@
 use std::process::Command;
 
 #[test]
+#[cfg_attr(miri, ignore)]
 fn the_library_checks_with_no_default_features() {
     let manifest = env!("CARGO_MANIFEST_DIR");
     let out = Command::new(env!("CARGO"))
