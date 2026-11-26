@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-25
+
 ### Breaking
 
 - **`Annotation::Fill` gains a field, `pattern_lines`, and `PvecConversionOutput` gains `hatch_patterns`** (issue #1670). `Annotation` is `#[non_exhaustive]` but its variants are not, on purpose (see MIGRATION.md): a downstream provider that builds `Annotation::Fill { .. }` with a struct literal, or matches it exhaustively, stops compiling until it adds `pattern_lines: vec![]` (or the pattern's lines), and a struct literal of `PvecConversionOutput` needs `hatch_patterns`. Nothing else about either type changed. See "`Annotation::Fill` gains `pattern_lines`" in MIGRATION.md.
@@ -9063,6 +9065,7 @@ common 0.2.0 call sites.
 
 Phase-3 hardening: manifest v1, sinks, resume, retry, dedupe, tracing.
 
+[0.7.0]: https://github.com/libviprs/libviprs/releases/tag/v0.7.0
 [0.6.1]: https://github.com/libviprs/libviprs/releases/tag/v0.6.1
 [0.6.0]: https://github.com/libviprs/libviprs/releases/tag/v0.6.0
 [0.5.1]: https://github.com/libviprs/libviprs/releases/tag/v0.5.1
