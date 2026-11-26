@@ -52,6 +52,8 @@ pub mod dump;
 #[cfg(feature = "pvec-normalized")]
 #[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod dwg_basic;
+#[cfg(feature = "pvec-normalized")]
+#[cfg_attr(docsrs, doc(cfg(feature = "pvec-normalized")))]
 pub mod emf;
 pub mod fidelity;
 pub mod fill_policy;
